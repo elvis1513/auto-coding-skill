@@ -1,96 +1,101 @@
 # auto-coding-skill
 
-Portable, framework-agnostic engineering workflow skill for:
+Framework-agnostic engineering workflow skill for:
 
 - Claude Code
 - Codex CLI
 
-It enforces an end-to-end gate:
-
-Task -> DD -> Implement -> Build/Test -> Static Analysis -> Review -> API Docs (Markdown) -> Deploy -> Smoke -> Full Regression -> Bug Log -> Summary -> Commit -> Push
-
-## Install (npm)
+## Install
 
 ```bash
-npm install -g auto-coding-skill
+npm install -g @elvis1513/auto-coding-skill
 ```
 
-## Quick start (any repo)
-
-From your target repo root:
+Fallback:
 
 ```bash
-# install skill files for Claude
-autocoding init --ai claude
+npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
+```
 
-# install skill files for Codex
+## Standard Workflow
+
+1. Install skill into project:
+
+```bash
 autocoding init --ai codex
-
-# install both
+# or
+autocoding init --ai claude
+# or both
 autocoding init --ai all
 ```
 
-Skill install locations:
-
-- `.claude/skills/auto-coding-skill`
-- `.codex/skills/auto-coding-skill`
-
-Then initialize the project scaffold (run one path that exists):
+2. Initialize docs/tooling:
 
 ```bash
-python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
-# or
 python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
+# or
+python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```
 
-This creates:
+3. Fill one config file only:
+
+- `docs/project/project-config.md`
+
+This file is the single source for:
+- build/test/lint/typecheck/smoke/regression commands
+- deployment info (ip/user/password/service/path/health)
+- docs paths
+
+Required Python deps:
+
+```bash
+pip install pyyaml requests
+```
+
+4. Let AI execute workflow by docs constraints:
 
 - `ENGINEERING.md`
-- `docs/**` (taskbook, DD/review templates, API docs, deployment/runbook, regression matrix, bug list)
-- `tools/autopipeline/ap.py` + `tools/autopipeline/core.py`
-- `.gitignore` rule: `docs/deployment/targets.yaml`
+- `docs/tasks/taskbook.md`
+- `docs/design/**`
+- `docs/interfaces/**`
+- `docs/testing/regression-matrix.md`
+- `docs/bugs/bug-list.md`
+- `docs/tasks/summaries/**`
 
-## Configure project commands
+## AGENTS.md Constraint Example
 
-```bash
-cp docs/autocoding/config.example.yaml autocoding.config.yaml
+Add this in project `AGENTS.md`:
+
+```md
+## Mandatory Skill
+- Always use `auto-coding-skill` for every implementation task.
+- Before any code change, read and obey:
+  1) ENGINEERING.md
+  2) docs/project/project-config.md
+  3) docs/tasks/taskbook.md
+- Execute gates using `python3 tools/autopipeline/ap.py`.
+- If any required doc is missing, create/update docs first, then code.
 ```
 
-Edit at least:
-
-- `commands.build`
-- `commands.test`
-- `commands.lint`
-- `commands.typecheck`
-- `commands.smoke`
-- `commands.regression`
-
-## Gate commands
+## Commands
 
 ```bash
 python3 tools/autopipeline/ap.py run build
 python3 tools/autopipeline/ap.py run test
+python3 tools/autopipeline/ap.py run lint
 python3 tools/autopipeline/ap.py verify-api-docs
 python3 tools/autopipeline/ap.py check-matrix
 python3 tools/autopipeline/ap.py gen-summary T0001-1
 python3 tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-matrix
 ```
 
-## CLI options
-
-```bash
-autocoding init --ai claude|codex|all [--mode project|global] [--dest <path>] [--force]
-```
-
-When `--ai all` and `--dest` are both used, output will be:
-
-- `<dest>/claude`
-- `<dest>/codex`
-
 ## Publish
 
 ```bash
-npm publish
+npm login
+npm whoami
+npm run release:check
+npm publish --access public
 ```
 
 ## License

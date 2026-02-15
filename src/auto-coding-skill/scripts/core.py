@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -48,8 +49,18 @@ def load_yaml(path: Path) -> Dict[str, Any]:
         raise APError(
             "PyYAML not installed. Install dependencies with: pip install pyyaml requests"
         )
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    if path.suffix.lower() in {".md", ".markdown"}:
+        text = path.read_text(encoding="utf-8")
+        m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)", text, flags=re.DOTALL)
+        if not m:
+            raise APError(
+                f"Config markdown frontmatter not found: {path}\n"
+                "Expected YAML frontmatter wrapped by '---' at top of file."
+            )
+        data = yaml.safe_load(m.group(1))
+    else:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
     return data or {}
 
 
@@ -84,20 +95,18 @@ def http_get_status(url: str, timeout_s: int = 5) -> int:
 
 
 def find_config(repo: Path) -> Path:
-    """Find autocoding config file (repo root preferred)."""
+    """Find single source project config file."""
     candidates = [
-        repo / "autocoding.config.yaml",
-        repo / "docs" / "autocoding" / "config.yaml",
-        repo / "docs" / "autocoding" / "config.yml",
+        repo / "docs" / "project" / "project-config.md",
+        repo / "project-config.md",
     ]
     for c in candidates:
         if c.exists():
             return c
-    # fall back to example if exists (for first-time users)
-    ex = repo / "docs" / "autocoding" / "config.example.yaml"
-    if ex.exists():
-        return ex
-    raise APError("autocoding config not found. Create autocoding.config.yaml (recommended) or docs/autocoding/config.yaml. Template: docs/autocoding/config.example.yaml")
+    raise APError(
+        "Project config not found. Create docs/project/project-config.md "
+        "and put all commands + deployment fields in YAML frontmatter."
+    )
 
 
 def run_shell(command: str, cwd: Optional[Path] = None) -> None:

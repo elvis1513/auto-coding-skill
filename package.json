@@ -1,10 +1,10 @@
 {
-  "name": "auto-coding-skill",
+  "name": "@elvis1513/auto-coding-skill",
   "version": "0.1.0",
   "description": "CLI installer for auto-coding-skill (Claude Code + Codex CLI).",
   "type": "module",
   "bin": {
-    "autocoding": "./cli/src/index.js"
+    "autocoding": "cli/src/index.js"
   },
   "files": [
     "cli/src",
@@ -13,9 +13,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node -c cli/src/index.js"
+    "test": "node -c cli/src/index.js",
+    "sync-assets": "node cli/src/sync-assets.js",
+    "release:check": "npm run sync-assets && npm run test && npm pack --dry-run"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "claude",
     "codex",
@@ -25,5 +30,13 @@
     "workflow",
     "ci",
     "deployment"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elvis1513/auto-coding-skill.git"
+  },
+  "homepage": "https://github.com/elvis1513/auto-coding-skill#readme",
+  "bugs": {
+    "url": "https://github.com/elvis1513/auto-coding-skill/issues"
+  }
 }

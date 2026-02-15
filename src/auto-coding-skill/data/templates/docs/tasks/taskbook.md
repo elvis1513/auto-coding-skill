@@ -18,13 +18,14 @@
   - [ ] T0001-2 <subtask>
 
 ### 证据（完成后填写）
+- 项目配置：`docs/project/project-config.md`
 - DD：`docs/design/T0001-<slug>.md`
 - Review：`docs/reviews/T0001-YYYYMMDD-HHMM.md`
 - API 文档：`docs/interfaces/api.md`
 - API Change Log：`docs/interfaces/api-change-log.md`
 - 本地CI：粘贴摘要或给出文件路径
 - 部署记录（如部署）：`docs/deployment/deploy-records/T0001-YYYYMMDD.md`
-- 回归矩阵：`docs/requirements/regression-matrix.md`（全量PASS）
+- 回归矩阵：`docs/testing/regression-matrix.md`（全量PASS）
 - Bug清单（如有）：`docs/bugs/bug-list.md`
 - 任务总结（强制）：`docs/tasks/summaries/T0001.md`
 

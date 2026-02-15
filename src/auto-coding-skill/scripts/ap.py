@@ -32,7 +32,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     copy_tree(Path(__file__).resolve().parent / "core.py", tools_dir / "core.py")
 
     gi = repo / ".gitignore"
-    secret_line = "docs/deployment/targets.yaml"
+    secret_line = "docs/project/project-config.md"
     if gi.exists():
         txt = gi.read_text(encoding="utf-8")
         if secret_line not in txt:
@@ -41,7 +41,7 @@ def cmd_install(args: argparse.Namespace) -> None:
         gi.write_text(secret_line + "\n", encoding="utf-8")
 
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: cp docs/deployment/targets.example.yaml docs/deployment/targets.yaml (fill secrets locally)")
+    print("[install] Next: edit docs/project/project-config.md and fill all project/env fields")
 
 
 def _infer_title(repo: Path, task_id: str) -> str:
@@ -60,6 +60,10 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     task_id = args.task_id
+    cfg = _load_cfg(repo)
+    docs_cfg = (cfg.get("docs") or {})
+    api_change_log = str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md"))
+    regression_matrix = str(docs_cfg.get("regression_matrix", "docs/testing/regression-matrix.md"))
 
     out_dir = repo / "docs" / "tasks" / "summaries"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -99,14 +103,14 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 ```
 
 ## 3. 接口变更（以 API Markdown 为准）
-- 变更记录位置：`docs/interfaces/api-change-log.md`
+- 变更记录位置：`{api_change_log}`
 
 ## 5. 质量门禁证据（必须可追溯）
 - 本地CI：TODO
 - 静态分析：TODO
 - Review 文档：TODO
 - DD 文档：TODO
-- 回归矩阵：`docs/requirements/regression-matrix.md`（全量 PASS，0 fail）
+- 回归矩阵：`{regression_matrix}`（全量 PASS，0 fail）
 """
 
     out_file.write_text(content, encoding="utf-8")
@@ -115,7 +119,9 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 
 def cmd_check_matrix(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
-    matrix = repo / "docs" / "requirements" / "regression-matrix.md"
+    cfg = _load_cfg(repo)
+    docs_cfg = (cfg.get("docs") or {})
+    matrix = Path(repo, str(docs_cfg.get("regression_matrix", "docs/testing/regression-matrix.md")))
     if not matrix.exists():
         raise APError(f"Matrix not found: {matrix}")
 
@@ -157,14 +163,18 @@ def cmd_run(args: argparse.Namespace) -> None:
     """
     Run a configured gate command:
       build | test | lint | typecheck | format | smoke | regression
-    Commands are read from autocoding.config.yaml (or docs/autocoding/config.yaml).
+    Commands are read from docs/project/project-config.md frontmatter.
     """
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     commands = (cfg.get("commands") or {})
     name = args.name
     if name not in commands:
-        raise APError(f"Command not configured: commands.{name}. Edit autocoding.config.yaml. Available: {', '.join(commands.keys()) or '(none)'}")
+        raise APError(
+            f"Command not configured: commands.{name}. "
+            "Edit docs/project/project-config.md. "
+            f"Available: {', '.join(commands.keys()) or '(none)'}"
+        )
     cmd = str(commands[name])
     print(f"[run] {name}: {cmd}")
     run_shell(cmd, cwd=repo)

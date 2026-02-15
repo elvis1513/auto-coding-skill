@@ -64,7 +64,7 @@ function resolveTargetDir(ai, mode, destOverride){
 
 function ensureGitignore(projectDir){
   const gi = path.join(projectDir, ".gitignore");
-  const line = "docs/deployment/targets.yaml";
+  const line = "docs/project/project-config.md";
   if (!exists(gi)) {
     fs.writeFileSync(gi, `${line}\n`, "utf-8");
     return;

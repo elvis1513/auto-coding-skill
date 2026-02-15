@@ -1,66 +1,62 @@
 ---
 name: auto-coding-skill
-description: Framework-agnostic engineering workflow skill for Claude Code and Codex CLI. Use it to scaffold docs and enforce gates from task intake to design, implementation, test, review, API docs, deployment, regression, summary, commit and push.
+description: Use for strict project engineering workflow in Claude/Codex. It initializes docs and enforces taskbook -> design -> implement -> quality gates -> docs -> deploy -> regression -> summary -> commit/push.
 ---
 
-# Auto Coding Skill (Claude + Codex Only)
-
-This skill is portable across projects and does not depend on any specific scaffold.
+# Auto Coding Skill (Claude + Codex)
 
 ## Supported clients
 
 - Claude Code
 - Codex CLI
 
-## Workflow gates
+## Entry
 
-Taskbook -> DD -> Implement -> Build/Test -> Static Analysis -> Review -> API Docs -> Deploy -> Smoke -> Regression Matrix (0 fail) -> Summary -> Commit -> Push
-
-## Install into a target repo
-
-From the target repo root:
+1) Install skill files into target repo:
 
 ```bash
-# Claude Code
-autocoding init --ai claude
-
-# Codex CLI
 autocoding init --ai codex
-
-# Both
-autocoding init --ai all
+# or claude / all
 ```
 
-## Initialize project scaffold
-
-Run one of the following (depending on where the skill was installed):
+2) Initialize docs/tooling:
 
 ```bash
-python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
-# or
 python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
+# or .claude path
 ```
 
-This will create `ENGINEERING.md`, `docs/**`, `tools/autopipeline/ap.py`, and update `.gitignore` with `docs/deployment/targets.yaml`.
-
-## Configure project commands
-
-Copy and edit config:
+Install runtime deps:
 
 ```bash
-cp docs/autocoding/config.example.yaml autocoding.config.yaml
+pip install pyyaml requests
 ```
 
-Set at least:
+## Single manual config file
 
-- `commands.build`
-- `commands.test`
-- `commands.lint`
-- `commands.typecheck`
-- `commands.smoke`
-- `commands.regression`
+Fill only this file:
 
-## Common commands
+- `docs/project/project-config.md`
+
+YAML frontmatter in this file contains:
+- `commands.*`
+- `deployment.*`
+- `docs.*`
+
+Do not duplicate config in other md/yaml files.
+
+## Execution order
+
+1) `ENGINEERING.md`
+2) `docs/project/project-config.md`
+3) `docs/tasks/taskbook.md`
+4) `docs/design/**`
+5) implementation
+6) run gates via `python3 tools/autopipeline/ap.py`
+7) update API docs + regression matrix + bug list + summary
+8) commit/push
+
+## Commands
 
 ```bash
 python3 tools/autopipeline/ap.py run build

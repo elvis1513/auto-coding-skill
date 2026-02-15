@@ -1,10 +1,10 @@
 # Review — <Task ID> — YYYY-MM-DD HH:MM
 
 ## 1. 静态分析结果（必须）
-- Command：lint + typecheck（来自 autocoding.config.yaml）
+- Command：lint + typecheck（来自 docs/project/project-config.md）
 - Summary：
 - Issues：
-- Resolved/Deferred（deferred 必须 ADR）：
+- Resolved/Deferred（deferred 必须给出后续任务）：
 
 ## 2. 代码质量
 ## 3. 测试质量（含新增回归用例）

@@ -28,11 +28,12 @@
 - 回滚方式：
 
 ## 5. 质量门禁证据（必须可追溯）
+- 项目配置：`docs/project/project-config.md`
 - 本地CI：`ci-local`
 - 静态分析：`static`
 - Review 文档：`docs/reviews/<TASK_ID>-<timestamp>.md`
 - API 文档：`docs/interfaces/api.md`
-- 回归矩阵：`docs/requirements/regression-matrix.md`（全量 PASS，0 fail）
+- 回归矩阵：`docs/testing/regression-matrix.md`（全量 PASS，0 fail）
 
 ## 6. Bug 清单与回归用例
 - 新增/确认的 Bug（写入 `docs/bugs/bug-list.md`）：

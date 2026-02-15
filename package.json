@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI installer for auto-coding-skill (Claude Code + Codex CLI).",
   "type": "module",
   "bin": {

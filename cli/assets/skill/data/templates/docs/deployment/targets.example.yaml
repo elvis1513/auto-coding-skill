@@ -1,0 +1,23 @@
+target:
+  host: "192.168.1.10"
+  user: "root"
+  password: "CHANGE_ME"
+  ssh_port: 22
+
+service:
+  name: "myapp.service"
+  systemd_dir: "/usr/lib/systemd/system"
+  local_file: "app/systemd/myapp.service"
+
+paths:
+  remote_app_root: "/opt/app/myapp"
+  remote_jar_path: "/opt/app/myapp/app.jar"
+  remote_config_dir: "/opt/app/myapp/config"
+  remote_bin_dir: "/opt/app/myapp/bin"
+
+artifact:
+  local_path: ""
+
+health:
+  base_url: "http://127.0.0.1:8080"
+  health_path: "/health"

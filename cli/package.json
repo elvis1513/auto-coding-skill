@@ -1,0 +1,8 @@
+{
+  "name": "auto-coding-skill-cli",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-assets": "node ./src/sync-assets.js"
+  }
+}

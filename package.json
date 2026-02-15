@@ -1,0 +1,29 @@
+{
+  "name": "auto-coding-skill",
+  "version": "0.1.0",
+  "description": "CLI installer for auto-coding-skill (Claude Code + Codex CLI).",
+  "type": "module",
+  "bin": {
+    "autocoding": "./cli/src/index.js"
+  },
+  "files": [
+    "cli/src",
+    "cli/assets/skill",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node -c cli/src/index.js"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "codex",
+    "skill",
+    "automation",
+    "engineering",
+    "workflow",
+    "ci",
+    "deployment"
+  ]
+}

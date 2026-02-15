@@ -23,13 +23,10 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ```bash
 autocoding init --ai codex
-# or
-autocoding init --ai claude
-# or both
-autocoding init --ai all
+# or claude / all
 ```
 
-2. Initialize docs/tooling:
+2. Initialize docs and local scripts:
 
 ```bash
 python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
@@ -37,22 +34,13 @@ python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
 python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```
 
-3. Fill one config file only:
+3. Fill only one file manually:
 
-- `docs/project/project-config.md`
+- `ENGINEERING.md` frontmatter
 
-This file is the single source for:
-- build/test/lint/typecheck/smoke/regression commands
-- deployment info (ip/user/password/service/path/health)
-- docs paths
+This frontmatter is the only manual config source (commands + deployment + docs paths).
 
-Required Python deps:
-
-```bash
-pip install pyyaml requests
-```
-
-4. Let AI execute workflow by docs constraints:
+4. Start AI development by constraints:
 
 - `ENGINEERING.md`
 - `docs/tasks/taskbook.md`
@@ -64,38 +52,63 @@ pip install pyyaml requests
 
 ## AGENTS.md Constraint Example
 
-Add this in project `AGENTS.md`:
-
 ```md
 ## Mandatory Skill
-- Always use `auto-coding-skill` for every implementation task.
+- Always use `auto-coding-skill` for implementation tasks.
 - Before any code change, read and obey:
   1) ENGINEERING.md
-  2) docs/project/project-config.md
-  3) docs/tasks/taskbook.md
-- Execute gates using `python3 tools/autopipeline/ap.py`.
-- If any required doc is missing, create/update docs first, then code.
+  2) docs/tasks/taskbook.md
+- Execute gates using `python3 scripts/autopipeline/ap.py`.
+- If required docs are missing, create/update docs first, then code.
 ```
 
 ## Commands
 
 ```bash
-python3 tools/autopipeline/ap.py run build
-python3 tools/autopipeline/ap.py run test
-python3 tools/autopipeline/ap.py run lint
-python3 tools/autopipeline/ap.py verify-api-docs
-python3 tools/autopipeline/ap.py check-matrix
-python3 tools/autopipeline/ap.py gen-summary T0001-1
-python3 tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-matrix
+pip install pyyaml requests
+python3 scripts/autopipeline/ap.py run build
+python3 scripts/autopipeline/ap.py run test
+python3 scripts/autopipeline/ap.py run lint
+python3 scripts/autopipeline/ap.py verify-api-docs
+python3 scripts/autopipeline/ap.py check-matrix
+python3 scripts/autopipeline/ap.py gen-summary T0001-1
+python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-matrix
 ```
 
-## Publish
+## Release New Version
+
+1. Bump version (cannot republish an existing version):
+
+```bash
+npm version patch
+# or: npm version minor
+# or: npm version major
+```
+
+2. Login and pre-check:
 
 ```bash
 npm login
 npm whoami
 npm run release:check
-npm publish --access public
+```
+
+3. Publish:
+
+```bash
+npm publish --access public --otp <6-digit-otp>
+```
+
+4. Verify release:
+
+```bash
+npm view @elvis1513/auto-coding-skill version
+```
+
+5. Update installed clients:
+
+```bash
+npm install -g @elvis1513/auto-coding-skill@latest
 ```
 
 ## License

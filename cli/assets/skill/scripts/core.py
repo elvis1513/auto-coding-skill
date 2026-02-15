@@ -97,15 +97,14 @@ def http_get_status(url: str, timeout_s: int = 5) -> int:
 def find_config(repo: Path) -> Path:
     """Find single source project config file."""
     candidates = [
-        repo / "docs" / "project" / "project-config.md",
-        repo / "project-config.md",
+        repo / "ENGINEERING.md",
     ]
     for c in candidates:
         if c.exists():
             return c
     raise APError(
-        "Project config not found. Create docs/project/project-config.md "
-        "and put all commands + deployment fields in YAML frontmatter."
+        "Project config not found. Create ENGINEERING.md "
+        "and put commands + deployment fields in YAML frontmatter."
     )
 
 

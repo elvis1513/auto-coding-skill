@@ -26,13 +26,13 @@ def cmd_install(args: argparse.Namespace) -> None:
     if args.bridges:
         copy_tree(templates / "bridges", repo)
 
-    tools_dir = repo / "tools" / "autopipeline"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    copy_tree(Path(__file__).resolve(), tools_dir / "ap.py")
-    copy_tree(Path(__file__).resolve().parent / "core.py", tools_dir / "core.py")
+    scripts_dir = repo / "scripts" / "autopipeline"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    copy_tree(Path(__file__).resolve(), scripts_dir / "ap.py")
+    copy_tree(Path(__file__).resolve().parent / "core.py", scripts_dir / "core.py")
 
     gi = repo / ".gitignore"
-    secret_line = "docs/project/project-config.md"
+    secret_line = "ENGINEERING.md"
     if gi.exists():
         txt = gi.read_text(encoding="utf-8")
         if secret_line not in txt:
@@ -41,11 +41,10 @@ def cmd_install(args: argparse.Namespace) -> None:
         gi.write_text(secret_line + "\n", encoding="utf-8")
 
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: edit docs/project/project-config.md and fill all project/env fields")
+    print("[install] Next: edit ENGINEERING.md frontmatter and fill all project/env fields")
 
 
-def _infer_title(repo: Path, task_id: str) -> str:
-    taskbook = repo / "docs" / "tasks" / "taskbook.md"
+def _infer_title(taskbook: Path, task_id: str) -> str:
     if not taskbook.exists():
         return "<Title>"
     for line in taskbook.read_text(encoding="utf-8").splitlines():
@@ -62,16 +61,18 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
     task_id = args.task_id
     cfg = _load_cfg(repo)
     docs_cfg = (cfg.get("docs") or {})
+    taskbook = Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md")))
+    summary_dir = Path(repo, str(docs_cfg.get("summary_dir", "docs/tasks/summaries")))
     api_change_log = str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md"))
     regression_matrix = str(docs_cfg.get("regression_matrix", "docs/testing/regression-matrix.md"))
 
-    out_dir = repo / "docs" / "tasks" / "summaries"
+    out_dir = summary_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"{task_id}.md"
     if out_file.exists() and not args.force:
         raise APError(f"Summary already exists: {out_file} (use --force to overwrite)")
 
-    title = _infer_title(repo, task_id)
+    title = _infer_title(taskbook, task_id)
     date = _dt.date.today().isoformat()
 
     staged = run(["git", "diff", "--cached", "--name-only"], cwd=repo, check=False).stdout.strip()
@@ -163,7 +164,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     """
     Run a configured gate command:
       build | test | lint | typecheck | format | smoke | regression
-    Commands are read from docs/project/project-config.md frontmatter.
+    Commands are read from ENGINEERING.md frontmatter.
     """
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
@@ -172,7 +173,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if name not in commands:
         raise APError(
             f"Command not configured: commands.{name}. "
-            "Edit docs/project/project-config.md. "
+            "Edit ENGINEERING.md frontmatter. "
             f"Available: {', '.join(commands.keys()) or '(none)'}"
         )
     cmd = str(commands[name])
@@ -197,15 +198,18 @@ def cmd_verify_api_docs(args: argparse.Namespace) -> None:
 def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    docs_cfg = (cfg.get("docs") or {})
+    summary_dir = Path(repo, str(docs_cfg.get("summary_dir", "docs/tasks/summaries")))
 
     task_id = args.task_id
     msg = args.msg
 
-    summary = repo / "docs" / "tasks" / "summaries" / f"{task_id}.md"
+    summary = summary_dir / f"{task_id}.md"
     if not summary.exists():
         raise APError(
             f"Task summary missing: {summary}\n"
-            f"Generate: python3 tools/autopipeline/ap.py gen-summary {task_id}"
+            f"Generate: python3 scripts/autopipeline/ap.py gen-summary {task_id}"
         )
 
     if args.require_matrix:

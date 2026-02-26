@@ -21,7 +21,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     templates = _skill_root() / "data" / "templates"
 
     copy_tree(templates / "docs", repo / "docs")
-    copy_tree(templates / "ENGINEERING.md", repo / "ENGINEERING.md")
+    copy_tree(templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md")
 
     if args.bridges:
         copy_tree(templates / "bridges", repo)
@@ -32,7 +32,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     copy_tree(Path(__file__).resolve().parent / "core.py", scripts_dir / "core.py")
 
     gi = repo / ".gitignore"
-    secret_line = "ENGINEERING.md"
+    secret_line = "docs/ENGINEERING.md"
     if gi.exists():
         txt = gi.read_text(encoding="utf-8")
         if secret_line not in txt:
@@ -41,7 +41,7 @@ def cmd_install(args: argparse.Namespace) -> None:
         gi.write_text(secret_line + "\n", encoding="utf-8")
 
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: edit ENGINEERING.md frontmatter and fill all project/env fields")
+    print("[install] Next: edit docs/ENGINEERING.md frontmatter and fill all project/env fields")
 
 
 def _infer_title(taskbook: Path, task_id: str) -> str:
@@ -164,7 +164,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     """
     Run a configured gate command:
       build | test | lint | typecheck | format | smoke | regression
-    Commands are read from ENGINEERING.md frontmatter.
+    Commands are read from docs/ENGINEERING.md frontmatter.
     """
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
@@ -173,7 +173,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if name not in commands:
         raise APError(
             f"Command not configured: commands.{name}. "
-            "Edit ENGINEERING.md frontmatter. "
+            "Edit docs/ENGINEERING.md frontmatter. "
             f"Available: {', '.join(commands.keys()) or '(none)'}"
         )
     cmd = str(commands[name])

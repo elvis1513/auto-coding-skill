@@ -18,7 +18,7 @@
   - [ ] T0001-2 <subtask>
 
 ### 证据（完成后填写）
-- 项目配置：`ENGINEERING.md`（frontmatter）
+- 项目配置：`docs/ENGINEERING.md`（frontmatter）
 - DD：`docs/design/T0001-<slug>.md`
 - Review：`docs/reviews/T0001-YYYYMMDD-HHMM.md`
 - API 文档：`docs/interfaces/api.md`

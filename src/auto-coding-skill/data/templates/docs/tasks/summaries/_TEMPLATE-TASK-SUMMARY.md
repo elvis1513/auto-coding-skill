@@ -28,7 +28,7 @@
 - 回滚方式：
 
 ## 5. 质量门禁证据（必须可追溯）
-- 项目配置：`ENGINEERING.md`（frontmatter）
+- 项目配置：`docs/ENGINEERING.md`（frontmatter）
 - 本地CI：`ci-local`
 - 静态分析：`static`
 - Review 文档：`docs/reviews/<TASK_ID>-<timestamp>.md`

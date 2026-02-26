@@ -37,7 +37,7 @@ docs:
   summary_dir: "docs/tasks/summaries"
 ---
 
-# ENGINEERING.md — AutoPipeline Gates (Source of Truth)
+# docs/ENGINEERING.md — AutoPipeline Gates (Source of Truth)
 
 目标：把一次任务固化为不可跳过的流水线：  
 读任务 → 写DD → 实现 → 本地测试通过 → 静态分析+Review落盘 → 更新API Markdown+接口变更清单 →  
@@ -50,14 +50,14 @@ docs:
 
 ## 0. 配置填写（必须）
 
-先填写本文件 frontmatter 中的所有空值（例如 ip/用户名/密码/服务名/路径/命令）。  
+先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值（例如 ip/用户名/密码/服务名/路径/命令）。  
 禁止在其他 md/yaml 重复维护这些配置。
 
 ---
 
 ## 1. 权威输入与冲突裁决（优先级）
 
-1) ENGINEERING.md（本文件）  
+1) docs/ENGINEERING.md（本文件）  
 2) docs/tasks/taskbook.md  
 3) docs/design/**  
 4) docs/interfaces/api.md  

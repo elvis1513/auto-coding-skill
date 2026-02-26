@@ -1,1 +1,1 @@
-Follow ENGINEERING.md strictly. Source of truth: ENGINEERING.md.
+Follow docs/ENGINEERING.md strictly. Source of truth: docs/ENGINEERING.md.

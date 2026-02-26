@@ -1,6 +1,6 @@
 # Deploy Runbook（单机 systemd / jar）
 
-部署参数统一读取：`ENGINEERING.md` frontmatter
+部署参数统一读取：`docs/ENGINEERING.md` frontmatter
 - deployment.host / deployment.ssh_port / deployment.username / deployment.password
 - deployment.service_name / deployment.systemd_dir
 - deployment.remote_app_root / deployment.remote_jar_path / deployment.remote_config_dir / deployment.remote_bin_dir

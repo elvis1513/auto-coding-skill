@@ -1,6 +1,6 @@
 ---
 name: auto-coding-skill
-description: Use for strict project engineering workflow in Claude/Codex. Initialize docs, fill ENGINEERING.md frontmatter once, then execute design->implement->gates->summary->commit/push.
+description: Use for strict project engineering workflow in Claude/Codex. Initialize docs, fill docs/ENGINEERING.md frontmatter once, then execute design->implement->gates->summary->commit/push.
 ---
 
 # Auto Coding Skill (Claude + Codex)
@@ -36,7 +36,7 @@ pip install pyyaml requests
 
 Fill only:
 
-- `ENGINEERING.md` frontmatter
+- `docs/ENGINEERING.md` frontmatter
 
 This contains all manual fields:
 - `commands.*`
@@ -47,7 +47,7 @@ Do not duplicate config in other md/yaml files.
 
 ## Execution order
 
-1) `ENGINEERING.md`
+1) `docs/ENGINEERING.md`
 2) `docs/tasks/taskbook.md`
 3) `docs/design/**`
 4) implementation

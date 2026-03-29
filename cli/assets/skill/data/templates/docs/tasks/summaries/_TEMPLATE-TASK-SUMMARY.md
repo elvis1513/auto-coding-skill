@@ -11,7 +11,7 @@
 - 目标：
 - 验收结论：PASS / FAIL（FAIL 必须说明原因与后续计划）
 
-## 2. 变更概览（代码/配置/部署）
+## 2. 变更概览（代码/配置/本地运行）
 - 关键改动点：
 - 影响模块：
 - 兼容性影响（是否破坏兼容、迁移方案）：
@@ -39,9 +39,9 @@
 - 新增/确认的 Bug（写入 `docs/bugs/bug-list.md`）：
 - 新增自动化回归用例（引用回归矩阵ID）：
 
-## 7. 部署记录（如有部署）
-- 部署记录：`docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`
-- systemd/service/config/bin 变更（若有）：
+## 7. 本地运行记录（如有）
+- 本地运行记录：`docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`
+- Docker compose/service/image/env 变更（若有）：
 
 ## 8. 风险与回滚
 - 风险：

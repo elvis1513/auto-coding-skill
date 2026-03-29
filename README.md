@@ -5,6 +5,9 @@ Framework-agnostic engineering workflow skill for:
 - Claude Code
 - Codex CLI
 
+This skill is scoped to Claude/Codex workflows. During development, it should prefer already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
+It should also prefer multi-agent execution whenever the work can be split into parallel subtasks safely.
+
 ## Install
 
 ```bash
@@ -38,7 +41,7 @@ python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 
 - `docs/ENGINEERING.md` frontmatter
 
-This frontmatter is the only manual config source (commands + deployment + docs paths).
+This frontmatter is the only manual config source (commands + local Docker runtime + docs paths).
 
 4. Start AI development by constraints:
 
@@ -49,6 +52,17 @@ This frontmatter is the only manual config source (commands + deployment + docs 
 - `docs/testing/regression-matrix.md`
 - `docs/bugs/bug-list.md`
 - `docs/tasks/summaries/**`
+
+5. Tool selection rule during execution:
+
+- Prefer current MCP/skills/plugins/apps first.
+- Fall back to shell/manual work only when those capabilities are unavailable or insufficient.
+
+6. Collaboration rule during execution:
+
+- Prefer multi-agent mode.
+- Split research, design, implementation, validation, and documentation into parallel subtasks whenever the boundaries are clear.
+- Keep one main agent responsible for integration and final gates.
 
 ## AGENTS.md Constraint Example
 
@@ -67,16 +81,16 @@ This frontmatter is the only manual config source (commands + deployment + docs 
 ### 1) docs/ENGINEERING.md
 - Purpose: single source of project config + engineering gate rules.
 - How to record:
-  - Fill YAML frontmatter once (project/commands/deployment/docs fields).
-  - Keep all environment info here only (ip/username/password/service/path/health).
+  - Fill YAML frontmatter once (project/commands/runtime/docs fields).
+  - Keep all local runtime info here only (compose file/service/container/image/health).
   - Do not duplicate config in other docs.
 
 ### 2) docs/deployment/
 - Files:
-  - `docs/deployment/deploy-runbook.md`: deployment procedure and validation checklist.
-  - `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`: per-deploy execution record.
+  - `docs/deployment/deploy-runbook.md`: local Docker runtime procedure and validation checklist.
+  - `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`: per-run local verification record.
 - How to record:
-  - In deploy record, write target host, service, artifact, remote path, backup, systemctl status, smoke/regression evidence.
+  - In runtime record, write compose file, service, container, image/tag, env file, docker status, smoke/regression evidence.
 
 ### 3) docs/design/
 - Files:
@@ -116,7 +130,7 @@ This frontmatter is the only manual config source (commands + deployment + docs 
 - Files:
   - `docs/testing/regression-matrix.md`
 - Purpose:
-  - Full regression matrix; must be 0 FAIL.
+  - Full regression matrix against the local runtime environment; must be 0 FAIL.
 - How to record:
   - Add/maintain rows by regression ID (R-xxx), area, steps/command, expected, status, evidence.
   - If any FAIL exists, gate fails.
@@ -128,6 +142,8 @@ pip install pyyaml requests
 python3 scripts/autopipeline/ap.py run build
 python3 scripts/autopipeline/ap.py run test
 python3 scripts/autopipeline/ap.py run lint
+python3 scripts/autopipeline/ap.py run smoke
+python3 scripts/autopipeline/ap.py run regression
 python3 scripts/autopipeline/ap.py verify-api-docs
 python3 scripts/autopipeline/ap.py check-matrix
 python3 scripts/autopipeline/ap.py gen-summary T0001-1

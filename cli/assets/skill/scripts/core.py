@@ -104,7 +104,7 @@ def find_config(repo: Path) -> Path:
             return c
     raise APError(
         "Project config not found. Create docs/ENGINEERING.md "
-        "and put commands + deployment fields in YAML frontmatter."
+        "and put commands + runtime fields in YAML frontmatter."
     )
 
 

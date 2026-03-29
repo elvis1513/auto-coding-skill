@@ -92,7 +92,7 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 目标：TODO
 - 验收结论：PASS / FAIL — TODO
 
-## 2. 变更概览（代码/配置/部署）
+## 2. 变更概览（代码/配置/本地运行）
 ### Git change snapshot
 - Staged files:
 {('- ' + staged.replace('\n','\n- ')) if staged else '- (none)'}

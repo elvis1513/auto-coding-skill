@@ -29,7 +29,8 @@
     "engineering",
     "workflow",
     "ci",
-    "deployment"
+    "docker",
+    "local-testing"
   ],
   "repository": {
     "type": "git",

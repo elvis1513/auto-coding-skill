@@ -1,13 +1,14 @@
-# Deploy Record — <Task ID> — YYYY-MM-DD
+# Local Runtime Record — <Task ID> — YYYY-MM-DD
 
-- Target host:
-- Service name:
-- Artifact (local):
-- Remote jar path:
-- Updated items: jar / config / bin / service
-- Backup files (single latest): *.bak / *.tgz.bak
+- Docker compose file:
+- Docker service:
+- Container name:
+- Image/tag:
+- Exposed port:
+- Env file:
 
 ## Evidence
-- systemctl status:
+- docker ps / compose ps:
 - smoke_test:
 - api_regression:
+- health_check:

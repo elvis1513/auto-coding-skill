@@ -7,8 +7,10 @@
 - Resolved/Deferred（deferred 必须给出后续任务）：
 
 ## 2. 代码质量
-## 3. 测试质量（含新增回归用例）
-## 4. 接口契约（API Markdown + change-log）
-## 5. 安全与性能
-## 6. 风险与回滚
-## 7. 结论（Pass / Blocked）
+## 3. 本地构建与测试质量（Go 后端 + 前端）
+## 4. 本地 Compose 验证（health / smoke / regression）
+## 5. 接口契约（API Markdown + change-log）
+## 6. Jenkins 准备度（Jenkinsfile / job config / image strategy）
+## 7. 安全与性能
+## 8. 风险与回滚
+## 9. 结论（Pass / Blocked）

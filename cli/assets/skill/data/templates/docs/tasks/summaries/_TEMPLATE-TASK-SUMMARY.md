@@ -11,7 +11,7 @@
 - 目标：
 - 验收结论：PASS / FAIL（FAIL 必须说明原因与后续计划）
 
-## 2. 变更概览（代码/配置/本地运行）
+## 2. 变更概览（代码/配置/本地运行/Jenkins）
 - 关键改动点：
 - 影响模块：
 - 兼容性影响（是否破坏兼容、迁移方案）：
@@ -33,15 +33,17 @@
 - 静态分析：`static`
 - Review 文档：`docs/reviews/<TASK_ID>-<timestamp>.md`
 - API 文档：`docs/interfaces/api.md`
+- Jenkins 配置检查：`Jenkinsfile` + `jenkins.*`
 - 回归矩阵：`docs/testing/regression-matrix.md`（全量 PASS，0 fail）
 
 ## 6. Bug 清单与回归用例
 - 新增/确认的 Bug（写入 `docs/bugs/bug-list.md`）：
 - 新增自动化回归用例（引用回归矩阵ID）：
 
-## 7. 本地运行记录（如有）
-- 本地运行记录：`docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`
-- Docker compose/service/image/env 变更（若有）：
+## 7. 本地运行与 Jenkins 部署记录
+- 本地 Compose 验证：health / smoke / regression 结果
+- Jenkins 部署记录：`docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`
+- Docker compose / image / Jenkins Job 变更（若有）：
 
 ## 8. 风险与回滚
 - 风险：

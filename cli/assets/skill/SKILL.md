@@ -1,11 +1,11 @@
 ---
 name: auto-coding-skill
-description: Use for strict project engineering workflow in Claude/Codex. Initialize docs, fill docs/ENGINEERING.md frontmatter once, then execute design->implement->local-docker-gates->summary->commit/push.
+description: Use for strict Go fullstack monorepo engineering workflow in Claude/Codex. Initialize docs, fill docs/ENGINEERING.md frontmatter once, then execute design->implement->local-docker-gates->jenkins-trigger->verify.
 ---
 
 # Auto Coding Skill (Claude + Codex)
 
-This skill is a Claude/Codex-only engineering workflow. During design, research, implementation, verification, and delivery, prefer already available MCP servers, installed skills, plugins, and app connectors over ad-hoc manual work whenever they can complete the task reliably.
+This branch specializes the skill for Go backend + frontend monorepo projects that build Docker images locally and use Jenkins pipelines to auto-deploy after push. It supports both Claude and Codex. During design, research, implementation, verification, and delivery, prefer already available MCP servers, installed skills, plugins, and app connectors over ad-hoc manual work whenever they can complete the task reliably.
 
 Default to multi-agent execution when the client supports it. Break work into independent design, research, implementation, validation, and documentation subtasks so Claude/Codex can run them in parallel whenever that reduces cycle time without weakening control of the main task.
 
@@ -28,6 +28,7 @@ Typical examples:
 - Documentation/library lookup: prefer official docs and MCP-backed doc tools.
 - Project management or knowledge base updates: prefer Linear/Notion connectors if available.
 - Browser/runtime verification: prefer Playwright/browser tools if available.
+- Pipeline and deployment verification: prefer Jenkins-capable connectors, browser automation, or project-integrated tools if available.
 
 ## Collaboration policy
 
@@ -69,6 +70,7 @@ Fill only:
 This contains all manual fields:
 - `commands.*`
 - `runtime.*`
+- `jenkins.*`
 - `docs.*`
 
 Do not duplicate config in other md/yaml files.
@@ -79,10 +81,12 @@ Do not duplicate config in other md/yaml files.
 2) `docs/tasks/taskbook.md`
 3) `docs/design/**`
 4) implementation
-5) run gates via `python3 scripts/autopipeline/ap.py`
-6) start and validate local Docker runtime
+5) local build/test/lint gates
+6) start and validate local Docker Compose runtime
 7) update API docs + regression matrix + bug list + summary
-8) commit/push
+8) verify Jenkins config / Jenkinsfile readiness
+9) commit/push to trigger Jenkins
+10) verify Jenkins pipeline + target environment health
 
 ## Commands
 
@@ -90,8 +94,16 @@ Do not duplicate config in other md/yaml files.
 python3 scripts/autopipeline/ap.py run build
 python3 scripts/autopipeline/ap.py run test
 python3 scripts/autopipeline/ap.py run lint
+python3 scripts/autopipeline/ap.py run docker_build
+python3 scripts/autopipeline/ap.py runtime-up
+python3 scripts/autopipeline/ap.py wait-health
+python3 scripts/autopipeline/ap.py run smoke
+python3 scripts/autopipeline/ap.py run regression
+python3 scripts/autopipeline/ap.py runtime-down
+python3 scripts/autopipeline/ap.py verify-jenkins
+python3 scripts/autopipeline/ap.py wait-health --scope prod
 python3 scripts/autopipeline/ap.py verify-api-docs
 python3 scripts/autopipeline/ap.py check-matrix
 python3 scripts/autopipeline/ap.py gen-summary T0001-1
-python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-matrix
+python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
 ```

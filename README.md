@@ -1,11 +1,12 @@
 # auto-coding-skill
 
-Framework-agnostic engineering workflow skill for:
+Engineering workflow skill for:
 
 - Claude Code
 - Codex CLI
 
-This skill is scoped to Claude/Codex workflows. During development, it should prefer already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
+This branch is specialized for Go backend + frontend monorepo projects that build Docker images locally, validate with project `docker compose`, and rely on Jenkins to auto-build and update target environments after push.
+It supports both Claude and Codex. During development, it should prefer already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
 It should also prefer multi-agent execution whenever the work can be split into parallel subtasks safely.
 
 ## Install
@@ -41,7 +42,7 @@ python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 
 - `docs/ENGINEERING.md` frontmatter
 
-This frontmatter is the only manual config source (commands + local Docker runtime + docs paths).
+This frontmatter is the only manual config source (commands + local Docker runtime + Jenkins + docs paths).
 
 4. Start AI development by constraints:
 
@@ -64,6 +65,12 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Split research, design, implementation, validation, and documentation into parallel subtasks whenever the boundaries are clear.
 - Keep one main agent responsible for integration and final gates.
 
+7. Delivery rule during execution:
+
+- Local `docker compose` validation must pass before commit.
+- `git push` is expected to trigger Jenkins automatically.
+- Task is not complete until Jenkins succeeds and the target environment health check passes.
+
 ## AGENTS.md Constraint Example
 
 ```md
@@ -81,16 +88,16 @@ This frontmatter is the only manual config source (commands + local Docker runti
 ### 1) docs/ENGINEERING.md
 - Purpose: single source of project config + engineering gate rules.
 - How to record:
-  - Fill YAML frontmatter once (project/commands/runtime/docs fields).
-  - Keep all local runtime info here only (compose file/service/container/image/health).
+  - Fill YAML frontmatter once (project/commands/runtime/jenkins/docs fields).
+  - Keep all local runtime and Jenkins info here only (compose file/service/container/image/health/job/env).
   - Do not duplicate config in other docs.
 
 ### 2) docs/deployment/
 - Files:
-  - `docs/deployment/deploy-runbook.md`: local Docker runtime procedure and validation checklist.
-  - `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`: per-run local verification record.
+  - `docs/deployment/deploy-runbook.md`: local Compose validation + Jenkins deployment procedure.
+  - `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`: local validation + Jenkins deployment evidence.
 - How to record:
-  - In runtime record, write compose file, service, container, image/tag, env file, docker status, smoke/regression evidence.
+  - Record both local Compose validation and Jenkins deployment evidence: compose file, service, container, image tag, Jenkins build, deploy env, health checks.
 
 ### 3) docs/design/
 - Files:
@@ -114,7 +121,7 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Files:
   - `docs/reviews/<TASK_ID>-<timestamp>.md` (from review template).
 - Purpose:
-  - Gate review evidence: static checks, code quality, test quality, risks.
+  - Gate review evidence: static checks, Go + frontend quality, local Compose validation, Jenkins readiness, risks.
 - How to record:
   - Record commands used (lint/typecheck from docs/ENGINEERING.md frontmatter) and conclusion (Pass/Blocked).
 
@@ -130,7 +137,7 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Files:
   - `docs/testing/regression-matrix.md`
 - Purpose:
-  - Full regression matrix against the local runtime environment; must be 0 FAIL.
+  - Full regression matrix against the local Compose environment; must be 0 FAIL.
 - How to record:
   - Add/maintain rows by regression ID (R-xxx), area, steps/command, expected, status, evidence.
   - If any FAIL exists, gate fails.
@@ -142,12 +149,18 @@ pip install pyyaml requests
 python3 scripts/autopipeline/ap.py run build
 python3 scripts/autopipeline/ap.py run test
 python3 scripts/autopipeline/ap.py run lint
+python3 scripts/autopipeline/ap.py run docker_build
+python3 scripts/autopipeline/ap.py runtime-up
+python3 scripts/autopipeline/ap.py wait-health
 python3 scripts/autopipeline/ap.py run smoke
 python3 scripts/autopipeline/ap.py run regression
+python3 scripts/autopipeline/ap.py runtime-down
+python3 scripts/autopipeline/ap.py verify-jenkins
+python3 scripts/autopipeline/ap.py wait-health --scope prod
 python3 scripts/autopipeline/ap.py verify-api-docs
 python3 scripts/autopipeline/ap.py check-matrix
 python3 scripts/autopipeline/ap.py gen-summary T0001-1
-python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-matrix
+python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
 ```
 
 ## Publish (NPM)

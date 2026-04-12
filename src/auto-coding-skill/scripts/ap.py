@@ -148,7 +148,7 @@ def _jenkins_crumb_headers(cfg: dict, job_url: str = "", timeout_s: int = 15) ->
     return dict(crumb_headers)
 
 
-def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
+def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15, allow_404: bool = False) -> Optional[dict]:
     headers = {"Accept": "application/json"}
     headers.update(_jenkins_basic_auth_headers(cfg))
     req = urllib.request.Request(url, headers=headers, method="GET")
@@ -157,6 +157,8 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
             data = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = _http_error_body(exc)
+        if exc.code == 404 and allow_404:
+            return None
         if exc.code == 403:
             crumb_headers = _jenkins_crumb_headers(cfg, job_url=url, timeout_s=timeout_s)
             if crumb_headers:
@@ -167,6 +169,8 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
                     with urllib.request.urlopen(retry_req, timeout=timeout_s) as resp:
                         data = resp.read().decode("utf-8")
                 except urllib.error.HTTPError as retry_exc:
+                    if retry_exc.code == 404 and allow_404:
+                        return None
                     retry_body = _http_error_body(retry_exc)
                     raise APError(
                         f"Jenkins API request failed after crumb retry: {url}\n"
@@ -202,6 +206,14 @@ def _resolve_git_short_sha(repo: Path, ref: str) -> str:
     return ref.strip()
 
 
+def _resolve_git_branch_name(repo: Path, ref: str) -> str:
+    result = run(["git", "rev-parse", "--abbrev-ref", ref], cwd=repo, check=False)
+    value = result.stdout.strip()
+    if value and value != "HEAD":
+        return value
+    return ""
+
+
 def _jenkins_builds_api_url(job_url: str, max_builds: int) -> str:
     base = str(job_url or "").strip().rstrip("/")
     if not base:
@@ -222,6 +234,38 @@ def _jenkins_job_url_from_name(base_url: str, job_name: str) -> str:
     if not base:
         raise APError("Missing Jenkins base URL. Fill jenkins.base_url or pass --job-url.")
     return f"{base}/{_jenkins_job_path(job_name)}"
+
+
+def _jenkins_branch_job_candidates(branch_name: str) -> List[str]:
+    raw = str(branch_name or "").strip()
+    if not raw:
+        return []
+
+    candidates: List[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in candidates:
+            candidates.append(value)
+
+    if "/" not in raw:
+        add(urllib.parse.quote(raw, safe=""))
+    single = urllib.parse.quote(raw, safe="")
+    double = urllib.parse.quote(single, safe="")
+    add(single)
+    add(double)
+    return candidates
+
+
+def _jenkins_branch_job_urls(root_job_url: str, branch_name: str) -> List[str]:
+    base = str(root_job_url or "").strip().rstrip("/")
+    if not base:
+        raise APError("Missing Jenkins multibranch root job URL.")
+    urls: List[str] = []
+    for candidate in _jenkins_branch_job_candidates(branch_name):
+        url = f"{base}/job/{candidate}"
+        if url not in urls:
+            urls.append(url)
+    return urls
 
 
 def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -> str:
@@ -251,6 +295,50 @@ def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -
         "Missing Jenkins job location. Fill jenkins.job_url, or fill both "
         "jenkins.base_url and jenkins.job_name in docs/ENGINEERING.md."
     )
+
+
+def _resolve_jenkins_job_candidates(
+    cfg: dict,
+    repo: Path,
+    git_ref: str = "",
+    job_name: str = "",
+    job_url: str = "",
+    multibranch_root_job: str = "",
+    branch_name: str = "",
+) -> List[str]:
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    effective_branch = str(branch_name or jenkins_cfg.get("branch_name") or "").strip()
+    if not effective_branch:
+        inferred_branch = _resolve_git_branch_name(repo, git_ref or "HEAD")
+        if inferred_branch:
+            effective_branch = inferred_branch
+
+    effective_root = str(multibranch_root_job or jenkins_cfg.get("multibranch_root_job") or "").strip()
+    explicit_url = str(job_url or "").strip()
+    explicit_name = str(job_name or "").strip()
+    configured_url = str(jenkins_cfg.get("job_url") or "").strip()
+    configured_name = str(jenkins_cfg.get("job_name") or "").strip()
+
+    if effective_branch:
+        if explicit_url:
+            return _jenkins_branch_job_urls(explicit_url, effective_branch)
+        if effective_root:
+            base_url = str(jenkins_cfg.get("base_url") or "").strip()
+            return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, effective_root), effective_branch)
+        if explicit_name:
+            base_url = str(jenkins_cfg.get("base_url") or "").strip()
+            return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, explicit_name), effective_branch)
+        if configured_url:
+            return _jenkins_branch_job_urls(configured_url, effective_branch)
+        if configured_name:
+            base_url = str(jenkins_cfg.get("base_url") or "").strip()
+            return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, configured_name), effective_branch)
+        raise APError(
+            "Missing Jenkins multibranch root job location. Fill jenkins.multibranch_root_job + jenkins.base_url, "
+            "or pass --job-url / --job-name together with --branch-name."
+        )
+
+    return [_resolve_jenkins_job_url(cfg, job_name=job_name, job_url=job_url)]
 
 
 def _jenkins_build_api_url(job_url: str, build_number: int) -> str:
@@ -543,7 +631,6 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
         raise APError(f"Jenkinsfile not found: {jenkinsfile}")
 
     required = [
-        ("jenkins.job_name", jenkins_cfg.get("job_name")),
         ("jenkins.trigger_branch", jenkins_cfg.get("trigger_branch")),
         ("jenkins.image_repository", jenkins_cfg.get("image_repository")),
         ("jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy")),
@@ -555,8 +642,13 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     if not str(jenkins_cfg.get("job_url") or "").strip():
         base_url = str(jenkins_cfg.get("base_url") or "").strip()
         job_name = str(jenkins_cfg.get("job_name") or "").strip()
-        if not (base_url and job_name):
-            missing.append("jenkins.job_url (or jenkins.base_url + jenkins.job_name)")
+        multibranch_root = str(jenkins_cfg.get("multibranch_root_job") or "").strip()
+        branch_name = str(jenkins_cfg.get("branch_name") or "").strip()
+        if not (base_url and job_name) and not (base_url and multibranch_root and branch_name):
+            missing.append(
+                "jenkins.job_url (or jenkins.base_url + jenkins.job_name, "
+                "or jenkins.base_url + jenkins.multibranch_root_job + jenkins.branch_name)"
+            )
     if missing:
         raise APError("Missing Jenkins config: " + ", ".join(missing))
     print(f"[verify-jenkins] OK: {jenkinsfile}")
@@ -565,24 +657,55 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
 def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
-    job_url = _resolve_jenkins_job_url(cfg, job_name=args.job_name, job_url=args.job_url)
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    git_ref = str(args.git_ref or "HEAD").strip()
+    candidate_job_urls = _resolve_jenkins_job_candidates(
+        cfg,
+        repo,
+        git_ref=git_ref,
+        job_name=args.job_name,
+        job_url=args.job_url,
+        multibranch_root_job=args.multibranch_root_job,
+        branch_name=args.branch_name,
+    )
     build_number = args.build_number
     max_builds = int(args.max_builds or 20)
     timeout_s = int(args.timeout_sec or 300)
     poll_s = int(args.poll_sec or 5)
+    inferred_branch = _resolve_git_branch_name(repo, git_ref)
+    branch_hint = str(args.branch_name or jenkins_cfg.get("branch_name") or inferred_branch or "").strip()
+    root_hint = str(
+        args.multibranch_root_job
+        or jenkins_cfg.get("multibranch_root_job")
+        or args.job_name
+        or jenkins_cfg.get("job_name")
+        or args.job_url
+        or jenkins_cfg.get("job_url")
+        or ""
+    ).strip()
+    if branch_hint and root_hint:
+        job_label = f"{root_hint}/{branch_hint}"
+    else:
+        job_label = branch_hint or root_hint or "(configured)"
 
     deadline = time.time() + timeout_s
     if build_number is not None:
         payload = None
-        api_url = _jenkins_build_api_url(job_url, int(build_number))
+        matched_job_url = ""
         while time.time() < deadline:
-            payload = _jenkins_api_get_json(api_url, cfg)
-            if not payload.get("building"):
+            payload = None
+            for candidate_job_url in candidate_job_urls:
+                api_url = _jenkins_build_api_url(candidate_job_url, int(build_number))
+                payload = _jenkins_api_get_json(api_url, cfg, allow_404=True)
+                if payload is not None:
+                    matched_job_url = candidate_job_url
+                    break
+            if payload is not None and not payload.get("building"):
                 break
             time.sleep(poll_s)
         if not payload:
             raise APError(
-                f"No Jenkins build payload found for build #{build_number} under {job_url}. "
+                f"No Jenkins build payload found for build #{build_number} under any candidate job URL. "
                 f"Checked for up to {timeout_s}s."
             )
         if payload.get("building"):
@@ -597,7 +720,7 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         )
         print(
             "[verify-jenkins-build] OK: "
-            f"job={args.job_name or '(configured)'} "
+            f"job={job_label} "
             f"build=#{payload.get('number')} "
             f"result={result} "
             f"description={description} "
@@ -605,22 +728,29 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         )
         return
 
-    git_ref = str(args.git_ref or "HEAD").strip()
     git_short_sha = _resolve_git_short_sha(repo, git_ref)
     matched = None
-    api_url = _jenkins_builds_api_url(job_url, max_builds)
+    matched_job_url = ""
 
     while time.time() < deadline:
-        payload = _jenkins_api_get_json(api_url, cfg)
-        builds = payload.get("builds") or []
-        matched = next((b for b in builds if git_short_sha in str(b.get("description") or "")), None)
+        matched = None
+        for candidate_job_url in candidate_job_urls:
+            api_url = _jenkins_builds_api_url(candidate_job_url, max_builds)
+            payload = _jenkins_api_get_json(api_url, cfg, allow_404=True)
+            if payload is None:
+                continue
+            builds = payload.get("builds") or []
+            matched = next((b for b in builds if git_short_sha in str(b.get("description") or "")), None)
+            if matched:
+                matched_job_url = candidate_job_url
+                break
         if matched and not matched.get("building"):
             break
         time.sleep(poll_s)
 
     if not matched:
         raise APError(
-            f"No Jenkins build found for commit {git_short_sha} under {job_url}. "
+            f"No Jenkins build found for commit {git_short_sha} under any candidate job URL. "
             f"Checked latest {max_builds} builds for up to {timeout_s}s."
         )
 
@@ -632,6 +762,7 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     print(
         "[verify-jenkins-build] OK: "
         f"commit={git_short_sha} "
+        f"job={job_label} "
         f"build=#{matched.get('number')} "
         f"result={result} "
         f"description={description} "
@@ -726,6 +857,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--git-ref")
     s.add_argument("--job-name")
     s.add_argument("--job-url")
+    s.add_argument("--multibranch-root-job")
+    s.add_argument("--branch-name")
     s.add_argument("--build-number", type=int)
     s.add_argument("--max-builds", type=int, default=20)
     s.add_argument("--timeout-sec", type=int, default=300)

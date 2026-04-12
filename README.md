@@ -241,6 +241,8 @@ python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name platform/deploy-dev --build-number 152
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url https://jenkins.example.com/job/platform/job/deploy-dev --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --branch-name main --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py wait-health --scope prod
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py check-matrix
@@ -264,9 +266,14 @@ python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summa
   - Use when you already know the Jenkins job and build number and want deterministic build verification.
 - `verify-jenkins-build --job-url <full-job-url> --build-number <N>`
   - Use when the job is outside the default configured job path or you want to override the configured job.
+- `verify-jenkins-build --multibranch-root-job <folder/repo> --branch-name <branch> --build-number <N>`
+  - Use for Jenkins multibranch or organization-folder jobs where the branch is a child job under the root pipeline/repository job.
+- `verify-jenkins-build --multibranch-root-job <folder/repo> --git-ref HEAD`
+  - Use when the script should infer the current Git branch and probe the matching multibranch child job automatically.
 - If you want `--job-name` to resolve jobs outside the default `jenkins.job_url`, fill `jenkins.base_url` in `docs/ENGINEERING.md`.
 - If Jenkins returns `403` because of CSRF/crumb protection, `verify-jenkins-build` now retries automatically after requesting a crumb from `jenkins.base_url` or `jenkins.crumb_url`.
 - Use `jenkins.crumb_url` only when the crumb issuer endpoint is non-standard; otherwise `base_url + /crumbIssuer/api/json` is used automatically.
+- For multibranch pipelines, keep `jenkins.multibranch_root_job` as the folder/repo path without the branch child name, and keep `jenkins.branch_name` as the branch child name override if you do not want to infer it from Git.
 
 ## Publish (NPM)
 

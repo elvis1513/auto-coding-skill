@@ -127,6 +127,8 @@ python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name platform/deploy-dev --build-number 152
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url https://jenkins.example.com/job/platform/job/deploy-dev --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --branch-name main --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py wait-health --scope prod
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py check-matrix

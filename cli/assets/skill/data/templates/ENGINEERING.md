@@ -37,6 +37,8 @@ jenkins:
   crumb_url: ""
   job_name: ""
   job_url: ""
+  multibranch_root_job: ""
+  branch_name: ""
   trigger_branch: ""
   image_repository: ""
   image_tag_strategy: ""

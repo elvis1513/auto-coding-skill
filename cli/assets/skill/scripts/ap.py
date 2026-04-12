@@ -10,12 +10,16 @@ import datetime as _dt
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional, List
 
 from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status
+
+
+_JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
 
 
 def _skill_root() -> Path:
@@ -72,6 +76,78 @@ def _jenkins_basic_auth_headers(cfg: dict) -> dict:
     return {"Authorization": f"Basic {auth}"}
 
 
+def _http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _jenkins_root_url(cfg: dict, job_url: str = "") -> str:
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    base_url = str(jenkins_cfg.get("base_url") or "").strip().rstrip("/")
+    if base_url:
+        return base_url
+
+    source = str(job_url or jenkins_cfg.get("job_url") or "").strip().rstrip("/")
+    if not source:
+        return ""
+    if "/job/" in source:
+        return source.split("/job/", 1)[0].rstrip("/")
+    return source
+
+
+def _jenkins_crumb_api_url(cfg: dict, job_url: str = "") -> str:
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    explicit = str(jenkins_cfg.get("crumb_url") or "").strip()
+    if explicit:
+        return explicit
+    root = _jenkins_root_url(cfg, job_url=job_url)
+    if not root:
+        return ""
+    return root.rstrip("/") + "/crumbIssuer/api/json"
+
+
+def _jenkins_crumb_headers(cfg: dict, job_url: str = "", timeout_s: int = 15) -> dict:
+    crumb_url = _jenkins_crumb_api_url(cfg, job_url=job_url)
+    if not crumb_url:
+        return {}
+    cached = _JENKINS_CRUMB_CACHE.get(crumb_url)
+    if cached:
+        return dict(cached)
+
+    headers = {"Accept": "application/json"}
+    headers.update(_jenkins_basic_auth_headers(cfg))
+    req = urllib.request.Request(crumb_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {}
+        body = _http_error_body(exc)
+        raise APError(
+            f"Jenkins crumb request failed: {crumb_url}\n"
+            f"HTTP {exc.code}\n{body or '(empty response body)'}"
+        ) from exc
+    except Exception as exc:
+        raise APError(f"Jenkins crumb request failed: {crumb_url}\n{exc}") from exc
+
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise APError(f"Jenkins crumb endpoint returned non-JSON response: {crumb_url}\n{exc}") from exc
+
+    field = str(payload.get("crumbRequestField") or "").strip()
+    crumb = str(payload.get("crumb") or "").strip()
+    if not field or not crumb:
+        return {}
+
+    crumb_headers = {field: crumb}
+    _JENKINS_CRUMB_CACHE[crumb_url] = crumb_headers
+    return dict(crumb_headers)
+
+
 def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
     headers = {"Accept": "application/json"}
     headers.update(_jenkins_basic_auth_headers(cfg))
@@ -79,6 +155,37 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             data = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = _http_error_body(exc)
+        if exc.code == 403:
+            crumb_headers = _jenkins_crumb_headers(cfg, job_url=url, timeout_s=timeout_s)
+            if crumb_headers:
+                retry_headers = dict(headers)
+                retry_headers.update(crumb_headers)
+                retry_req = urllib.request.Request(url, headers=retry_headers, method="GET")
+                try:
+                    with urllib.request.urlopen(retry_req, timeout=timeout_s) as resp:
+                        data = resp.read().decode("utf-8")
+                except urllib.error.HTTPError as retry_exc:
+                    retry_body = _http_error_body(retry_exc)
+                    raise APError(
+                        f"Jenkins API request failed after crumb retry: {url}\n"
+                        f"HTTP {retry_exc.code}\n{retry_body or '(empty response body)'}"
+                    ) from retry_exc
+                except Exception as retry_exc:
+                    raise APError(f"Jenkins API request failed after crumb retry: {url}\n{retry_exc}") from retry_exc
+            else:
+                raise APError(
+                    f"Jenkins API request failed: {url}\n"
+                    f"HTTP 403\n{body or '(empty response body)'}\n"
+                    "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
+                    "Fill jenkins.base_url or jenkins.crumb_url in docs/ENGINEERING.md if needed."
+                ) from exc
+        else:
+            raise APError(
+                f"Jenkins API request failed: {url}\n"
+                f"HTTP {exc.code}\n{body or '(empty response body)'}"
+            ) from exc
     except Exception as exc:
         raise APError(f"Jenkins API request failed: {url}\n{exc}") from exc
     try:

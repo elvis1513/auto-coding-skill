@@ -34,6 +34,7 @@ runtime:
 
 jenkins:
   base_url: ""
+  crumb_url: ""
   job_name: ""
   job_url: ""
   trigger_branch: ""

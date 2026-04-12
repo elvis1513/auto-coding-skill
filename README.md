@@ -265,6 +265,8 @@ python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summa
 - `verify-jenkins-build --job-url <full-job-url> --build-number <N>`
   - Use when the job is outside the default configured job path or you want to override the configured job.
 - If you want `--job-name` to resolve jobs outside the default `jenkins.job_url`, fill `jenkins.base_url` in `docs/ENGINEERING.md`.
+- If Jenkins returns `403` because of CSRF/crumb protection, `verify-jenkins-build` now retries automatically after requesting a crumb from `jenkins.base_url` or `jenkins.crumb_url`.
+- Use `jenkins.crumb_url` only when the crumb issuer endpoint is non-standard; otherwise `base_url + /crumbIssuer/api/json` is used automatically.
 
 ## Publish (NPM)
 

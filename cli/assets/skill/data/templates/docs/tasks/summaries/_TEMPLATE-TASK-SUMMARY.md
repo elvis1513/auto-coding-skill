@@ -29,12 +29,14 @@
 
 ## 5. 质量门禁证据（必须可追溯）
 - 项目配置：`docs/ENGINEERING.md`（frontmatter）
-- 本地CI：`ci-local`
-- 静态分析：`static`
+- 后端测试：`commands.test`
+- 前端构建：`commands.build`
+- 静态分析：`commands.lint`
+- 前端类型检查：`commands.typecheck`
 - Review 文档：`docs/reviews/<TASK_ID>-<timestamp>.md`
 - API 文档：`docs/interfaces/api.md`
 - Jenkins 配置检查：`Jenkinsfile` + `jenkins.*`
-- 回归矩阵：`docs/testing/regression-matrix.md`（全量 PASS，0 fail）
+- 回归矩阵：`docs/testing/regression-matrix.md`（全量 PASS，0 fail，且每项必须有真实证据）
 
 ## 6. Bug 清单与回归用例
 - 新增/确认的 Bug（写入 `docs/bugs/bug-list.md`）：

@@ -13,12 +13,12 @@
 ## 2. Endpoint Index（目录）
 | Method | Path | Summary | Auth | Request | Response |
 |---|---|---|---|---|---|
-| GET | /health | Health check | No | - | 200 OK |
+| <METHOD> | <PATH> | <Summary> | <Yes/No> | <Request shape> | <Response shape> |
 
 ## 3. Endpoints
 
-### 3.1 GET /health
-**Summary**: Health check
+### 3.1 <METHOD> <PATH>
+**Summary**: <Summary>
 
 **Request**
 - Headers: -
@@ -26,10 +26,10 @@
 - Body: -
 
 **Response**
-- 200: OK
+- <Status>: <Meaning>
   - Example:
     ```json
-    {"status":"ok"}
+    {}
     ```
 
 ## 4. Changelog

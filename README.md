@@ -6,8 +6,8 @@ Engineering workflow skill for:
 - Codex CLI
 
 This branch is specialized for Go backend + frontend monorepo projects that build Docker images locally, validate with project `docker compose`, and rely on Jenkins to auto-build and update target environments after push.
-It supports both Claude and Codex. During development, it should prefer already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
-It should also prefer multi-agent execution whenever the work can be split into parallel subtasks safely.
+It supports both Claude and Codex. During development, it prefers already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
+It also prefers multi-agent execution whenever the work can be split into parallel subtasks safely.
 
 ## Install
 
@@ -71,6 +71,13 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - `git push` is expected to trigger Jenkins automatically.
 - Task is not complete until Jenkins succeeds and the target environment health check passes.
 
+8. Branch rule during execution:
+
+- `dev` is the long-lived integration branch.
+- If there is no parallel work conflict, prefer `dev`-first.
+- If the repo is in detached HEAD, worktree mode, or another task is already mutating `dev`, create a temporary task branch first.
+- Temporary branches should stay task-scoped and rebase back to latest `dev` before final integration.
+
 ## AGENTS.md Constraint Example
 
 ```md
@@ -79,7 +86,7 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Before any code change, read and obey:
   1) docs/ENGINEERING.md
   2) docs/tasks/taskbook.md
-- Execute gates using `python3 scripts/autopipeline/ap.py`.
+- Execute gates using `python3 docs/tools/autopipeline/ap.py`.
 - If required docs are missing, create/update docs first, then code.
 ```
 
@@ -139,29 +146,55 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Purpose:
   - Full regression matrix against the local Compose environment; must be 0 FAIL.
 - How to record:
-  - Add/maintain rows by regression ID (R-xxx), area, steps/command, expected, status, evidence.
-  - If any FAIL exists, gate fails.
+  - Add rows by regression ID (R-xxx), area, steps/command, expected, status, evidence.
+  - New or unexecuted rows must stay `TODO`.
+  - `PASS` is valid only after real execution with non-placeholder evidence.
+  - If any row is not `PASS`, or evidence is placeholder text, gate fails.
+
+## Branch Policy
+
+- `dev` is the only long-lived integration branch.
+- Temporary branches are preferred when parallel worktrees or concurrent tasks would otherwise collide on `dev`.
+- Temporary branches should be small, task-scoped, and rebased frequently against latest `dev`.
+- Final integration target remains `dev`; temporary branches are not release branches.
+
+## CI Trigger Strategy
+
+- Prefer split Jenkins behavior:
+- Branch or MR validation job for build/test/lint/typecheck and optional non-deploy runtime checks.
+- `dev` integration/deploy job for actual deployment-triggering pushes.
+- Avoid duplicate deploy triggers from both merge acceptance events and `dev` push events.
 
 ## Commands
 
 ```bash
 pip install pyyaml requests
-python3 scripts/autopipeline/ap.py run build
-python3 scripts/autopipeline/ap.py run test
-python3 scripts/autopipeline/ap.py run lint
-python3 scripts/autopipeline/ap.py run docker_build
-python3 scripts/autopipeline/ap.py runtime-up
-python3 scripts/autopipeline/ap.py wait-health
-python3 scripts/autopipeline/ap.py run smoke
-python3 scripts/autopipeline/ap.py run regression
-python3 scripts/autopipeline/ap.py runtime-down
-python3 scripts/autopipeline/ap.py verify-jenkins
-python3 scripts/autopipeline/ap.py wait-health --scope prod
-python3 scripts/autopipeline/ap.py verify-api-docs
-python3 scripts/autopipeline/ap.py check-matrix
-python3 scripts/autopipeline/ap.py gen-summary T0001-1
-python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
+python3 docs/tools/autopipeline/ap.py run build
+python3 docs/tools/autopipeline/ap.py run test
+python3 docs/tools/autopipeline/ap.py run lint
+python3 docs/tools/autopipeline/ap.py run typecheck
+python3 docs/tools/autopipeline/ap.py run docker_build
+python3 docs/tools/autopipeline/ap.py runtime-up
+python3 docs/tools/autopipeline/ap.py wait-health
+python3 docs/tools/autopipeline/ap.py run smoke
+python3 docs/tools/autopipeline/ap.py run regression
+python3 docs/tools/autopipeline/ap.py runtime-down
+python3 docs/tools/autopipeline/ap.py verify-jenkins
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
+python3 docs/tools/autopipeline/ap.py wait-health --scope prod
+python3 docs/tools/autopipeline/ap.py verify-api-docs
+python3 docs/tools/autopipeline/ap.py check-matrix
+python3 docs/tools/autopipeline/ap.py gen-summary T0001-1
+python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
 ```
+
+## Quality Gate Expectations
+
+- Backend quality gate: `commands.test` must pass.
+- Frontend quality gate: at minimum `commands.build`, `commands.lint`, and `commands.typecheck` must pass.
+- Regression matrix rows must start as `TODO` until actually executed.
+- `PASS` requires real evidence, not placeholders.
+- Before final commit/push, clean temporary logs, screenshots, generated artifacts, and cache by-products. `.local/` may remain when it is the intended local runtime data directory.
 
 ## Publish (NPM)
 

@@ -42,6 +42,10 @@ jenkins:
   deploy_timeout_sec: 1800
   prod_health_base_url: ""
   prod_health_path: ""
+  api_user: ""
+  api_token: ""
+  api_user_env: "JENKINS_USER"
+  api_token_env: "JENKINS_TOKEN"
 
 docs:
   taskbook: "docs/tasks/taskbook.md"
@@ -63,6 +67,9 @@ docs:
 生产健康检查通过
 
 规则：任一步骤失败或缺产物，禁止进入下一步；本地 compose 验证未通过禁止 commit；Jenkins 未成功或生产健康检查未通过，任务不视为完成。
+
+补充规则：
+- 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、回归中间产物、构建缓存等非必要产物；仅 `.local/` 下的本地运行数据允许保留。
 
 ---
 
@@ -124,15 +131,15 @@ docs:
 Gate-1 读任务：只从 taskbook 取范围与验收；缺信息先补 taskbook  
 Gate-2 写DD：无DD禁止写代码；DD必须含 时序图/ER图/接口时序（Mermaid）  
 Gate-3 实现：严格按DD；接口变更必须同步 API Markdown  
-Gate-4 本地CI：必须通过（commands.build / commands.test）；Go 后端与前端都必须覆盖  
+Gate-4 本地CI：后端必须通过 `commands.test`；前端至少通过 `commands.build`、`commands.lint`、`commands.typecheck`；前端自动化测试能力逐步补齐  
 Gate-5 静态分析+Review：静态分析通过；docs/reviews/ 生成记录  
 Gate-6 文档：更新 api.md + 追加 api-change-log.md  
 Gate-7 本地运行：必须用项目 Compose 启动本地 Docker 环境；失败先修复再继续  
 Gate-8 健康检查：本地容器启动后必须健康检查通过  
-Gate-9 全量回归：按 API Markdown 对本地 Compose 环境全量回归；回归矩阵全量 PASS（0 fail）；发现问题必须写 bug-list 并新增自动化回归用例  
+Gate-9 全量回归：按 API Markdown 对本地 Compose 环境全量回归；回归矩阵仅可在真实执行后标记 PASS，且必须附证据；发现问题必须写 bug-list 并新增自动化回归用例  
 Gate-10 Jenkins 准备：Jenkinsfile、Job 配置、镜像仓库策略必须可用  
 Gate-11 任务总结：必须生成 docs/tasks/summaries/<TASK_ID>.md  
-Gate-12 提交触发：本地门禁全过后才允许 commit+push  
+Gate-12 提交触发：本地门禁全过且临时产物已清理后，才允许 commit+push  
 Gate-13 流水线验证：push 后必须确认 Jenkins 自动构建、镜像发布、目标环境更新成功  
 Gate-14 完成：生产健康检查通过并补齐部署记录后，任务才完成
 
@@ -140,4 +147,8 @@ Gate-14 完成：生产健康检查通过并补齐部署记录后，任务才完
 
 ## 3. Repo 工具入口
 
-统一用 `python3 scripts/autopipeline/ap.py <command>` 执行。
+统一用 `python3 docs/tools/autopipeline/ap.py <command>` 执行。
+
+补充：
+- `commands.smoke` / `commands.regression` 可以封装 repo 脚本，但必须真正在本地运行目标系统。
+- `docs/testing/regression-matrix.md` 中的 `PASS` 只在真实执行并填入证据后允许保留；占位符证据会被视为未完成。

@@ -75,35 +75,66 @@ This contains all manual fields:
 
 Do not duplicate config in other md/yaml files.
 
+## Branch policy
+
+- `dev` remains the only long-lived integration branch.
+- Default behavior stays `dev`-first when there is no parallel work conflict.
+- If Claude or Codex is operating in a derived worktree, detached HEAD, or any parallel task context where another thread is already changing `dev`, prefer creating a temporary branch from the latest `dev` before editing.
+- Name temporary branches after the task, preferably `codex/<task-id>-<slug>` such as `codex/t0005-domestic-payment-site`.
+- Keep the temporary branch scoped to one task, complete design/implementation/verification there, then merge or rebase it back onto `dev` only after local gates pass.
+- Do not treat temporary branches as release branches; the final integration target is still `dev`.
+- In temporary-branch mode, work in small, closed-loop slices. Each slice should have a clear scope, synchronized docs, the relevant local validation, and a commit that can stand on its own.
+- Rebase temporary branches frequently against the latest `dev` to keep merge surfaces small.
+
+## CI trigger strategy
+
+- Prefer a split Jenkins model when parallel worktrees are active:
+- MR or branch validation job: build/test/lint/typecheck and optional non-deploy runtime checks on temporary branches or merge requests.
+- `dev` integration/deploy job: trigger only from pushes that land on `dev`.
+- Do not rely on merge-request acceptance events to drive production deployment when a `dev` push event already exists; that commonly creates duplicate builds around merge time.
+
 ## Execution order
 
-1) `docs/ENGINEERING.md`
-2) `docs/tasks/taskbook.md`
-3) `docs/design/**`
-4) implementation
-5) local build/test/lint gates
-6) start and validate local Docker Compose runtime
-7) update API docs + regression matrix + bug list + summary
-8) verify Jenkins config / Jenkinsfile readiness
-9) commit/push to trigger Jenkins
-10) verify Jenkins pipeline + target environment health
+1) choose branch mode (`dev` directly, or temporary branch if parallel worktree rules apply)
+2) `docs/ENGINEERING.md`
+3) `docs/tasks/taskbook.md`
+4) `docs/design/**`
+5) implementation
+6) local build/test/lint gates
+7) start and validate local Docker Compose runtime
+8) update API docs + regression matrix + bug list + summary
+9) verify Jenkins config / Jenkinsfile readiness
+10) if temporary-branch mode is used, close one small slice at a time with reviewable commits and rebase regularly onto `dev`
+11) merge/rebase temporary branch back to latest `dev` when temporary-branch mode was used
+12) commit/push to trigger Jenkins
+13) verify Jenkins pipeline + target environment health, preferably with `verify-jenkins-build --git-ref HEAD` (strict deploy check by default; use `--allow-no-deploy` only for docs-only sync verification)
 
 ## Commands
 
 ```bash
-python3 scripts/autopipeline/ap.py run build
-python3 scripts/autopipeline/ap.py run test
-python3 scripts/autopipeline/ap.py run lint
-python3 scripts/autopipeline/ap.py run docker_build
-python3 scripts/autopipeline/ap.py runtime-up
-python3 scripts/autopipeline/ap.py wait-health
-python3 scripts/autopipeline/ap.py run smoke
-python3 scripts/autopipeline/ap.py run regression
-python3 scripts/autopipeline/ap.py runtime-down
-python3 scripts/autopipeline/ap.py verify-jenkins
-python3 scripts/autopipeline/ap.py wait-health --scope prod
-python3 scripts/autopipeline/ap.py verify-api-docs
-python3 scripts/autopipeline/ap.py check-matrix
-python3 scripts/autopipeline/ap.py gen-summary T0001-1
-python3 scripts/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
+python3 docs/tools/autopipeline/ap.py run build
+python3 docs/tools/autopipeline/ap.py run test
+python3 docs/tools/autopipeline/ap.py run lint
+python3 docs/tools/autopipeline/ap.py run typecheck
+python3 docs/tools/autopipeline/ap.py run docker_build
+python3 docs/tools/autopipeline/ap.py runtime-up
+python3 docs/tools/autopipeline/ap.py wait-health
+python3 docs/tools/autopipeline/ap.py run smoke
+python3 docs/tools/autopipeline/ap.py run regression
+python3 docs/tools/autopipeline/ap.py runtime-down
+python3 docs/tools/autopipeline/ap.py verify-jenkins
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
+python3 docs/tools/autopipeline/ap.py wait-health --scope prod
+python3 docs/tools/autopipeline/ap.py verify-api-docs
+python3 docs/tools/autopipeline/ap.py check-matrix
+python3 docs/tools/autopipeline/ap.py gen-summary T0001-1
+python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
 ```
+
+## Quality gate expectations
+
+- Gate-4: backend must pass `commands.test`; frontend must at least pass `commands.build`, `commands.lint`, and `commands.typecheck`. Frontend automated tests are added incrementally when the repo gains them.
+- Gate-9: `docs/testing/regression-matrix.md` rows must start as `TODO` until they are actually executed.
+- A matrix row can be marked `PASS` only after real execution, and `Evidence` must contain non-placeholder logs, screenshots, or report paths.
+- `python3 docs/tools/autopipeline/ap.py check-matrix` should be treated as a hard gate; placeholder evidence is equivalent to incomplete regression.
+- Before the final commit/push, clean temporary files, logs, screenshots, generated verification artifacts, cache directories, and similar by-products created during the task. The only persistent local runtime data that may remain is `.local/`.

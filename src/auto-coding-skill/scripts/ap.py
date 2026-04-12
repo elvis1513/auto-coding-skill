@@ -5,8 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
+import json
+import os
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional, List
 
@@ -49,6 +54,55 @@ def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
     return True
 
 
+def _jenkins_basic_auth_headers(cfg: dict) -> dict:
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    direct_user = str(jenkins_cfg.get("api_user") or "").strip()
+    direct_token = str(jenkins_cfg.get("api_token") or "").strip()
+    user_env = str(jenkins_cfg.get("api_user_env") or "JENKINS_USER").strip() or "JENKINS_USER"
+    token_env = str(jenkins_cfg.get("api_token_env") or "JENKINS_TOKEN").strip() or "JENKINS_TOKEN"
+    user = direct_user or os.getenv(user_env) or os.getenv("JENKINS_USER")
+    token = direct_token or os.getenv(token_env) or os.getenv("JENKINS_TOKEN") or os.getenv("JENKINS_PASSWORD")
+    if not user or not token:
+        raise APError(
+            f"Missing Jenkins API credentials. Fill jenkins.api_user / jenkins.api_token in docs/ENGINEERING.md, "
+            f"or set env vars {user_env} and {token_env}."
+        )
+    raw = f"{user}:{token}".encode("utf-8")
+    auth = base64.b64encode(raw).decode("ascii")
+    return {"Authorization": f"Basic {auth}"}
+
+
+def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15) -> dict:
+    headers = {"Accept": "application/json"}
+    headers.update(_jenkins_basic_auth_headers(cfg))
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = resp.read().decode("utf-8")
+    except Exception as exc:
+        raise APError(f"Jenkins API request failed: {url}\n{exc}") from exc
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise APError(f"Jenkins API returned non-JSON response: {url}\n{exc}") from exc
+
+
+def _resolve_git_short_sha(repo: Path, ref: str) -> str:
+    result = run(["git", "rev-parse", "--short=12", ref], cwd=repo, check=False)
+    value = result.stdout.strip()
+    if value:
+        return value
+    return ref.strip()
+
+
+def _jenkins_builds_api_url(job_url: str, max_builds: int) -> str:
+    base = str(job_url or "").strip().rstrip("/")
+    if not base:
+        raise APError("Missing jenkins.job_url in docs/ENGINEERING.md")
+    tree = f"builds[number,result,building,description,url]{{0,{max_builds}}}"
+    return f"{base}/api/json?tree={urllib.parse.quote(tree, safe='=,')}"
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
@@ -59,10 +113,11 @@ def cmd_install(args: argparse.Namespace) -> None:
     if args.bridges:
         copy_tree(templates / "bridges", repo)
 
-    scripts_dir = repo / "scripts" / "autopipeline"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    copy_tree(Path(__file__).resolve(), scripts_dir / "ap.py")
-    copy_tree(Path(__file__).resolve().parent / "core.py", scripts_dir / "core.py")
+    tools_dir = repo / "docs" / "tools" / "autopipeline"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    copy_tree(Path(__file__).resolve(), tools_dir / "ap.py")
+    copy_tree(Path(__file__).resolve().parent / "core.py", tools_dir / "core.py")
+    copy_tree(Path(__file__).resolve().parent / "http_checks.py", tools_dir / "http_checks.py")
 
     gi = repo / ".gitignore"
     secret_line = "docs/ENGINEERING.md"
@@ -140,12 +195,14 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 变更记录位置：`{api_change_log}`
 
 ## 5. 质量门禁证据（必须可追溯）
-- 本地CI：TODO
-- 静态分析：TODO
+- 后端测试：`commands.test` — TODO
+- 前端构建：`commands.build` — TODO
+- 静态分析：`commands.lint` — TODO
+- 前端类型检查：`commands.typecheck` — TODO
 - Review 文档：TODO
 - DD 文档：TODO
 - Jenkins 准备：TODO
-- 回归矩阵：`{regression_matrix}`（全量 PASS，0 fail）
+- 回归矩阵：`{regression_matrix}`（全量 PASS，0 fail，且每项必须有真实证据）
 
 ## 6. 本地运行与 Jenkins 部署记录
 - Local compose：TODO
@@ -166,6 +223,28 @@ def cmd_check_matrix(args: argparse.Namespace) -> None:
 
     rows = 0
     fail = []
+
+    def evidence_missing(value: str) -> bool:
+        stripped = value.strip()
+        lower = stripped.lower()
+        if not stripped:
+            return True
+        if stripped.startswith("<") and stripped.endswith(">"):
+            return True
+        placeholder_tokens = [
+            "todo",
+            "tbd",
+            "pending",
+            "replace-with",
+            "paste log path",
+            "paste evidence",
+            "fill-with",
+            "待补",
+            "待填",
+            "占位",
+        ]
+        return any(token in lower for token in placeholder_tokens)
+
     for line in matrix.read_text(encoding="utf-8").splitlines():
         s = line.strip()
         if not s.startswith("|"):
@@ -182,6 +261,10 @@ def cmd_check_matrix(args: argparse.Namespace) -> None:
         rows += 1
         if status != "PASS":
             fail.append((rid, status or "(empty)"))
+            continue
+        evidence = cols[7] if len(cols) > 7 else ""
+        if evidence_missing(evidence):
+            fail.append((rid, "PASS-without-evidence"))
 
     if rows == 0:
         raise APError(f"No regression rows found in matrix: {matrix}")
@@ -302,6 +385,67 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     print(f"[verify-jenkins] OK: {jenkinsfile}")
 
 
+def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    job_url = str(jenkins_cfg.get("job_url") or "").strip()
+    if not job_url:
+        raise APError("Missing jenkins.job_url in docs/ENGINEERING.md")
+
+    git_ref = str(args.git_ref or "HEAD").strip()
+    git_short_sha = _resolve_git_short_sha(repo, git_ref)
+    max_builds = int(args.max_builds or 20)
+    timeout_s = int(args.timeout_sec or 300)
+    poll_s = int(args.poll_sec or 5)
+
+    deadline = time.time() + timeout_s
+    matched = None
+    api_url = _jenkins_builds_api_url(job_url, max_builds)
+
+    while time.time() < deadline:
+        payload = _jenkins_api_get_json(api_url, cfg)
+        builds = payload.get("builds") or []
+        matched = next((b for b in builds if git_short_sha in str(b.get("description") or "")), None)
+        if matched and not matched.get("building"):
+            break
+        time.sleep(poll_s)
+
+    if not matched:
+        raise APError(
+            f"No Jenkins build found for commit {git_short_sha} under {job_url}. "
+            f"Checked latest {max_builds} builds for up to {timeout_s}s."
+        )
+
+    if matched.get("building"):
+        raise APError(
+            f"Jenkins build for commit {git_short_sha} is still running: "
+            f"#{matched.get('number')} {matched.get('url')}"
+        )
+
+    result = str(matched.get("result") or "").strip().upper()
+    description = str(matched.get("description") or "").strip()
+    if result != "SUCCESS":
+        raise APError(
+            f"Jenkins build for commit {git_short_sha} did not succeed: "
+            f"#{matched.get('number')} result={result or '(empty)'} {matched.get('url')}"
+        )
+    if not args.allow_no_deploy and description.startswith("no-deploy:"):
+        raise APError(
+            f"Jenkins build for commit {git_short_sha} succeeded but did not deploy: "
+            f"#{matched.get('number')} {description}"
+        )
+
+    print(
+        "[verify-jenkins-build] OK: "
+        f"commit={git_short_sha} "
+        f"build=#{matched.get('number')} "
+        f"result={result} "
+        f"description={description} "
+        f"url={matched.get('url')}"
+    )
+
+
 def cmd_verify_api_docs(args: argparse.Namespace) -> None:
     """Ensure API markdown doc and change-log exist."""
     repo = Path(args.repo).resolve()
@@ -329,7 +473,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     if not summary.exists():
         raise APError(
             f"Task summary missing: {summary}\n"
-            f"Generate: python3 scripts/autopipeline/ap.py gen-summary {task_id}"
+            f"Generate: python3 docs/tools/autopipeline/ap.py gen-summary {task_id}"
         )
 
     if args.require_runtime_health:
@@ -384,6 +528,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("verify-jenkins")
     s.set_defaults(func=cmd_verify_jenkins)
+
+    s = sp.add_parser("verify-jenkins-build")
+    s.add_argument("--git-ref", default="HEAD")
+    s.add_argument("--max-builds", type=int, default=20)
+    s.add_argument("--timeout-sec", type=int, default=300)
+    s.add_argument("--poll-sec", type=int, default=5)
+    s.add_argument("--allow-no-deploy", action="store_true")
+    s.set_defaults(func=cmd_verify_jenkins_build)
 
     s = sp.add_parser("verify-api-docs")
     s.set_defaults(func=cmd_verify_api_docs)

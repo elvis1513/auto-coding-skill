@@ -26,7 +26,7 @@
 - 本地CI：粘贴摘要或给出文件路径
 - 本地 Compose 验证：命令输出或 Review 文档摘要
 - Jenkins 部署记录：`docs/deployment/deploy-records/T0001-YYYYMMDD.md`
-- 回归矩阵：`docs/testing/regression-matrix.md`（全量PASS）
+- 回归矩阵：`docs/testing/regression-matrix.md`（全量PASS，且每项必须有真实证据）
 - Bug清单（如有）：`docs/bugs/bug-list.md`
 - 任务总结（强制）：`docs/tasks/summaries/T0001.md`
 

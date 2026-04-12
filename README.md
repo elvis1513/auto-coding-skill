@@ -23,6 +23,13 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v0.3.1
+
+- Added Jenkins crumb / CSRF retry support for API verification requests.
+- Added finer-grained Jenkins folder / multibranch pipeline resolution.
+- Added multibranch root job + branch child job support, with current Git branch inference when needed.
+- Kept existing `verify-jenkins-build --git-ref` and direct `--job-url` / `--build-number` flows compatible.
+
 ### v0.3.0
 
 - Synced reusable workflow improvements from a production project back into this skill.

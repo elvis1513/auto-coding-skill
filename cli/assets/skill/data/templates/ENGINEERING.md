@@ -33,6 +33,7 @@ runtime:
   startup_timeout_sec: 120
 
 jenkins:
+  base_url: ""
   job_name: ""
   job_url: ""
   trigger_branch: ""

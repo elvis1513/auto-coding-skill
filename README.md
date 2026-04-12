@@ -21,6 +21,17 @@ Fallback:
 npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 ```
 
+## Release Notes
+
+### v0.3.0
+
+- Synced reusable workflow improvements from a production project back into this skill.
+- Moved repo-side helper entrypoint to `docs/tools/autopipeline`.
+- Tightened regression matrix rules: rows start as `TODO`, and `PASS` requires real execution evidence.
+- Added Jenkins API verification flow with credentials sourced from `docs/ENGINEERING.md` or environment variables.
+- Kept the workflow dual-targeted for Claude and Codex, with MCP / skills / plugins / apps preferred over manual fallback.
+- Kept local `docker compose` runtime validation as a hard pre-commit gate for Go fullstack monorepo projects.
+
 ## Standard Workflow
 
 1. Install skill into project:
@@ -80,6 +91,8 @@ This frontmatter is the only manual config source (commands + local Docker runti
 
 ## AGENTS.md Constraint Example
 
+Use this when you want Claude or Codex to invoke the skill automatically and avoid falling back to ad-hoc single-agent development.
+
 ```md
 ## Mandatory Skill
 - Always use `auto-coding-skill` for implementation tasks.
@@ -88,6 +101,51 @@ This frontmatter is the only manual config source (commands + local Docker runti
   2) docs/tasks/taskbook.md
 - Execute gates using `python3 docs/tools/autopipeline/ap.py`.
 - If required docs are missing, create/update docs first, then code.
+
+## Tooling Policy
+- Prefer currently available MCP servers, installed skills, plugins, and app connectors before shell/manual work.
+- When a connector or MCP can read or write the authoritative source directly, use it instead of retyping or duplicating state.
+
+## Multi-Agent Policy
+- Default to multi-agent execution.
+- Before substantial work, split into parallel subtasks whenever boundaries are clear:
+  1) design / research
+  2) backend implementation
+  3) frontend implementation
+  4) validation / documentation / review
+- Keep one main agent responsible for task framing, integration, quality gates, and final delivery.
+- Do not keep the whole workflow on one agent when the work can be parallelized safely.
+
+## Gate Policy
+- Local docker compose validation must pass before commit.
+- Regression matrix rows must stay `TODO` until actually executed.
+- `PASS` without real evidence is invalid.
+- Push is not the finish line: Jenkins success and target environment health check are mandatory.
+```
+
+## Claude / Codex Multi-Agent Execution Template
+
+Use this wording directly in `AGENTS.md` if you want the behavior to be stronger and more explicit:
+
+```md
+For any non-trivial task, Claude/Codex must use a multi-agent workflow by default.
+
+Execution rule:
+1. Main agent reads `docs/ENGINEERING.md` and `docs/tasks/taskbook.md`, defines scope, and keeps final ownership.
+2. Side agents are created for independent work only: design research, backend changes, frontend changes, regression checks, docs/review updates.
+3. Main agent integrates side-agent outputs, resolves conflicts, runs gates, and decides completion.
+4. If the task can be parallelized safely, do not keep it in a single-agent linear flow.
+
+Tool rule:
+1. Prefer existing MCP servers.
+2. Then prefer installed skills.
+3. Then prefer plugins/apps/connectors.
+4. Only then use shell/manual fallback.
+
+Gate rule:
+1. Run repo gates through `python3 docs/tools/autopipeline/ap.py`.
+2. Local compose runtime must pass before commit.
+3. Jenkins verification and target environment health must pass before the task is marked complete.
 ```
 
 ## Docs Structure and Recording Rules
@@ -96,7 +154,7 @@ This frontmatter is the only manual config source (commands + local Docker runti
 - Purpose: single source of project config + engineering gate rules.
 - How to record:
   - Fill YAML frontmatter once (project/commands/runtime/jenkins/docs fields).
-  - Keep all local runtime and Jenkins info here only (compose file/service/container/image/health/job/env).
+  - Keep all local runtime and Jenkins info here only (compose file/service/container/image/health/job/env/base URL).
   - Do not duplicate config in other docs.
 
 ### 2) docs/deployment/
@@ -181,6 +239,8 @@ python3 docs/tools/autopipeline/ap.py run regression
 python3 docs/tools/autopipeline/ap.py runtime-down
 python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name platform/deploy-dev --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url https://jenkins.example.com/job/platform/job/deploy-dev --build-number 152
 python3 docs/tools/autopipeline/ap.py wait-health --scope prod
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py check-matrix
@@ -195,6 +255,16 @@ python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summa
 - Regression matrix rows must start as `TODO` until actually executed.
 - `PASS` requires real evidence, not placeholders.
 - Before final commit/push, clean temporary logs, screenshots, generated artifacts, and cache by-products. `.local/` may remain when it is the intended local runtime data directory.
+
+## Jenkins Build Tracking
+
+- `verify-jenkins-build --git-ref HEAD`
+  - Use when Jenkins build descriptions include commit SHA and you want to find the latest build automatically.
+- `verify-jenkins-build --job-name <folder/job> --build-number <N>`
+  - Use when you already know the Jenkins job and build number and want deterministic build verification.
+- `verify-jenkins-build --job-url <full-job-url> --build-number <N>`
+  - Use when the job is outside the default configured job path or you want to override the configured job.
+- If you want `--job-name` to resolve jobs outside the default `jenkins.job_url`, fill `jenkins.base_url` in `docs/ENGINEERING.md`.
 
 ## Publish (NPM)
 

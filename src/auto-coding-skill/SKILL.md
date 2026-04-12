@@ -7,7 +7,7 @@ description: Use for strict Go fullstack monorepo engineering workflow in Claude
 
 This branch specializes the skill for Go backend + frontend monorepo projects that build Docker images locally and use Jenkins pipelines to auto-deploy after push. It supports both Claude and Codex. During design, research, implementation, verification, and delivery, prefer already available MCP servers, installed skills, plugins, and app connectors over ad-hoc manual work whenever they can complete the task reliably.
 
-Default to multi-agent execution when the client supports it. Break work into independent design, research, implementation, validation, and documentation subtasks so Claude/Codex can run them in parallel whenever that reduces cycle time without weakening control of the main task.
+Default to multi-agent execution when the client supports it. Break work into independent design, research, implementation, validation, and documentation subtasks so Claude/Codex can run them in parallel whenever that reduces cycle time without weakening control of the main task. Do not keep the whole task on one agent when the work can be partitioned safely.
 
 ## Supported clients
 
@@ -38,6 +38,7 @@ Prefer multi-agent mode across the workflow:
 2) Keep the main agent on the critical path: task framing, design decisions, integration, and final quality gates.
 3) Use side agents for bounded work such as research, code slices, documentation updates, regression checks, or review passes.
 4) Do not delegate a blocking architectural decision without keeping one agent responsible for final integration and correctness.
+5) A practical default split for Go fullstack work is: design/research, backend implementation, frontend implementation, validation/documentation.
 
 ## Entry
 
@@ -107,7 +108,7 @@ Do not duplicate config in other md/yaml files.
 10) if temporary-branch mode is used, close one small slice at a time with reviewable commits and rebase regularly onto `dev`
 11) merge/rebase temporary branch back to latest `dev` when temporary-branch mode was used
 12) commit/push to trigger Jenkins
-13) verify Jenkins pipeline + target environment health, preferably with `verify-jenkins-build --git-ref HEAD` (strict deploy check by default; use `--allow-no-deploy` only for docs-only sync verification)
+13) verify Jenkins pipeline + target environment health, preferably with `verify-jenkins-build --git-ref HEAD`; when a precise Jenkins build is already known, use `verify-jenkins-build --job-name <folder/job> --build-number <N>` or `--job-url <url> --build-number <N>` (strict deploy check by default; use `--allow-no-deploy` only for docs-only sync verification)
 
 ## Commands
 
@@ -124,6 +125,8 @@ python3 docs/tools/autopipeline/ap.py run regression
 python3 docs/tools/autopipeline/ap.py runtime-down
 python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name platform/deploy-dev --build-number 152
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url https://jenkins.example.com/job/platform/job/deploy-dev --build-number 152
 python3 docs/tools/autopipeline/ap.py wait-health --scope prod
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py check-matrix

@@ -103,6 +103,72 @@ def _jenkins_builds_api_url(job_url: str, max_builds: int) -> str:
     return f"{base}/api/json?tree={urllib.parse.quote(tree, safe='=,')}"
 
 
+def _jenkins_job_path(job_name: str) -> str:
+    parts = [p.strip() for p in str(job_name or "").split("/") if p.strip()]
+    if not parts:
+        raise APError("Jenkins job name is empty. Pass --job-name or fill jenkins.job_name.")
+    return "/".join(f"job/{urllib.parse.quote(part, safe='')}" for part in parts)
+
+
+def _jenkins_job_url_from_name(base_url: str, job_name: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise APError("Missing Jenkins base URL. Fill jenkins.base_url or pass --job-url.")
+    return f"{base}/{_jenkins_job_path(job_name)}"
+
+
+def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -> str:
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    explicit_url = str(job_url or "").strip()
+    requested_name = str(job_name or "").strip()
+    configured_name = str(jenkins_cfg.get("job_name") or "").strip()
+    configured_url = str(jenkins_cfg.get("job_url") or "").strip()
+    base_url = str(jenkins_cfg.get("base_url") or "").strip()
+
+    if explicit_url:
+        return explicit_url.rstrip("/")
+    if requested_name:
+        if configured_name and requested_name == configured_name and configured_url:
+            return configured_url.rstrip("/")
+        if base_url:
+            return _jenkins_job_url_from_name(base_url, requested_name)
+        raise APError(
+            f"Cannot resolve Jenkins job URL for job '{requested_name}'. "
+            "Pass --job-url, or fill jenkins.base_url in docs/ENGINEERING.md."
+        )
+    if configured_url:
+        return configured_url.rstrip("/")
+    if configured_name and base_url:
+        return _jenkins_job_url_from_name(base_url, configured_name)
+    raise APError(
+        "Missing Jenkins job location. Fill jenkins.job_url, or fill both "
+        "jenkins.base_url and jenkins.job_name in docs/ENGINEERING.md."
+    )
+
+
+def _jenkins_build_api_url(job_url: str, build_number: int) -> str:
+    base = str(job_url or "").strip().rstrip("/")
+    if not base:
+        raise APError("Missing Jenkins job URL.")
+    if build_number <= 0:
+        raise APError("Build number must be a positive integer.")
+    tree = "number,result,building,description,url"
+    return f"{base}/{build_number}/api/json?tree={urllib.parse.quote(tree, safe='=,')}"
+
+
+def _assert_jenkins_build_success(build: dict, identifier: str, allow_no_deploy: bool) -> tuple[str, str]:
+    if build.get("building"):
+        raise APError(f"Jenkins build is still running: {identifier}")
+
+    result = str(build.get("result") or "").strip().upper()
+    description = str(build.get("description") or "").strip()
+    if result != "SUCCESS":
+        raise APError(f"Jenkins build did not succeed: {identifier} result={result or '(empty)'}")
+    if not allow_no_deploy and description.startswith("no-deploy:"):
+        raise APError(f"Jenkins build succeeded but did not deploy: {identifier} {description}")
+    return result, description
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
@@ -371,7 +437,6 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
 
     required = [
         ("jenkins.job_name", jenkins_cfg.get("job_name")),
-        ("jenkins.job_url", jenkins_cfg.get("job_url")),
         ("jenkins.trigger_branch", jenkins_cfg.get("trigger_branch")),
         ("jenkins.image_repository", jenkins_cfg.get("image_repository")),
         ("jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy")),
@@ -380,6 +445,11 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
         ("jenkins.prod_health_path", jenkins_cfg.get("prod_health_path")),
     ]
     missing = [name for name, value in required if not str(value or "").strip()]
+    if not str(jenkins_cfg.get("job_url") or "").strip():
+        base_url = str(jenkins_cfg.get("base_url") or "").strip()
+        job_name = str(jenkins_cfg.get("job_name") or "").strip()
+        if not (base_url and job_name):
+            missing.append("jenkins.job_url (or jenkins.base_url + jenkins.job_name)")
     if missing:
         raise APError("Missing Jenkins config: " + ", ".join(missing))
     print(f"[verify-jenkins] OK: {jenkinsfile}")
@@ -388,18 +458,48 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
 def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
-    jenkins_cfg = (cfg.get("jenkins") or {})
-    job_url = str(jenkins_cfg.get("job_url") or "").strip()
-    if not job_url:
-        raise APError("Missing jenkins.job_url in docs/ENGINEERING.md")
-
-    git_ref = str(args.git_ref or "HEAD").strip()
-    git_short_sha = _resolve_git_short_sha(repo, git_ref)
+    job_url = _resolve_jenkins_job_url(cfg, job_name=args.job_name, job_url=args.job_url)
+    build_number = args.build_number
     max_builds = int(args.max_builds or 20)
     timeout_s = int(args.timeout_sec or 300)
     poll_s = int(args.poll_sec or 5)
 
     deadline = time.time() + timeout_s
+    if build_number is not None:
+        payload = None
+        api_url = _jenkins_build_api_url(job_url, int(build_number))
+        while time.time() < deadline:
+            payload = _jenkins_api_get_json(api_url, cfg)
+            if not payload.get("building"):
+                break
+            time.sleep(poll_s)
+        if not payload:
+            raise APError(
+                f"No Jenkins build payload found for build #{build_number} under {job_url}. "
+                f"Checked for up to {timeout_s}s."
+            )
+        if payload.get("building"):
+            raise APError(
+                f"Jenkins build is still running: "
+                f"#{payload.get('number')} {payload.get('url')}"
+            )
+        result, description = _assert_jenkins_build_success(
+            payload,
+            f"#{payload.get('number')} {payload.get('url')}",
+            args.allow_no_deploy,
+        )
+        print(
+            "[verify-jenkins-build] OK: "
+            f"job={args.job_name or '(configured)'} "
+            f"build=#{payload.get('number')} "
+            f"result={result} "
+            f"description={description} "
+            f"url={payload.get('url')}"
+        )
+        return
+
+    git_ref = str(args.git_ref or "HEAD").strip()
+    git_short_sha = _resolve_git_short_sha(repo, git_ref)
     matched = None
     api_url = _jenkins_builds_api_url(job_url, max_builds)
 
@@ -417,25 +517,11 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
             f"Checked latest {max_builds} builds for up to {timeout_s}s."
         )
 
-    if matched.get("building"):
-        raise APError(
-            f"Jenkins build for commit {git_short_sha} is still running: "
-            f"#{matched.get('number')} {matched.get('url')}"
-        )
-
-    result = str(matched.get("result") or "").strip().upper()
-    description = str(matched.get("description") or "").strip()
-    if result != "SUCCESS":
-        raise APError(
-            f"Jenkins build for commit {git_short_sha} did not succeed: "
-            f"#{matched.get('number')} result={result or '(empty)'} {matched.get('url')}"
-        )
-    if not args.allow_no_deploy and description.startswith("no-deploy:"):
-        raise APError(
-            f"Jenkins build for commit {git_short_sha} succeeded but did not deploy: "
-            f"#{matched.get('number')} {description}"
-        )
-
+    result, description = _assert_jenkins_build_success(
+        matched,
+        f"#{matched.get('number')} {matched.get('url')}",
+        args.allow_no_deploy,
+    )
     print(
         "[verify-jenkins-build] OK: "
         f"commit={git_short_sha} "
@@ -530,7 +616,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.set_defaults(func=cmd_verify_jenkins)
 
     s = sp.add_parser("verify-jenkins-build")
-    s.add_argument("--git-ref", default="HEAD")
+    s.add_argument("--git-ref")
+    s.add_argument("--job-name")
+    s.add_argument("--job-url")
+    s.add_argument("--build-number", type=int)
     s.add_argument("--max-builds", type=int, default=20)
     s.add_argument("--timeout-sec", type=int, default=300)
     s.add_argument("--poll-sec", type=int, default=5)

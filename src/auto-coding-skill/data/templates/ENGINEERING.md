@@ -10,26 +10,17 @@ project:
   jenkinsfile: "Jenkinsfile"
 
 commands:
+  light_gate: ""
   build: ""
   test: ""
   quick_test: ""
   lint: ""
   typecheck: ""
   format: ""
-  script_syntax: ""
-  diff_check: ""
-  docker_build: ""
-  compose_up: ""
-  compose_down: ""
-  smoke: ""
-  regression: ""
 
 runtime:
   docker_compose_file: ""
   docker_service: ""
-  container_name: ""
-  image: ""
-  app_port: ""
   health_base_url: ""
   health_path: ""
   env_file: ""
@@ -43,6 +34,8 @@ target_env:
   backend_base_url: ""
   backend_username: ""
   backend_password: ""
+  backend_root_username: ""
+  backend_root_password: ""
   health_base_url: ""
   health_path: ""
 
@@ -79,7 +72,7 @@ docs:
 默认原则：
 - 默认不要求本地 Docker Compose 启动。
 - 默认不要求本地 Docker build。
-- 默认不要求本地完整 smoke / regression。
+- 默认不要求本地完整 regression。
 - 默认不要求每个小改动生成长 summary。
 - 默认不要求 regression matrix 全 PASS。
 - 默认不要求 deployment record。
@@ -97,21 +90,20 @@ docs:
 ## 0. 配置填写（必须）
 
 先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
-- `commands.*`：本地轻量校验命令
+- `commands.light_gate`：推荐配置一个项目级快速门禁命令，作为默认本地校验入口
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码、Job、分支、镜像、部署环境，必须全部填写且真实可用
 
 字段说明：
 - `target_env.backend_username` / `target_env.backend_password`：目标环境后台账号
+- `target_env.backend_root_username` / `target_env.backend_root_password`：目标环境后台服务器 root 账号
 - `target_env.frontend_username` / `target_env.frontend_password`：目标环境前端登录账号
 - `jenkins.ui_username` / `jenkins.ui_password`：Jenkins 页面登录账号
 - `jenkins.api_user` / `jenkins.api_password`：Jenkins API 用户名 / 密码
 
 默认必填：
 - `project.name`
-- `commands.build`
-- `commands.quick_test` 或 `commands.test`
-- `commands.lint` 或 `commands.typecheck`
+- `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -119,6 +111,8 @@ docs:
 - `target_env.backend_base_url`
 - `target_env.backend_username`
 - `target_env.backend_password`
+- `target_env.backend_root_username`
+- `target_env.backend_root_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.ui_username`
@@ -133,7 +127,7 @@ docs:
 
 按需填写：
 - `runtime.*`：仅在本地运行诊断时使用
-- `commands.compose_up` / `commands.compose_down` / `commands.smoke` / `commands.regression`
+- `commands.build` / `commands.test` / `commands.quick_test` / `commands.lint` / `commands.typecheck` / `commands.format`：按项目实际情况保留
 
 ---
 
@@ -197,13 +191,12 @@ docs:
    只修改本次任务必要文件，不做无关重构。
 
 4. 本地轻量校验  
-   默认只跑：
-   - 编译 / build
-   - 单元测试或关键快速测试
-   - lint / typecheck
-   - API 文档检查
-   - Jenkinsfile / 脚本语法检查
+   默认只跑最少必要检查：
+   - 优先执行 `commands.light_gate`
+   - 若未配置，则执行 `quick_test` / `test` / `build` 中最先配置的一项
    - `git diff --check`
+   - API 文档检查
+   - Jenkins 配置检查
 
 5. 立即提交推送  
    轻量校验通过后，commit + push，触发 Jenkins。
@@ -250,8 +243,6 @@ docs:
 - `runtime-up`
 - `runtime-down`
 - 本地 health check
-- 本地 `smoke`
-- 本地 `regression`
 - `check-matrix`
 - `gen-summary`
 
@@ -271,7 +262,7 @@ docs:
 
 说明：
 - `doctor`：检查默认流程必填项和常见配置错误。
-- `light-gate`：默认轻量门禁。
+- `light-gate`：默认轻量门禁，优先执行项目自定义快速门禁命令。
 - `verify-target`：目标环境健康检查 + 按需关键 API / 页面验证。
 - `record-closure`：默认轻量闭环记录。
 - `check-matrix`、`gen-summary`、`runtime-up/down`：保留为按需工具。

@@ -77,9 +77,7 @@ Do not hide `docs/ENGINEERING.md` in `.gitignore`.
 
 Minimum required config for the default flow:
 - `project.name`
-- `commands.build`
-- `commands.quick_test` or `commands.test`
-- `commands.lint` or `commands.typecheck`
+- `commands.light_gate` or `commands.quick_test` or `commands.test` or `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -87,6 +85,8 @@ Minimum required config for the default flow:
 - `target_env.backend_base_url`
 - `target_env.backend_username`
 - `target_env.backend_password`
+- `target_env.backend_root_username`
+- `target_env.backend_root_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.base_url`
@@ -138,8 +138,6 @@ On-demand commands:
 ```bash
 python3 docs/tools/autopipeline/ap.py runtime-up
 python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
-python3 docs/tools/autopipeline/ap.py run smoke
-python3 docs/tools/autopipeline/ap.py run regression
 python3 docs/tools/autopipeline/ap.py runtime-down
 python3 docs/tools/autopipeline/ap.py check-matrix
 python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
@@ -147,9 +145,9 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 
 ## Quality policy
 
-- Default local gate is lightweight only: build, unit/quick test, lint, typecheck, API docs, Jenkinsfile / script syntax, `git diff --check`.
+- Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/Jenkins checks.
 - `doctor` should be used early to catch missing or invalid config before the first implementation loop.
-- `light-gate` now fails if the required default commands are not configured.
+- `light-gate` now fails if no usable fast gate command is configured.
 - `doctor`, `light-gate`, and `commit-push` all fail when required environment fields are missing, placeholder-like, or syntactically invalid.
 - Do not require local Docker Compose or full local regression for every small change.
 - Jenkins and target environment verification are more valuable than repeated local simulation of deploy-only problems.

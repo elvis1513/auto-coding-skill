@@ -35,7 +35,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - Synced reusable workflow improvements from a production project back into this skill.
 - Moved repo-side helper entrypoint to `docs/tools/autopipeline`.
 - Tightened regression matrix rules: rows start as `TODO`, and `PASS` requires real execution evidence.
-- Added Jenkins API verification flow with credentials sourced from `docs/ENGINEERING.md` or environment variables.
+- Added Jenkins API verification flow with credentials sourced from `docs/ENGINEERING.md`.
 
 ## Optimized Standard Flow
 
@@ -53,12 +53,11 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 3. 开发实现
    - 只修改本次任务必要文件，不做无关重构。
 4. 本地轻量校验
-   - build
-   - 单元测试或关键快速测试
-   - lint / typecheck
-   - API 文档检查
-   - Jenkinsfile / 脚本语法检查
+   - 优先执行一个项目自定义快速门禁命令
+   - 若未配置，再执行 quick test / test / build 中最先配置的一项
    - `git diff --check`
+   - API 文档检查
+   - Jenkins 配置检查
 5. 立即提交推送
    - 本地轻量校验通过后，commit + push，触发 Jenkins。
 6. Jenkins 验证
@@ -75,7 +74,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 默认不做：
 - 本地 Docker Compose 启动
 - 本地 Docker build
-- 本地完整 smoke / regression
+- 本地完整 regression
 - 每个小改动强制 `check-matrix`
 - 每个小改动强制生成 summary
 - 未真实执行就要求 regression matrix 全 `PASS`
@@ -83,7 +82,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 按需保留：
 - `runtime-up` / `runtime-down`
-- 本地 health / smoke / regression
+- 本地 health
 - `check-matrix`
 - `gen-summary`
 - deployment runbook / deployment record
@@ -120,9 +119,7 @@ It must be committed to Git. Do not add it to `.gitignore`.
 
 默认必填：
 - `project.name`
-- `commands.build`
-- `commands.quick_test` 或 `commands.test`
-- `commands.lint` 或 `commands.typecheck`
+- `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -130,6 +127,8 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `target_env.backend_base_url`
 - `target_env.backend_username`
 - `target_env.backend_password`
+- `target_env.backend_root_username`
+- `target_env.backend_root_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.base_url`
@@ -200,6 +199,7 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - How to record:
   - Fill YAML frontmatter once.
   - Keep target env front/backend usernames and passwords, Jenkins UI/API usernames and passwords, commands, docs paths here only.
+  - Target environment also includes backend server root username/password.
   - This file is expected to be committed to Git and maintained in plaintext for this workflow.
   - Remaining environment keys are all mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
   - Do not duplicate config elsewhere.
@@ -291,12 +291,6 @@ python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
 Available on-demand commands:
 
 ```bash
-python3 docs/tools/autopipeline/ap.py run build
-python3 docs/tools/autopipeline/ap.py run test
-python3 docs/tools/autopipeline/ap.py run quick_test
-python3 docs/tools/autopipeline/ap.py run lint
-python3 docs/tools/autopipeline/ap.py run typecheck
-python3 docs/tools/autopipeline/ap.py run script_syntax
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py verify-jenkins
@@ -306,8 +300,6 @@ python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url <job-url> -
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job <root-job> --branch-name <branch> --build-number <number>
 python3 docs/tools/autopipeline/ap.py runtime-up
 python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
-python3 docs/tools/autopipeline/ap.py run smoke
-python3 docs/tools/autopipeline/ap.py run regression
 python3 docs/tools/autopipeline/ap.py runtime-down
 python3 docs/tools/autopipeline/ap.py check-matrix
 python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
@@ -332,7 +324,7 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - `doctor`
   - Checks whether the default lightweight workflow is actually configured instead of silently skipping gates.
 - `light-gate`
-  - Now fails if required commands are missing instead of returning `OK` after skipping everything.
+  - Now prefers one curated fast gate command instead of serially running every expensive check.
 - `verify-target`
   - Performs real target-environment verification beyond health checks when you provide key backend/frontend paths.
 - `commit-push --record-closure`

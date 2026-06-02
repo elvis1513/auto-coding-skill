@@ -454,7 +454,7 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 变更记录位置：`{api_change_log}`
 
 ## 4. 质量证据
-- 本地轻量校验：build / test or quick_test / lint / typecheck / api docs / jenkinsfile / diff-check — TODO
+- 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check — TODO
 - Jenkins Build：TODO
 - 目标环境验证：TODO
 - 闭环记录：TODO
@@ -572,14 +572,8 @@ def _require_explicit_field(missing: List[str], field: str, value: object) -> No
 
 
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
-    commands = (cfg.get("commands") or {})
-    configured = str(commands.get("diff_check") or "").strip()
-    if configured:
-        print(f"[diff-check] {configured}")
-        run_shell(configured, cwd=repo)
-    else:
-        print("[diff-check] git diff --check")
-        run(["git", "diff", "--check"], cwd=repo)
+    print("[diff-check] git diff --check")
+    run(["git", "diff", "--check"], cwd=repo)
     print("[diff-check] OK")
 
 
@@ -613,38 +607,20 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     executed: List[str] = []
     missing: List[str] = []
 
-    if not str(commands.get("build") or "").strip():
-        missing.append("commands.build")
-    else:
-        _run_configured_command(repo, cfg, "build")
-        executed.append("build")
-
-    if str(commands.get("quick_test") or "").strip():
+    if str(commands.get("light_gate") or "").strip():
+        _run_configured_command(repo, cfg, "light_gate")
+        executed.append("light_gate")
+    elif str(commands.get("quick_test") or "").strip():
         _run_configured_command(repo, cfg, "quick_test")
         executed.append("quick_test")
     elif str(commands.get("test") or "").strip():
         _run_configured_command(repo, cfg, "test")
         executed.append("test")
+    elif str(commands.get("build") or "").strip():
+        _run_configured_command(repo, cfg, "build")
+        executed.append("build")
     else:
-        missing.append("commands.quick_test or commands.test")
-
-    static_executed = False
-    if str(commands.get("lint") or "").strip():
-        _run_configured_command(repo, cfg, "lint")
-        executed.append("lint")
-        static_executed = True
-
-    if str(commands.get("typecheck") or "").strip():
-        _run_configured_command(repo, cfg, "typecheck")
-        executed.append("typecheck")
-        static_executed = True
-
-    if not static_executed:
-        missing.append("commands.lint or commands.typecheck")
-
-    if str(commands.get("script_syntax") or "").strip():
-        _run_configured_command(repo, cfg, "script_syntax")
-        executed.append("script_syntax")
+        missing.append("commands.light_gate or commands.quick_test or commands.test or commands.build")
 
     if missing:
         raise APError(
@@ -664,8 +640,6 @@ def cmd_runtime_up(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     runtime_cfg = (cfg.get("runtime") or {})
-    if _run_configured_command(repo, cfg, "compose_up"):
-        return
     compose_args = _compose_base_args(runtime_cfg) + ["up", "-d"]
     docker_service = str(runtime_cfg.get("docker_service") or "").strip()
     if docker_service:
@@ -679,8 +653,6 @@ def cmd_runtime_down(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     runtime_cfg = (cfg.get("runtime") or {})
-    if _run_configured_command(repo, cfg, "compose_down"):
-        return
     compose_args = _compose_base_args(runtime_cfg) + ["down", "--remove-orphans"]
     print(f"[runtime-down] {' '.join(compose_args)}")
     run(compose_args, cwd=repo)
@@ -811,12 +783,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
-    if not str(commands.get("build") or "").strip():
-        missing.append("commands.build")
-    if not (str(commands.get("quick_test") or "").strip() or str(commands.get("test") or "").strip()):
-        missing.append("commands.quick_test or commands.test")
-    if not (str(commands.get("lint") or "").strip() or str(commands.get("typecheck") or "").strip()):
-        missing.append("commands.lint or commands.typecheck")
+    if not (
+        str(commands.get("light_gate") or "").strip()
+        or str(commands.get("quick_test") or "").strip()
+        or str(commands.get("test") or "").strip()
+        or str(commands.get("build") or "").strip()
+    ):
+        missing.append("commands.light_gate or commands.quick_test or commands.test or commands.build")
     _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
     _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
     _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
@@ -824,6 +797,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
     _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
     _require_explicit_field(missing, "target_env.backend_password", target_cfg.get("backend_password"))
+    _require_explicit_field(missing, "target_env.backend_root_username", target_cfg.get("backend_root_username"))
+    _require_explicit_field(missing, "target_env.backend_root_password", target_cfg.get("backend_root_password"))
     _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
     _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
 
@@ -856,8 +831,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     _validate_url_field(warnings, "jenkins.job_url", jenkins_cfg.get("job_url"))
 
     runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
-    if runtime_enabled and not (str(commands.get("compose_up") or "").strip() or str(runtime_cfg.get("docker_compose_file") or "").strip()):
-        warnings.append("runtime config is partially enabled but compose_up or docker_compose_file is missing")
+    if runtime_enabled and not str(runtime_cfg.get("docker_compose_file") or "").strip():
+        warnings.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
 
     try:
         timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)

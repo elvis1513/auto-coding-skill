@@ -19,7 +19,7 @@
 - 兼容性影响：
 
 ## 3. 质量证据
-- 本地轻量校验：build / test or quick_test / lint / typecheck / api docs / jenkinsfile / diff-check
+- 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check
 - Jenkins Build：
 - 目标环境验证：
 - 闭环记录：`docs/tasks/closure-log.md`

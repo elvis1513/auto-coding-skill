@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node -c cli/src/index.js && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py",
+    "test": "node -c cli/src/index.js && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py && find src cli -type d -name '__pycache__' -prune -exec rm -rf {} +",
     "sync-assets": "node cli/src/sync-assets.js",
     "release:check": "npm run sync-assets && npm run test && npm pack --dry-run"
   },

@@ -1,1 +1,2 @@
-# Intentionally empty.
+__pycache__/
+*.pyc

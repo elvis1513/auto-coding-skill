@@ -317,12 +317,12 @@ def _resolve_jenkins_job_candidates(
 ) -> List[str]:
     jenkins_cfg = (cfg.get("jenkins") or {})
     effective_branch = str(branch_name or "").strip()
-    if not effective_branch:
+    effective_root = str(multibranch_root_job or "").strip()
+    if not effective_branch and effective_root:
         inferred_branch = _resolve_git_branch_name(repo, git_ref or "HEAD")
         if inferred_branch:
             effective_branch = inferred_branch
 
-    effective_root = str(multibranch_root_job or "").strip()
     explicit_url = str(job_url or "").strip()
     explicit_name = str(job_name or "").strip()
     configured_url = str(jenkins_cfg.get("job_url") or "").strip()
@@ -423,6 +423,8 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
     staged = run(["git", "diff", "--cached", "--name-only"], cwd=repo, check=False).stdout.strip()
     unstaged = run(["git", "diff", "--name-only"], cwd=repo, check=False).stdout.strip()
     status = run(["git", "status", "--porcelain=v1"], cwd=repo, check=False).stdout.strip()
+    staged_block = "- " + staged.replace("\n", "\n- ") if staged else "- (none)"
+    unstaged_block = "- " + unstaged.replace("\n", "\n- ") if unstaged else "- (none)"
 
     content = f"""# Task Summary — {task_id} — {title}
 
@@ -442,9 +444,9 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 ## 2. 变更概览
 ### Git change snapshot
 - Staged files:
-{('- ' + staged.replace('\n','\n- ')) if staged else '- (none)'}
+{staged_block}
 - Unstaged files:
-{('- ' + unstaged.replace('\n','\n- ')) if unstaged else '- (none)'}
+{unstaged_block}
 - Status:
 ```text
 {status}
@@ -868,7 +870,9 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     max_builds = int(args.max_builds or 20)
     timeout_s = int(args.timeout_sec or 300)
     poll_s = int(args.poll_sec or 5)
-    inferred_branch = _resolve_git_branch_name(repo, git_ref)
+    inferred_branch = ""
+    if args.multibranch_root_job and not args.branch_name:
+        inferred_branch = _resolve_git_branch_name(repo, git_ref)
     branch_hint = str(args.branch_name or inferred_branch or "").strip()
     root_hint = str(
         args.multibranch_root_job

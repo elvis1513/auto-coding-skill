@@ -1,5 +1,7 @@
 # Task Summary — <TASK_ID> — <Title>
 
+> 仅用于高风险、跨模块、阶段性里程碑、需要完整复盘的任务。
+
 - Task ID：<TASK_ID>
 - Date：YYYY-MM-DD
 - Scope（本次范围）：
@@ -9,47 +11,22 @@
 
 ## 1. 目标与验收结论
 - 目标：
-- 验收结论：PASS / FAIL（FAIL 必须说明原因与后续计划）
+- 验收结论：PASS / FAIL
 
-## 2. 变更概览（代码/配置/本地运行/Jenkins）
+## 2. 变更概览
 - 关键改动点：
 - 影响模块：
-- 兼容性影响（是否破坏兼容、迁移方案）：
+- 兼容性影响：
 
-## 3. 接口变更（以 API Markdown 为准）
-- 新增：
-- 修改：
-- 废弃：
-- 变更记录位置：`docs/interfaces/api-change-log.md`（对应条目）
+## 3. 质量证据
+- 本地轻量校验：build / test or quick_test / lint / typecheck / api docs / jenkinsfile / diff-check
+- Jenkins Build：
+- 目标环境验证：
+- 闭环记录：`docs/tasks/closure-log.md`
 
-## 4. 数据变更（如有）
-- 表/字段变更：
-- 迁移方式：
+## 4. 风险与回滚
+- 风险：
 - 回滚方式：
 
-## 5. 质量门禁证据（必须可追溯）
-- 项目配置：`docs/ENGINEERING.md`（frontmatter）
-- 后端测试：`commands.test`
-- 前端构建：`commands.build`
-- 静态分析：`commands.lint`
-- 前端类型检查：`commands.typecheck`
-- Review 文档：`docs/reviews/<TASK_ID>-<timestamp>.md`
-- API 文档：`docs/interfaces/api.md`
-- Jenkins 配置检查：`Jenkinsfile` + `jenkins.*`
-- 回归矩阵：`docs/testing/regression-matrix.md`（全量 PASS，0 fail，且每项必须有真实证据）
-
-## 6. Bug 清单与回归用例
-- 新增/确认的 Bug（写入 `docs/bugs/bug-list.md`）：
-- 新增自动化回归用例（引用回归矩阵ID）：
-
-## 7. 本地运行与 Jenkins 部署记录
-- 本地 Compose 验证：health / smoke / regression 结果
-- Jenkins 部署记录：`docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`
-- Docker compose / image / Jenkins Job 变更（若有）：
-
-## 8. 风险与回滚
-- 风险：
-- 回滚点（备份/回滚步骤）：
-
-## 9. 后续行动（如有）
+## 5. 后续行动
 - TODO：

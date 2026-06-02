@@ -5,9 +5,7 @@ Engineering workflow skill for:
 - Claude Code
 - Codex CLI
 
-This branch is specialized for Go backend + frontend monorepo projects that build Docker images locally, validate with project `docker compose`, and rely on Jenkins to auto-build and update target environments after push.
-It supports both Claude and Codex. During development, it prefers already available MCP servers, installed skills, plugins, and app connectors for design, research, documentation, verification, and external system updates.
-It also prefers multi-agent execution whenever the work can be split into parallel subtasks safely.
+This skill targets Go backend + frontend monorepo projects that rely on Jenkins for build and deployment. The optimized default flow is lightweight locally, then Jenkins-first and target-environment-first for real verification.
 
 ## Install
 
@@ -36,8 +34,57 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - Moved repo-side helper entrypoint to `docs/tools/autopipeline`.
 - Tightened regression matrix rules: rows start as `TODO`, and `PASS` requires real execution evidence.
 - Added Jenkins API verification flow with credentials sourced from `docs/ENGINEERING.md` or environment variables.
-- Kept the workflow dual-targeted for Claude and Codex, with MCP / skills / plugins / apps preferred over manual fallback.
-- Kept local `docker compose` runtime validation as a hard pre-commit gate for Go fullstack monorepo projects.
+
+## Optimized Standard Flow
+
+默认闭环：
+
+`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> Jenkins 构建部署 -> 目标环境验证 -> 闭环记录`
+
+具体执行顺序：
+
+1. 需求确认
+   - 明确任务范围、影响服务、是否涉及 API / 数据库 / 部署 / Jenkins / 前端页面。
+2. 最小设计记录
+   - 普通小改动只更新 `taskbook` 或相关设计文档的一小段。
+   - 跨模块、接口、数据库、部署、Jenkins、关键页面流程变更才补 DD。
+3. 开发实现
+   - 只修改本次任务必要文件，不做无关重构。
+4. 本地轻量校验
+   - build
+   - 单元测试或关键快速测试
+   - lint / typecheck
+   - API 文档检查
+   - Jenkinsfile / 脚本语法检查
+   - `git diff --check`
+5. 立即提交推送
+   - 本地轻量校验通过后，commit + push，触发 Jenkins。
+6. Jenkins 验证
+   - 看 Jenkins 构建、镜像、部署结果；失败则基于 Jenkins 日志修复并再次提交。
+7. 目标环境验证
+   - 在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+8. 回归与证据记录
+   - 只有真实执行过 Jenkins / 目标环境验证，或明确要求本地运行验证时，才把 regression matrix 写成 `PASS`。
+9. 闭环记录
+   - 每个任务默认必须留下轻量闭环记录。
+
+## Default vs On-demand
+
+默认不做：
+- 本地 Docker Compose 启动
+- 本地 Docker build
+- 本地完整 smoke / regression
+- 每个小改动强制 `check-matrix`
+- 每个小改动强制生成 summary
+- 未真实执行就要求 regression matrix 全 `PASS`
+- 未真实部署目标环境就生成 deployment record
+
+按需保留：
+- `runtime-up` / `runtime-down`
+- 本地 health / smoke / regression
+- `check-matrix`
+- `gen-summary`
+- deployment runbook / deployment record
 
 ## Standard Workflow
 
@@ -60,45 +107,49 @@ python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 
 - `docs/ENGINEERING.md` frontmatter
 
-This frontmatter is the only manual config source (commands + local Docker runtime + Jenkins + docs paths).
+This frontmatter is the only manual config source.
+
+重点字段：
+- `commands.*`
+- `target_env.*`
+- `jenkins.*`
+- `docs.*`
+
+默认必填：
+- `project.name`
+- `commands.build`
+- `commands.quick_test` 或 `commands.test`
+- `commands.lint` 或 `commands.typecheck`
+- `target_env.name`
+- `target_env.health_base_url`
+- `target_env.health_path`
+- `jenkins.trigger_branch`
+- `jenkins.image_repository`
+- `jenkins.image_tag_strategy`
+- `jenkins.deploy_env`
+- `jenkins.job_url` 或 `jenkins.base_url + jenkins.job_name` 或 `jenkins.base_url + jenkins.multibranch_root_job`
 
 4. Start AI development by constraints:
 
 - `docs/ENGINEERING.md`
 - `docs/tasks/taskbook.md`
-- `docs/design/**`
+- `docs/tasks/closure-log.md`
 - `docs/interfaces/**`
 - `docs/testing/regression-matrix.md`
 - `docs/bugs/bug-list.md`
-- `docs/tasks/summaries/**`
 
 5. Tool selection rule during execution:
 
-- Prefer current MCP/skills/plugins/apps first.
-- Fall back to shell/manual work only when those capabilities are unavailable or insufficient.
+- Prefer current MCP / skills / plugins / apps first.
+- Fall back to shell / manual work only when those capabilities are unavailable or insufficient.
 
 6. Collaboration rule during execution:
 
 - Prefer multi-agent mode.
-- Split research, design, implementation, validation, and documentation into parallel subtasks whenever the boundaries are clear.
+- Split research, design, implementation, verification, and documentation into parallel subtasks whenever the boundaries are clear.
 - Keep one main agent responsible for integration and final gates.
 
-7. Delivery rule during execution:
-
-- Local `docker compose` validation must pass before commit.
-- `git push` is expected to trigger Jenkins automatically.
-- Task is not complete until Jenkins succeeds and the target environment health check passes.
-
-8. Branch rule during execution:
-
-- `dev` is the long-lived integration branch.
-- If there is no parallel work conflict, prefer `dev`-first.
-- If the repo is in detached HEAD, worktree mode, or another task is already mutating `dev`, create a temporary task branch first.
-- Temporary branches should stay task-scoped and rebase back to latest `dev` before final integration.
-
 ## AGENTS.md Constraint Example
-
-Use this when you want Claude or Codex to invoke the skill automatically and avoid falling back to ad-hoc single-agent development.
 
 ```md
 ## Mandatory Skill
@@ -106,7 +157,7 @@ Use this when you want Claude or Codex to invoke the skill automatically and avo
 - Before any code change, read and obey:
   1) docs/ENGINEERING.md
   2) docs/tasks/taskbook.md
-- Execute gates using `python3 docs/tools/autopipeline/ap.py`.
+- Execute workflow commands using `python3 docs/tools/autopipeline/ap.py`.
 - If required docs are missing, create/update docs first, then code.
 
 ## Tooling Policy
@@ -121,166 +172,155 @@ Use this when you want Claude or Codex to invoke the skill automatically and avo
   3) frontend implementation
   4) validation / documentation / review
 - Keep one main agent responsible for task framing, integration, quality gates, and final delivery.
-- Do not keep the whole workflow on one agent when the work can be parallelized safely.
 
-## Gate Policy
-- Local docker compose validation must pass before commit.
-- Regression matrix rows must stay `TODO` until actually executed.
-- `PASS` without real evidence is invalid.
-- Push is not the finish line: Jenkins success and target environment health check are mandatory.
-```
-
-## Claude / Codex Multi-Agent Execution Template
-
-Use this wording directly in `AGENTS.md` if you want the behavior to be stronger and more explicit:
-
-```md
-For any non-trivial task, Claude/Codex must use a multi-agent workflow by default.
-
-Execution rule:
-1. Main agent reads `docs/ENGINEERING.md` and `docs/tasks/taskbook.md`, defines scope, and keeps final ownership.
-2. Side agents are created for independent work only: design research, backend changes, frontend changes, regression checks, docs/review updates.
-3. Main agent integrates side-agent outputs, resolves conflicts, runs gates, and decides completion.
-4. If the task can be parallelized safely, do not keep it in a single-agent linear flow.
-
-Tool rule:
-1. Prefer existing MCP servers.
-2. Then prefer installed skills.
-3. Then prefer plugins/apps/connectors.
-4. Only then use shell/manual fallback.
-
-Gate rule:
-1. Run repo gates through `python3 docs/tools/autopipeline/ap.py`.
-2. Local compose runtime must pass before commit.
-3. Jenkins verification and target environment health must pass before the task is marked complete.
+## Default Gate Policy
+- Default local gate is lightweight only.
+- Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
+- Push is not the finish line: Jenkins success, target environment verification, and closure record are mandatory.
 ```
 
 ## Docs Structure and Recording Rules
 
 ### 1) docs/ENGINEERING.md
-- Purpose: single source of project config + engineering gate rules.
+- Purpose: single source of project config + workflow rules.
 - How to record:
-  - Fill YAML frontmatter once (project/commands/runtime/jenkins/docs fields).
-  - Keep all local runtime and Jenkins info here only (compose file/service/container/image/health/job/env/base URL).
-  - Do not duplicate config in other docs.
+  - Fill YAML frontmatter once.
+  - Keep target env accounts, Jenkins UI/API accounts, commands, docs paths here only.
+  - Do not duplicate config elsewhere.
 
-### 2) docs/deployment/
+### 2) docs/tasks/taskbook.md
+- Purpose: master task ledger.
+- How to record:
+  - Every task writes scope, risk, impact area, minimal design note, acceptance, evidence links.
+
+### 3) docs/tasks/closure-log.md
+- Purpose: default lightweight closure record.
+- How to record:
+  - Append one record per task.
+  - Required fields: task, commit, Jenkins build, target env verification, result, follow-up.
+  - If Jenkins failed then was fixed, also record failure reason and fix commit.
+
+### 4) docs/design/
+- Purpose: DD for cross-module / API / DB / deployment / Jenkins / key-page-flow changes.
+- How to record:
+  - Small changes do not need a standalone DD file.
+  - Higher-risk changes create `docs/design/<TASK_ID>-<slug>.md`.
+
+### 5) docs/interfaces/
 - Files:
-  - `docs/deployment/deploy-runbook.md`: local Compose validation + Jenkins deployment procedure.
-  - `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md`: local validation + Jenkins deployment evidence.
-- How to record:
-  - Record both local Compose validation and Jenkins deployment evidence: compose file, service, container, image tag, Jenkins build, deploy env, health checks.
+  - `docs/interfaces/api.md`
+  - `docs/interfaces/api-change-log.md`
+- Rule:
+  - Any API change updates both files in the same task.
 
-### 3) docs/design/
-- Files:
-  - `docs/design/<TASK_ID>-<slug>.md` (from DD template).
-- Purpose:
-  - Detailed design before coding (scope,方案、时序图、ER图、接口编排、测试策略、回滚).
-- How to record:
-  - One task/subtask one DD file.
-  - Status changes: Draft -> Reviewed -> Approved.
+### 6) docs/testing/regression-matrix.md
+- Purpose: on-demand regression evidence, not default gate for every small change.
+- Rule:
+  - Only real executed items can be marked `PASS`.
+  - `check-matrix` is used only when full regression is explicitly required.
 
-### 4) docs/interfaces/
-- Files:
-  - `docs/interfaces/api.md`: authoritative API documentation (current contract).
-  - `docs/interfaces/api-change-log.md`: append-only API changes per task.
-- How to record:
-  - API changes must update both files in the same task.
-  - `api.md` records latest endpoint contract.
-  - `api-change-log.md` appends task-level delta (新增/修改/废弃/兼容策略/影响面).
+### 7) docs/tasks/summaries/
+- Purpose: optional long-form summary.
+- Rule:
+  - Only for high-risk changes, milestones, or tasks that need full retrospective.
 
-### 5) docs/reviews/
-- Files:
-  - `docs/reviews/<TASK_ID>-<timestamp>.md` (from review template).
-- Purpose:
-  - Gate review evidence: static checks, Go + frontend quality, local Compose validation, Jenkins readiness, risks.
-- How to record:
-  - Record commands used (lint/typecheck from docs/ENGINEERING.md frontmatter) and conclusion (Pass/Blocked).
+### 8) docs/deployment/
+- Purpose: optional heavy deployment audit docs.
+- Rule:
+  - Only for manual deploys, high-risk releases, or explicit audit requirements.
 
-### 6) docs/tasks/
-- Files:
-  - `docs/tasks/taskbook.md`: master task ledger (all tasks appended here).
-  - `docs/tasks/summaries/<TASK_ID>.md`: end-of-task summary artifact.
-- How to record:
-  - `taskbook.md` stores task scope/acceptance/subtasks/evidence links.
-  - `summaries/<TASK_ID>.md` stores final objective result, change overview, gate evidence, risks, follow-ups.
+## High-risk Changes
 
-### 7) docs/testing/
-- Files:
-  - `docs/testing/regression-matrix.md`
-- Purpose:
-  - Full regression matrix against the local Compose environment; must be 0 FAIL.
-- How to record:
-  - Add rows by regression ID (R-xxx), area, steps/command, expected, status, evidence.
-  - New or unexecuted rows must stay `TODO`.
-  - `PASS` is valid only after real execution with non-placeholder evidence.
-  - If any row is not `PASS`, or evidence is placeholder text, gate fails.
+These categories require stronger verification and usually a DD:
+- Database migration
+- Authentication / authorization
+- Payment / order
+- Deployment / Jenkins
+- Nginx / gateway
+- File upload / download
+- Production configuration
 
-## Branch Policy
-
-- `dev` is the only long-lived integration branch.
-- Temporary branches are preferred when parallel worktrees or concurrent tasks would otherwise collide on `dev`.
-- Temporary branches should be small, task-scoped, and rebased frequently against latest `dev`.
-- Final integration target remains `dev`; temporary branches are not release branches.
-
-## CI Trigger Strategy
-
-- Prefer split Jenkins behavior:
-- Branch or MR validation job for build/test/lint/typecheck and optional non-deploy runtime checks.
-- `dev` integration/deploy job for actual deployment-triggering pushes.
-- Avoid duplicate deploy triggers from both merge acceptance events and `dev` push events.
+For these tasks, target environment verification is mandatory.
 
 ## Commands
 
+Recommended default flow:
+
 ```bash
 pip install pyyaml requests
+python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py light-gate
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>" --require-light-gate --require-jenkins
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
+python3 docs/tools/autopipeline/ap.py wait-health --scope target
+python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
+python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --jenkins <build-url> --result PASS --verification "health check" --verification "key api" --verification "key page"
+```
+
+Or let `commit-push` append the closure record directly:
+
+```bash
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
+  --msg "<TASK_ID>: <summary>" \
+  --require-light-gate \
+  --require-jenkins \
+  --record-closure \
+  --jenkins-build <build-url> \
+  --result PASS \
+  --verification "health check" \
+  --verification "key api" \
+  --verification "key page"
+```
+
+Available on-demand commands:
+
+```bash
 python3 docs/tools/autopipeline/ap.py run build
 python3 docs/tools/autopipeline/ap.py run test
+python3 docs/tools/autopipeline/ap.py run quick_test
 python3 docs/tools/autopipeline/ap.py run lint
 python3 docs/tools/autopipeline/ap.py run typecheck
-python3 docs/tools/autopipeline/ap.py run docker_build
+python3 docs/tools/autopipeline/ap.py run script_syntax
+python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py verify-api-docs
+python3 docs/tools/autopipeline/ap.py verify-jenkins
+python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name <job-name> --build-number <number>
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url <job-url> --build-number <number>
+python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job <root-job> --branch-name <branch> --build-number <number>
 python3 docs/tools/autopipeline/ap.py runtime-up
-python3 docs/tools/autopipeline/ap.py wait-health
+python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
 python3 docs/tools/autopipeline/ap.py run smoke
 python3 docs/tools/autopipeline/ap.py run regression
 python3 docs/tools/autopipeline/ap.py runtime-down
-python3 docs/tools/autopipeline/ap.py verify-jenkins
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name platform/deploy-dev --build-number 152
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url https://jenkins.example.com/job/platform/job/deploy-dev --build-number 152
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --branch-name main --build-number 152
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job platform/backend-service --git-ref HEAD
-python3 docs/tools/autopipeline/ap.py wait-health --scope prod
-python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py check-matrix
-python3 docs/tools/autopipeline/ap.py gen-summary T0001-1
-python3 docs/tools/autopipeline/ap.py commit-push T0001-1 --msg "T0001-1: <summary>" --require-runtime-health --require-jenkins --require-matrix
+python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ```
-
-## Quality Gate Expectations
-
-- Backend quality gate: `commands.test` must pass.
-- Frontend quality gate: at minimum `commands.build`, `commands.lint`, and `commands.typecheck` must pass.
-- Regression matrix rows must start as `TODO` until actually executed.
-- `PASS` requires real evidence, not placeholders.
-- Before final commit/push, clean temporary logs, screenshots, generated artifacts, and cache by-products. `.local/` may remain when it is the intended local runtime data directory.
 
 ## Jenkins Build Tracking
 
 - `verify-jenkins-build --git-ref HEAD`
   - Use when Jenkins build descriptions include commit SHA and you want to find the latest build automatically.
 - `verify-jenkins-build --job-name <folder/job> --build-number <N>`
-  - Use when you already know the Jenkins job and build number and want deterministic build verification.
+  - Use when you already know the Jenkins job and build number.
 - `verify-jenkins-build --job-url <full-job-url> --build-number <N>`
-  - Use when the job is outside the default configured job path or you want to override the configured job.
+  - Use when you want to bypass configured job resolution.
 - `verify-jenkins-build --multibranch-root-job <folder/repo> --branch-name <branch> --build-number <N>`
-  - Use for Jenkins multibranch or organization-folder jobs where the branch is a child job under the root pipeline/repository job.
+  - Use for multibranch or organization-folder jobs where the branch is a child job.
 - `verify-jenkins-build --multibranch-root-job <folder/repo> --git-ref HEAD`
-  - Use when the script should infer the current Git branch and probe the matching multibranch child job automatically.
-- If you want `--job-name` to resolve jobs outside the default `jenkins.job_url`, fill `jenkins.base_url` in `docs/ENGINEERING.md`.
-- If Jenkins returns `403` because of CSRF/crumb protection, `verify-jenkins-build` now retries automatically after requesting a crumb from `jenkins.base_url` or `jenkins.crumb_url`.
-- Use `jenkins.crumb_url` only when the crumb issuer endpoint is non-standard; otherwise `base_url + /crumbIssuer/api/json` is used automatically.
-- For multibranch pipelines, keep `jenkins.multibranch_root_job` as the folder/repo path without the branch child name, and keep `jenkins.branch_name` as the branch child name override if you do not want to infer it from Git.
+  - Use when the current Git branch should be inferred automatically.
+- If Jenkins returns `403`, the script retries with crumb / CSRF handling automatically.
+
+## New Safeguards
+
+- `doctor`
+  - Checks whether the default lightweight workflow is actually configured instead of silently skipping gates.
+- `light-gate`
+  - Now fails if required commands are missing instead of returning `OK` after skipping everything.
+- `verify-target`
+  - Performs real target-environment verification beyond health checks when you provide key backend/frontend paths.
+- `commit-push --record-closure`
+  - Lets you append the closure record as part of the same close loop.
 
 ## Publish (NPM)
 
@@ -291,53 +331,34 @@ npm run sync-assets
 npm test
 ```
 
-2. Bump version (required before every publish):
+2. Bump version:
 
 ```bash
 npm version patch
-# or: npm version minor
-# or: npm version major
+# or: npm version minor / major
 ```
 
-`npm version` will update `package.json` and create a git tag.
-
-3. Login and run release check:
+3. Release check:
 
 ```bash
-npm login
 npm whoami
 npm run release:check
 ```
 
-4. Publish package:
+4. Publish:
 
 ```bash
 npm publish --access public
-# if your account requires 2FA OTP:
+# or
 npm publish --access public --otp <6-digit-otp>
 ```
 
-5. Verify and update clients:
+5. Verify and update:
 
 ```bash
 npm view @elvis1513/auto-coding-skill version
 npm install -g @elvis1513/auto-coding-skill@latest
 ```
-
-### Common Publish Errors
-
-- `403 You cannot publish over the previously published versions`
-  - Cause: same version already exists.
-  - Fix: run `npm version patch` (or `minor`/`major`) then publish again.
-- `403 Two-factor authentication ... is required to publish`
-  - Cause: publish requires 2FA.
-  - Fix: use `npm publish --access public --otp <6-digit-otp>`.
-- `404 Not Found` when install
-  - Cause: package not published successfully, or scope/name mismatch.
-  - Fix: verify with `npm view @elvis1513/auto-coding-skill version` first.
-- `Access token expired or revoked`
-  - Cause: npm auth token expired.
-  - Fix: run `npm login` again and retry publish/install.
 
 ## License
 

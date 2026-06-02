@@ -10,8 +10,8 @@ import datetime as _dt
 import json
 import os
 import time
-import urllib.error
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional, List
@@ -60,16 +60,25 @@ def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
 
 def _jenkins_basic_auth_headers(cfg: dict) -> dict:
     jenkins_cfg = (cfg.get("jenkins") or {})
-    direct_user = str(jenkins_cfg.get("api_user") or "").strip()
+    direct_user = str(jenkins_cfg.get("api_user") or jenkins_cfg.get("ui_username") or "").strip()
     direct_token = str(jenkins_cfg.get("api_token") or "").strip()
+    direct_password = str(jenkins_cfg.get("api_password") or jenkins_cfg.get("ui_password") or "").strip()
     user_env = str(jenkins_cfg.get("api_user_env") or "JENKINS_USER").strip() or "JENKINS_USER"
     token_env = str(jenkins_cfg.get("api_token_env") or "JENKINS_TOKEN").strip() or "JENKINS_TOKEN"
+    password_env = str(jenkins_cfg.get("api_password_env") or "JENKINS_PASSWORD").strip() or "JENKINS_PASSWORD"
     user = direct_user or os.getenv(user_env) or os.getenv("JENKINS_USER")
-    token = direct_token or os.getenv(token_env) or os.getenv("JENKINS_TOKEN") or os.getenv("JENKINS_PASSWORD")
+    token = (
+        direct_token
+        or direct_password
+        or os.getenv(token_env)
+        or os.getenv(password_env)
+        or os.getenv("JENKINS_TOKEN")
+        or os.getenv("JENKINS_PASSWORD")
+    )
     if not user or not token:
         raise APError(
-            f"Missing Jenkins API credentials. Fill jenkins.api_user / jenkins.api_token in docs/ENGINEERING.md, "
-            f"or set env vars {user_env} and {token_env}."
+            "Missing Jenkins API credentials. Fill jenkins.api_user / jenkins.api_token / jenkins.api_password "
+            f"in docs/ENGINEERING.md, or set env vars {user_env}, {token_env}, {password_env}."
         )
     raw = f"{user}:{token}".encode("utf-8")
     auth = base64.b64encode(raw).decode("ascii")
@@ -81,6 +90,21 @@ def _http_error_body(exc: urllib.error.HTTPError) -> str:
         return exc.read().decode("utf-8", errors="replace").strip()
     except Exception:
         return ""
+
+
+def _http_get(url: str, headers: Optional[dict[str, str]] = None, timeout_s: int = 10) -> tuple[int, str]:
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+
+
+def _basic_auth_header(username: str, password: str) -> dict[str, str]:
+    raw = f"{username}:{password}".encode("utf-8")
+    auth = base64.b64encode(raw).decode("ascii")
+    return {"Authorization": f"Basic {auth}"}
 
 
 def _jenkins_root_url(cfg: dict, job_url: str = "") -> str:
@@ -390,7 +414,7 @@ def cmd_install(args: argparse.Namespace) -> None:
         gi.write_text(secret_line + "\n", encoding="utf-8")
 
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: edit docs/ENGINEERING.md frontmatter and fill project/runtime/jenkins fields")
+    print("[install] Next: edit docs/ENGINEERING.md frontmatter and fill project/commands/target_env/jenkins fields")
 
 
 def _infer_title(taskbook: Path, task_id: str) -> str:
@@ -421,7 +445,7 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
     if out_file.exists() and not args.force:
         raise APError(f"Summary already exists: {out_file} (use --force to overwrite)")
 
-    title = _infer_title(taskbook, task_id)
+    title = str(args.title or "").strip() or _infer_title(taskbook, task_id)
     date = _dt.date.today().isoformat()
 
     staged = run(["git", "diff", "--cached", "--name-only"], cwd=repo, check=False).stdout.strip()
@@ -429,6 +453,8 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
     status = run(["git", "status", "--porcelain=v1"], cwd=repo, check=False).stdout.strip()
 
     content = f"""# Task Summary — {task_id} — {title}
+
+> 仅用于高风险、跨模块、阶段性里程碑、需要完整复盘的任务。
 
 - Task ID：{task_id}
 - Date：{date}
@@ -441,7 +467,7 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 目标：TODO
 - 验收结论：PASS / FAIL — TODO
 
-## 2. 变更概览（代码/配置/本地运行/Jenkins）
+## 2. 变更概览
 ### Git change snapshot
 - Staged files:
 {('- ' + staged.replace('\n','\n- ')) if staged else '- (none)'}
@@ -455,19 +481,19 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 ## 3. 接口变更（以 API Markdown 为准）
 - 变更记录位置：`{api_change_log}`
 
-## 5. 质量门禁证据（必须可追溯）
-- 后端测试：`commands.test` — TODO
-- 前端构建：`commands.build` — TODO
-- 静态分析：`commands.lint` — TODO
-- 前端类型检查：`commands.typecheck` — TODO
-- Review 文档：TODO
-- DD 文档：TODO
-- Jenkins 准备：TODO
-- 回归矩阵：`{regression_matrix}`（全量 PASS，0 fail，且每项必须有真实证据）
+## 4. 质量证据
+- 本地轻量校验：build / test or quick_test / lint / typecheck / api docs / jenkinsfile / diff-check — TODO
+- Jenkins Build：TODO
+- 目标环境验证：TODO
+- 闭环记录：TODO
+- 回归矩阵（如有）：`{regression_matrix}`
 
-## 6. 本地运行与 Jenkins 部署记录
-- Local compose：TODO
-- Jenkins build / deploy：TODO
+## 5. 风险与回滚
+- 风险：TODO
+- 回滚：TODO
+
+## 6. 后续行动
+- TODO：TODO
 """
 
     out_file.write_text(content, encoding="utf-8")
@@ -542,6 +568,26 @@ def _load_cfg(repo: Path) -> dict:
     return load_yaml(cfg_path)
 
 
+def _pair_state(left: str, right: str) -> str:
+    if left and right:
+        return "complete"
+    if not left and not right:
+        return "empty"
+    return "partial"
+
+
+def _run_git_diff_check(repo: Path, cfg: dict) -> None:
+    commands = (cfg.get("commands") or {})
+    configured = str(commands.get("diff_check") or "").strip()
+    if configured:
+        print(f"[diff-check] {configured}")
+        run_shell(configured, cwd=repo)
+    else:
+        print("[diff-check] git diff --check")
+        run(["git", "diff", "--check"], cwd=repo)
+    print("[diff-check] OK")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """
     Run any configured gate command by name.
@@ -561,6 +607,61 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"[run] {name}: {cmd}")
     run_shell(cmd, cwd=repo)
     print(f"[run] OK: {name}")
+
+
+def cmd_light_gate(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    commands = (cfg.get("commands") or {})
+
+    executed: List[str] = []
+    missing: List[str] = []
+
+    if not str(commands.get("build") or "").strip():
+        missing.append("commands.build")
+    else:
+        _run_configured_command(repo, cfg, "build")
+        executed.append("build")
+
+    if str(commands.get("quick_test") or "").strip():
+        _run_configured_command(repo, cfg, "quick_test")
+        executed.append("quick_test")
+    elif str(commands.get("test") or "").strip():
+        _run_configured_command(repo, cfg, "test")
+        executed.append("test")
+    else:
+        missing.append("commands.quick_test or commands.test")
+
+    static_executed = False
+    if str(commands.get("lint") or "").strip():
+        _run_configured_command(repo, cfg, "lint")
+        executed.append("lint")
+        static_executed = True
+
+    if str(commands.get("typecheck") or "").strip():
+        _run_configured_command(repo, cfg, "typecheck")
+        executed.append("typecheck")
+        static_executed = True
+
+    if not static_executed:
+        missing.append("commands.lint or commands.typecheck")
+
+    if str(commands.get("script_syntax") or "").strip():
+        _run_configured_command(repo, cfg, "script_syntax")
+        executed.append("script_syntax")
+
+    if missing:
+        raise APError(
+            "Light gate is under-configured. Missing required commands: "
+            + ", ".join(missing)
+            + ". Edit docs/ENGINEERING.md frontmatter."
+        )
+
+    _run_git_diff_check(repo, cfg)
+    cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
+    cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
+    executed.extend(["diff_check", "verify_api_docs", "verify_jenkins"])
+    print("[light-gate] OK: " + ", ".join(executed))
 
 
 def cmd_runtime_up(args: argparse.Namespace) -> None:
@@ -599,10 +700,13 @@ def cmd_wait_health(args: argparse.Namespace) -> None:
         url = _join_url(str(runtime_cfg.get("health_base_url") or ""), str(runtime_cfg.get("health_path") or ""))
         timeout_s = int(runtime_cfg.get("startup_timeout_sec") or 120)
     else:
+        target_cfg = (cfg.get("target_env") or {})
         jenkins_cfg = (cfg.get("jenkins") or {})
+        base_url = str(target_cfg.get("health_base_url") or "")
+        path = str(target_cfg.get("health_path") or "")
         url = _join_url(
-            str(jenkins_cfg.get("prod_health_base_url") or ""),
-            str(jenkins_cfg.get("prod_health_path") or "")
+            base_url,
+            path,
         )
         timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 1800)
 
@@ -621,11 +725,64 @@ def cmd_wait_health(args: argparse.Namespace) -> None:
     raise APError(f"Health check timeout for {scope}: {url}\nLast result: {last_error}")
 
 
+def cmd_verify_target(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    target_cfg = (cfg.get("target_env") or {})
+
+    cmd_wait_health(argparse.Namespace(repo=str(repo), scope="target"))
+
+    checks: List[str] = []
+
+    backend_base = str(target_cfg.get("backend_base_url") or "").strip().rstrip("/")
+    frontend_base = str(target_cfg.get("frontend_base_url") or "").strip().rstrip("/")
+
+    backend_headers: dict[str, str] = {}
+    frontend_headers: dict[str, str] = {}
+    if args.backend_basic_auth:
+        user = str(target_cfg.get("backend_username") or "").strip()
+        password = str(target_cfg.get("backend_password") or "").strip()
+        if not user or not password:
+            raise APError("Missing target_env.backend_username / target_env.backend_password for backend basic auth.")
+        backend_headers = _basic_auth_header(user, password)
+    if args.frontend_basic_auth:
+        user = str(target_cfg.get("frontend_username") or "").strip()
+        password = str(target_cfg.get("frontend_password") or "").strip()
+        if not user or not password:
+            raise APError("Missing target_env.frontend_username / target_env.frontend_password for frontend basic auth.")
+        frontend_headers = _basic_auth_header(user, password)
+
+    for path in args.backend_path or []:
+        if not backend_base:
+            raise APError("Missing target_env.backend_base_url for backend path verification.")
+        url = _join_url(backend_base, path)
+        status, body = _http_get(url, headers=backend_headers, timeout_s=10)
+        if not (200 <= status < 400):
+            raise APError(f"Backend target verification failed: {url} -> {status}\n{body[:400]}")
+        checks.append(f"backend:{url}->{status}")
+
+    for path in args.frontend_path or []:
+        if not frontend_base:
+            raise APError("Missing target_env.frontend_base_url for frontend path verification.")
+        url = _join_url(frontend_base, path)
+        status, body = _http_get(url, headers=frontend_headers, timeout_s=10)
+        if not (200 <= status < 400):
+            raise APError(f"Frontend target verification failed: {url} -> {status}\n{body[:400]}")
+        checks.append(f"frontend:{url}->{status}")
+
+    note = str(target_cfg.get("verify_notes") or "").strip()
+    summary = ", ".join(checks) if checks else "health-only"
+    if note:
+        summary = summary + f" | notes={note}"
+    print(f"[verify-target] OK: {summary}")
+
+
 def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     project_cfg = (cfg.get("project") or {})
     jenkins_cfg = (cfg.get("jenkins") or {})
+    target_cfg = (cfg.get("target_env") or {})
     jenkinsfile = Path(repo, str(project_cfg.get("jenkinsfile") or "Jenkinsfile"))
     if not jenkinsfile.exists():
         raise APError(f"Jenkinsfile not found: {jenkinsfile}")
@@ -635,23 +792,101 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
         ("jenkins.image_repository", jenkins_cfg.get("image_repository")),
         ("jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy")),
         ("jenkins.deploy_env", jenkins_cfg.get("deploy_env")),
-        ("jenkins.prod_health_base_url", jenkins_cfg.get("prod_health_base_url")),
-        ("jenkins.prod_health_path", jenkins_cfg.get("prod_health_path")),
+        ("target_env.health_base_url", target_cfg.get("health_base_url")),
+        ("target_env.health_path", target_cfg.get("health_path")),
     ]
     missing = [name for name, value in required if not str(value or "").strip()]
     if not str(jenkins_cfg.get("job_url") or "").strip():
         base_url = str(jenkins_cfg.get("base_url") or "").strip()
         job_name = str(jenkins_cfg.get("job_name") or "").strip()
         multibranch_root = str(jenkins_cfg.get("multibranch_root_job") or "").strip()
-        branch_name = str(jenkins_cfg.get("branch_name") or "").strip()
-        if not (base_url and job_name) and not (base_url and multibranch_root and branch_name):
+        if not (base_url and job_name) and not (base_url and multibranch_root):
             missing.append(
                 "jenkins.job_url (or jenkins.base_url + jenkins.job_name, "
-                "or jenkins.base_url + jenkins.multibranch_root_job + jenkins.branch_name)"
+                "or jenkins.base_url + jenkins.multibranch_root_job)"
             )
     if missing:
         raise APError("Missing Jenkins config: " + ", ".join(missing))
     print(f"[verify-jenkins] OK: {jenkinsfile}")
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    project_cfg = (cfg.get("project") or {})
+    commands = (cfg.get("commands") or {})
+    target_cfg = (cfg.get("target_env") or {})
+    jenkins_cfg = (cfg.get("jenkins") or {})
+    docs_cfg = (cfg.get("docs") or {})
+    runtime_cfg = (cfg.get("runtime") or {})
+
+    missing: List[str] = []
+    warnings: List[str] = []
+
+    if not str(project_cfg.get("name") or "").strip():
+        missing.append("project.name")
+    if not str(commands.get("build") or "").strip():
+        missing.append("commands.build")
+    if not (str(commands.get("quick_test") or "").strip() or str(commands.get("test") or "").strip()):
+        missing.append("commands.quick_test or commands.test")
+    if not (str(commands.get("lint") or "").strip() or str(commands.get("typecheck") or "").strip()):
+        missing.append("commands.lint or commands.typecheck")
+    if not str(target_cfg.get("name") or "").strip():
+        missing.append("target_env.name")
+    if not str(target_cfg.get("health_base_url") or "").strip():
+        missing.append("target_env.health_base_url")
+    if not str(target_cfg.get("health_path") or "").strip():
+        missing.append("target_env.health_path")
+    if not str(jenkins_cfg.get("trigger_branch") or "").strip():
+        missing.append("jenkins.trigger_branch")
+    if not str(jenkins_cfg.get("image_repository") or "").strip():
+        missing.append("jenkins.image_repository")
+    if not str(jenkins_cfg.get("image_tag_strategy") or "").strip():
+        missing.append("jenkins.image_tag_strategy")
+    if not str(jenkins_cfg.get("deploy_env") or "").strip():
+        missing.append("jenkins.deploy_env")
+
+    base_url = str(jenkins_cfg.get("base_url") or "").strip()
+    job_name = str(jenkins_cfg.get("job_name") or "").strip()
+    job_url = str(jenkins_cfg.get("job_url") or "").strip()
+    multibranch_root = str(jenkins_cfg.get("multibranch_root_job") or "").strip()
+    if not job_url and not (base_url and job_name) and not (base_url and multibranch_root):
+        missing.append("jenkins.job_url or (jenkins.base_url + jenkins.job_name) or (jenkins.base_url + jenkins.multibranch_root_job)")
+
+    repo_docs = {
+        "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
+        "docs.closure_log": Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md"))),
+        "docs.api_doc": Path(repo, str(docs_cfg.get("api_doc", "docs/interfaces/api.md"))),
+        "docs.api_change_log": Path(repo, str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md"))),
+    }
+    for key, path in repo_docs.items():
+        if not path.exists():
+            warnings.append(f"{key} missing on disk: {path}")
+
+    if _pair_state(str(target_cfg.get("backend_username") or "").strip(), str(target_cfg.get("backend_password") or "").strip()) == "partial":
+        warnings.append("target_env.backend_username / target_env.backend_password is partial")
+    if _pair_state(str(target_cfg.get("frontend_username") or "").strip(), str(target_cfg.get("frontend_password") or "").strip()) == "partial":
+        warnings.append("target_env.frontend_username / target_env.frontend_password is partial")
+    if _pair_state(str(jenkins_cfg.get("ui_username") or "").strip(), str(jenkins_cfg.get("ui_password") or "").strip()) == "partial":
+        warnings.append("jenkins.ui_username / jenkins.ui_password is partial")
+
+    api_user = str(jenkins_cfg.get("api_user") or "").strip()
+    api_secret = str(jenkins_cfg.get("api_token") or jenkins_cfg.get("api_password") or "").strip()
+    if _pair_state(api_user, api_secret) == "partial":
+        warnings.append("jenkins.api_user with jenkins.api_token/api_password is partial")
+
+    runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
+    if runtime_enabled and not (str(commands.get("compose_up") or "").strip() or str(runtime_cfg.get("docker_compose_file") or "").strip()):
+        warnings.append("runtime config is partially enabled but compose_up or docker_compose_file is missing")
+
+    if missing:
+        raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing) + (("\nWarnings:\n- " + "\n- ".join(warnings)) if warnings else ""))
+
+    print("[doctor] OK")
+    if warnings:
+        print("[doctor] Warnings:")
+        for item in warnings:
+            print(f"- {item}")
 
 
 def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
@@ -691,14 +926,12 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     deadline = time.time() + timeout_s
     if build_number is not None:
         payload = None
-        matched_job_url = ""
         while time.time() < deadline:
             payload = None
             for candidate_job_url in candidate_job_urls:
                 api_url = _jenkins_build_api_url(candidate_job_url, int(build_number))
                 payload = _jenkins_api_get_json(api_url, cfg, allow_404=True)
                 if payload is not None:
-                    matched_job_url = candidate_job_url
                     break
             if payload is not None and not payload.get("building"):
                 break
@@ -730,7 +963,6 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
 
     git_short_sha = _resolve_git_short_sha(repo, git_ref)
     matched = None
-    matched_job_url = ""
 
     while time.time() < deadline:
         matched = None
@@ -742,7 +974,6 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
             builds = payload.get("builds") or []
             matched = next((b for b in builds if git_short_sha in str(b.get("description") or "")), None)
             if matched:
-                matched_job_url = candidate_job_url
                 break
         if matched and not matched.get("building"):
             break
@@ -783,25 +1014,67 @@ def cmd_verify_api_docs(args: argparse.Namespace) -> None:
     print(f"[verify-api-docs] OK: {api_doc} + {change_log}")
 
 
-def cmd_commit_push(args: argparse.Namespace) -> None:
+def cmd_record_closure(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     docs_cfg = (cfg.get("docs") or {})
-    summary_dir = Path(repo, str(docs_cfg.get("summary_dir", "docs/tasks/summaries")))
+    target_cfg = (cfg.get("target_env") or {})
+    taskbook = Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md")))
+    closure_log = Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md")))
+    closure_log.parent.mkdir(parents=True, exist_ok=True)
+    if not closure_log.exists():
+        closure_log.write_text("# Closure Log\n\n", encoding="utf-8")
 
     task_id = args.task_id
+    title = str(args.title or "").strip() or _infer_title(taskbook, task_id)
+    timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    commit_value = _resolve_git_short_sha(repo, args.commit)
+    target_env = str(args.target_env or target_cfg.get("name") or "").strip() or "(not set)"
+    verification_items = args.verification or []
+    verification_text = "; ".join(verification_items) if verification_items else "TODO"
+    follow_up = str(args.follow_up or "").strip() or "none"
+    jenkins_build = str(args.jenkins or "").strip() or "TODO"
+
+    lines = [
+        f"## {task_id} — {title} — {timestamp}",
+        f"- Task: {task_id}",
+        f"- Commit: {commit_value}",
+        f"- Jenkins Build: {jenkins_build}",
+        f"- Target Env: {target_env}",
+        f"- Verification: {verification_text}",
+        f"- Result: {args.result}",
+        f"- Follow-up: {follow_up}",
+    ]
+    if str(args.initial_commit or "").strip():
+        lines.append(f"- Initial Commit: {args.initial_commit.strip()}")
+    if str(args.jenkins_failure or "").strip():
+        lines.append(f"- Jenkins Failure: {args.jenkins_failure.strip()}")
+    if str(args.fix_commit or "").strip():
+        lines.append(f"- Fix Commit: {args.fix_commit.strip()}")
+
+    with closure_log.open("a", encoding="utf-8") as f:
+        if closure_log.stat().st_size > 0:
+            f.write("\n")
+        f.write("\n".join(lines))
+        f.write("\n")
+    print(f"[record-closure] OK: {closure_log}")
+
+
+def cmd_commit_push(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+
     msg = args.msg
 
-    summary = summary_dir / f"{task_id}.md"
-    if not summary.exists():
-        raise APError(
-            f"Task summary missing: {summary}\n"
-            f"Generate: python3 docs/tools/autopipeline/ap.py gen-summary {task_id}"
-        )
+    if args.record_closure and not args.result:
+        raise APError("When using --record-closure, --result is required.")
 
     if args.require_runtime_health:
         cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
+
+    if args.require_light_gate:
+        cmd_light_gate(argparse.Namespace(repo=str(repo)))
 
     if args.require_jenkins:
         cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
@@ -816,6 +1089,23 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
 
     run(["git", "commit", "-m", msg], cwd=repo)
     run(["git", "push"], cwd=repo)
+    if args.record_closure:
+        cmd_record_closure(
+            argparse.Namespace(
+                repo=str(repo),
+                task_id=args.task_id,
+                title=args.title,
+                commit="HEAD",
+                jenkins=args.jenkins_build,
+                target_env=args.target_env,
+                verification=args.verification,
+                result=args.result,
+                follow_up=args.follow_up,
+                initial_commit=args.initial_commit,
+                jenkins_failure=args.jenkins_failure,
+                fix_commit=args.fix_commit,
+            )
+        )
     print("[commit-push] OK - push completed, Jenkins should auto-trigger")
 
 
@@ -830,6 +1120,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("gen-summary")
     s.add_argument("task_id")
+    s.add_argument("--title")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_gen_summary)
 
@@ -840,6 +1131,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("name")
     s.set_defaults(func=cmd_run)
 
+    s = sp.add_parser("light-gate")
+    s.set_defaults(func=cmd_light_gate)
+
+    s = sp.add_parser("doctor")
+    s.set_defaults(func=cmd_doctor)
+
     s = sp.add_parser("runtime-up")
     s.set_defaults(func=cmd_runtime_up)
 
@@ -847,7 +1144,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.set_defaults(func=cmd_runtime_down)
 
     s = sp.add_parser("wait-health")
-    s.add_argument("--scope", choices=["runtime", "prod"], default="runtime")
+    s.add_argument("--scope", choices=["runtime", "target", "prod"], default="runtime")
     s.set_defaults(func=cmd_wait_health)
 
     s = sp.add_parser("verify-jenkins")
@@ -869,12 +1166,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sp.add_parser("verify-api-docs")
     s.set_defaults(func=cmd_verify_api_docs)
 
+    s = sp.add_parser("verify-target")
+    s.add_argument("--backend-path", action="append")
+    s.add_argument("--frontend-path", action="append")
+    s.add_argument("--backend-basic-auth", action="store_true")
+    s.add_argument("--frontend-basic-auth", action="store_true")
+    s.set_defaults(func=cmd_verify_target)
+
+    s = sp.add_parser("record-closure")
+    s.add_argument("task_id")
+    s.add_argument("--title")
+    s.add_argument("--commit", default="HEAD")
+    s.add_argument("--jenkins")
+    s.add_argument("--target-env")
+    s.add_argument("--verification", action="append")
+    s.add_argument("--result", choices=["PASS", "FAIL", "PARTIAL"], required=True)
+    s.add_argument("--follow-up")
+    s.add_argument("--initial-commit")
+    s.add_argument("--jenkins-failure")
+    s.add_argument("--fix-commit")
+    s.set_defaults(func=cmd_record_closure)
+
     s = sp.add_parser("commit-push")
     s.add_argument("task_id")
+    s.add_argument("--title")
     s.add_argument("--msg", required=True)
+    s.add_argument("--require-light-gate", action="store_true")
     s.add_argument("--require-runtime-health", action="store_true")
     s.add_argument("--require-jenkins", action="store_true")
     s.add_argument("--require-matrix", action="store_true")
+    s.add_argument("--record-closure", action="store_true")
+    s.add_argument("--jenkins-build")
+    s.add_argument("--target-env")
+    s.add_argument("--verification", action="append")
+    s.add_argument("--result", choices=["PASS", "FAIL", "PARTIAL"])
+    s.add_argument("--follow-up")
+    s.add_argument("--initial-commit")
+    s.add_argument("--jenkins-failure")
+    s.add_argument("--fix-commit")
     s.set_defaults(func=cmd_commit_push)
 
     try:

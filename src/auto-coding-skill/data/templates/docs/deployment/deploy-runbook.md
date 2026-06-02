@@ -1,19 +1,11 @@
-# Deployment Runbook（本地 Compose 验证 + Jenkins 自动部署）
+# Deployment Runbook（按需使用，不是默认小改动产物）
 
-统一读取：`docs/ENGINEERING.md` frontmatter
-- `runtime.*`：本地 Compose 启动与健康检查
-- `jenkins.*`：Jenkins Job、镜像仓库、目标环境、生产健康检查
+用途：
+- 手工部署
+- 高风险发布
+- 需要额外审计证据的发布
 
-执行顺序：
-1. 本地构建、测试、lint、typecheck 通过
-2. 本地 `docker compose` 启动目标服务
-3. 本地 health / smoke / regression 全部通过
-4. `commit + push`
-5. Jenkins 自动触发，完成镜像构建、镜像推送、目标环境更新
-6. 检查 Jenkins 结果与目标环境健康状态
-
-完成条件：
-- 本地 Compose 验证通过
-- Jenkins Pipeline 成功
-- 目标环境健康检查通过
-- `docs/deployment/deploy-records/<TASK_ID>-YYYYMMDD.md` 证据补齐
+默认情况下：
+- 小改动直接走 Jenkins 自动构建与自动部署
+- 主要闭环证据写入 `docs/tasks/closure-log.md`
+- 只有需要更重的发布审计时，才补本目录文档

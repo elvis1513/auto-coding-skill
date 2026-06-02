@@ -1,16 +1,25 @@
 # Review — <Task ID> — YYYY-MM-DD HH:MM
 
-## 1. 静态分析结果（必须）
-- Command：lint + typecheck（来自 docs/ENGINEERING.md frontmatter）
+> 仅在任务需要独立 review 记录时使用；不是每个小改动的默认强制文档。
+
+## 1. 静态分析结果
+- Command：lint / typecheck / script_syntax / diff_check
 - Summary：
 - Issues：
-- Resolved/Deferred（deferred 必须给出后续任务）：
 
-## 2. 代码质量
-## 3. 本地构建与测试质量（后端 test + 前端 build/lint/typecheck）
-## 4. 本地 Compose 验证（health / smoke / regression）
-## 5. 接口契约（API Markdown + change-log）
-## 6. Jenkins 准备度（Jenkinsfile / job config / image strategy）
-## 7. 安全与性能
-## 8. 风险与回滚
-## 9. 结论（Pass / Blocked）
+## 2. 本地轻量校验
+- build：
+- test or quick_test：
+- api docs：
+- jenkinsfile / scripts：
+
+## 3. 按需本地运行验证（如果有）
+- runtime-up / health / smoke / regression：
+
+## 4. Jenkins 与目标环境
+- Jenkins readiness：
+- Target env verification：
+
+## 5. 风险与结论
+- Risk：
+- Conclusion：Pass / Blocked

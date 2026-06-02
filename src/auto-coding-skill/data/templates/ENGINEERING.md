@@ -12,9 +12,12 @@ project:
 commands:
   build: ""
   test: ""
+  quick_test: ""
   lint: ""
   typecheck: ""
   format: ""
+  script_syntax: ""
+  diff_check: ""
   docker_build: ""
   compose_up: ""
   compose_down: ""
@@ -32,8 +35,22 @@ runtime:
   env_file: ""
   startup_timeout_sec: 120
 
+target_env:
+  name: ""
+  frontend_base_url: ""
+  frontend_username: ""
+  frontend_password: ""
+  backend_base_url: ""
+  backend_username: ""
+  backend_password: ""
+  health_base_url: ""
+  health_path: ""
+  verify_notes: ""
+
 jenkins:
   base_url: ""
+  ui_username: ""
+  ui_password: ""
   crumb_url: ""
   job_name: ""
   job_url: ""
@@ -44,15 +61,16 @@ jenkins:
   image_tag_strategy: ""
   deploy_env: ""
   deploy_timeout_sec: 1800
-  prod_health_base_url: ""
-  prod_health_path: ""
   api_user: ""
   api_token: ""
+  api_password: ""
   api_user_env: "JENKINS_USER"
   api_token_env: "JENKINS_TOKEN"
+  api_password_env: "JENKINS_PASSWORD"
 
 docs:
   taskbook: "docs/tasks/taskbook.md"
+  closure_log: "docs/tasks/closure-log.md"
   design_dir: "docs/design"
   review_dir: "docs/reviews"
   api_doc: "docs/interfaces/api.md"
@@ -62,40 +80,78 @@ docs:
   summary_dir: "docs/tasks/summaries"
 ---
 
-# docs/ENGINEERING.md — AutoPipeline Gates (Source of Truth)
+# docs/ENGINEERING.md — Lightweight Default Workflow (Source of Truth)
 
-目标：把一次任务固化为不可跳过的流水线：  
-读任务 → 写DD → 实现 → 本地构建/测试通过 → 静态分析+Review落盘 → 更新 API Markdown+接口变更清单 →  
-本地 Docker Compose 启动验证 → 本地健康检查 → 对本地环境全量回归 + 回归矩阵 0 fail →  
-记录 Bug 并新增自动化回归 → 任务总结落盘 → commit → push 触发 Jenkins → Jenkins 构建镜像并更新目标环境 →  
-生产健康检查通过
+目标：默认采用高效率开发闭环：  
+需求/任务记录 → 最小设计 → 开发实现 → 本地轻量校验 → commit/push → Jenkins 构建部署 → 目标环境验证 → 闭环记录
 
-规则：任一步骤失败或缺产物，禁止进入下一步；本地 compose 验证未通过禁止 commit；Jenkins 未成功或生产健康检查未通过，任务不视为完成。
+默认原则：
+- 默认不要求本地 Docker Compose 启动。
+- 默认不要求本地 Docker build。
+- 默认不要求本地完整 smoke / regression。
+- 默认不要求每个小改动生成长 summary。
+- 默认不要求 regression matrix 全 PASS。
+- 默认不要求 deployment record。
+- Jenkins 构建结果和目标环境真实验证，比本地模拟更重要。
 
 补充规则：
-- 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、回归中间产物、构建缓存等非必要产物；仅 `.local/` 下的本地运行数据允许保留。
+- 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、构建缓存等非必要产物；仅明确需要保留的本地诊断目录允许保留。
+- 所有手工填写信息，只维护在本文件 frontmatter 中，其他文档不得重复配置。
 
 ---
 
 ## 0. 配置填写（必须）
 
-先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值（例如 Go/前端目录、Docker 文件、Compose 服务、Jenkins Job、健康检查地址、命令）。  
-禁止在其他 md/yaml 重复维护这些配置。
+先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
+- `commands.*`：本地轻量校验命令
+- `target_env.*`：目标环境地址、后台账号、前端验证信息
+- `jenkins.*`：Jenkins UI/API 账号、Job、分支、镜像、部署环境
+
+字段说明：
+- `target_env.backend_username` / `target_env.backend_password`：目标环境后台账号
+- `target_env.frontend_username` / `target_env.frontend_password`：目标环境前端登录账号（如需要）
+- `jenkins.ui_username` / `jenkins.ui_password`：Jenkins 页面登录账号
+- `jenkins.api_user` + `jenkins.api_token` / `jenkins.api_password`：Jenkins API 校验凭据
+
+默认必填：
+- `project.name`
+- `commands.build`
+- `commands.quick_test` 或 `commands.test`
+- `commands.lint` 或 `commands.typecheck`
+- `target_env.name`
+- `target_env.health_base_url`
+- `target_env.health_path`
+- `jenkins.trigger_branch`
+- `jenkins.image_repository`
+- `jenkins.image_tag_strategy`
+- `jenkins.deploy_env`
+- `jenkins.job_url` 或 `jenkins.base_url + jenkins.job_name` 或 `jenkins.base_url + jenkins.multibranch_root_job`
+
+按需填写：
+- `runtime.*`：仅在本地运行诊断时使用
+- `commands.compose_up` / `commands.compose_down` / `commands.smoke` / `commands.regression`
+- `target_env.frontend_*` / `target_env.backend_*`：仅在需要额外页面/API验证或受保护资源校验时使用
 
 ---
 
 ## 1. 权威输入与冲突裁决（优先级）
 
-1) docs/ENGINEERING.md（本文件）  
-2) docs/tasks/taskbook.md  
-3) docs/design/**  
-4) docs/interfaces/api.md  
-5) docs/interfaces/api-change-log.md  
-6) docs/testing/regression-matrix.md（必须 0 FAIL）  
-7) docs/bugs/bug-list.md（长期积累，回归必测）  
-8) docs/tasks/summaries/**（每任务一份，强制产物）  
-9) docs/deployment/**  
-10) 代码实现（不得反向覆盖 1~9）
+1) `docs/ENGINEERING.md`
+2) `docs/tasks/taskbook.md`
+3) `docs/design/**`
+4) `docs/interfaces/api.md`
+5) `docs/interfaces/api-change-log.md`
+6) `docs/testing/regression-matrix.md`
+7) `docs/bugs/bug-list.md`
+8) `docs/tasks/closure-log.md`
+9) `docs/tasks/summaries/**`
+10) `docs/deployment/**`
+11) 代码实现
+
+说明：
+- `closure-log.md` 是每个任务默认必须留下的轻量闭环记录。
+- `summaries/**` 只用于跨模块、高风险、阶段性里程碑、需要完整复盘的任务。
+- `deployment/**` 只用于真实部署记录、手工发布或高风险发布场景。
 
 ---
 
@@ -103,56 +159,113 @@ docs:
 
 优先使用当前环境已安装、已授权、已可访问的工具能力：
 
-1) MCP servers  
-2) 已安装 skills  
-3) plugins / apps / connectors  
+1) MCP servers
+2) 已安装 skills
+3) plugins / apps / connectors
 4) shell / 手工实现
 
 规则：
-- 做设计、查资料、看文档、看页面、查知识库、写回外部系统时，优先调用现有 MCP / skills / plugins / apps。
-- 能用权威工具直接完成时，不重复手写中间数据。
-- 工具不可用、无权限、结果不可靠时，才回退到本地命令或手工处理。
-- 选择工具时优先“已安装且当前项目可直接使用”的能力，而不是重新造流程。
-- 查看 Jenkins、知识库、设计稿、页面、缺陷系统时，优先使用现成的连接器或 MCP，而不是手工拼接上下文。
+- 做设计、查资料、查文档、查 Jenkins、查页面、写回外部系统时，优先调用现成能力。
+- 工具不可用、权限不足、结果不可靠时，才回退到 shell 或手工流程。
+- 不重复手写工具已经能直接读取或写回的权威数据。
 
 ---
 
 ## 1.6 多 Agent 协作策略（Claude / Codex 专属）
 
-整个流程尽可能使用多 agent 模式并行推进。
+整个流程尽可能使用多 agent 并行推进。
 
 规则：
-- 任务开始后，优先拆分为可并行的子任务：设计补充、资料检索、实现分块、测试验证、文档回写、review。
-- 主 agent 负责关键路径：任务定义、方案裁决、代码集成、质量门禁、最终交付。
-- 子 agent 负责边界清晰、可独立推进的工作，完成后回收结果给主 agent 集成。
-- 如果某项工作会直接阻塞主路径且难以独立定义，不要机械拆分；由主 agent 保持控制。
-- 能并行就不要串行；能拆独立 write scope 就不要让多个 agent 写同一块内容。
+- 主 agent 负责任务定义、方案裁决、代码集成、轻量门禁、Jenkins/目标环境闭环、最终交付。
+- 子 agent 优先拆为：设计/调研、后端实现、前端实现、验证/文档。
+- 任务边界不清或需要强一致裁决时，由主 agent 保持控制，不机械拆分。
 
 ---
 
-## 2. Gate 流水线（强制、不可跳过）
+## 2. 标准流程（默认）
 
-Gate-1 读任务：只从 taskbook 取范围与验收；缺信息先补 taskbook  
-Gate-2 写DD：无DD禁止写代码；DD必须含 时序图/ER图/接口时序（Mermaid）  
-Gate-3 实现：严格按DD；接口变更必须同步 API Markdown  
-Gate-4 本地CI：后端必须通过 `commands.test`；前端至少通过 `commands.build`、`commands.lint`、`commands.typecheck`；前端自动化测试能力逐步补齐  
-Gate-5 静态分析+Review：静态分析通过；docs/reviews/ 生成记录  
-Gate-6 文档：更新 api.md + 追加 api-change-log.md  
-Gate-7 本地运行：必须用项目 Compose 启动本地 Docker 环境；失败先修复再继续  
-Gate-8 健康检查：本地容器启动后必须健康检查通过  
-Gate-9 全量回归：按 API Markdown 对本地 Compose 环境全量回归；回归矩阵仅可在真实执行后标记 PASS，且必须附证据；发现问题必须写 bug-list 并新增自动化回归用例  
-Gate-10 Jenkins 准备：Jenkinsfile、Job 配置、镜像仓库策略必须可用  
-Gate-11 任务总结：必须生成 docs/tasks/summaries/<TASK_ID>.md  
-Gate-12 提交触发：本地门禁全过且临时产物已清理后，才允许 commit+push  
-Gate-13 流水线验证：push 后必须确认 Jenkins 自动构建、镜像发布、目标环境更新成功  
-Gate-14 完成：生产健康检查通过并补齐部署记录后，任务才完成
+1. 需求确认  
+   明确任务范围、影响服务、是否涉及 API/数据库/部署/Jenkins/前端页面。
+
+2. 最小设计记录  
+   普通小改动只更新 `taskbook` 或设计文档中的最小必要段落；跨模块、接口、数据库、部署、Jenkins、关键页面流程变更才补 DD。
+
+3. 开发实现  
+   只修改本次任务必要文件，不做无关重构。
+
+4. 本地轻量校验  
+   默认只跑：
+   - 编译 / build
+   - 单元测试或关键快速测试
+   - lint / typecheck
+   - API 文档检查
+   - Jenkinsfile / 脚本语法检查
+   - `git diff --check`
+
+5. 立即提交推送  
+   轻量校验通过后，commit + push，触发 Jenkins。
+
+6. Jenkins 验证  
+   查看 Jenkins 构建、镜像、部署结果；失败则根据 Jenkins 日志修复，再次提交推送。
+
+7. 目标环境验证  
+   在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+
+8. 回归与证据记录  
+   只有真实执行过 Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
+
+9. 闭环记录  
+   每个任务必须留下轻量闭环记录：任务 ID、提交号、Jenkins Build URL、目标环境验证结果、是否通过、遗留问题。
 
 ---
 
-## 3. Repo 工具入口
+## 3. 高风险变更（必须补强验证）
 
-统一用 `python3 docs/tools/autopipeline/ap.py <command>` 执行。
+以下类型默认视为高风险变更：
+- 数据库迁移
+- 鉴权 / 权限
+- 支付 / 订单
+- 部署 / Jenkins
+- Nginx / 网关
+- 文件上传 / 下载
+- 生产配置
 
-补充：
-- `commands.smoke` / `commands.regression` 可以封装 repo 脚本，但必须真正在本地运行目标系统。
-- `docs/testing/regression-matrix.md` 中的 `PASS` 只在真实执行并填入证据后允许保留；占位符证据会被视为未完成。
+高风险变更至少额外要求：
+- 明确 DD
+- 目标环境真实验证
+- 闭环记录写清楚验证路径和结果
+- 必要时补 summary / deployment record / regression matrix
+
+---
+
+## 4. 本地 Docker 与完整回归（按需，不默认）
+
+以下能力保留，但仅用于显式要求、问题复现、Jenkins/目标环境问题前置诊断：
+- `runtime-up`
+- `runtime-down`
+- 本地 health check
+- 本地 `smoke`
+- 本地 `regression`
+- `check-matrix`
+- `gen-summary`
+
+默认情况下，不把它们作为每个小改动的固定门禁。
+
+---
+
+## 5. Repo 工具入口
+
+统一使用：
+- `python3 docs/tools/autopipeline/ap.py doctor`
+- `python3 docs/tools/autopipeline/ap.py light-gate`
+- `python3 docs/tools/autopipeline/ap.py verify-jenkins-build ...`
+- `python3 docs/tools/autopipeline/ap.py wait-health --scope target`
+- `python3 docs/tools/autopipeline/ap.py verify-target ...`
+- `python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> ...`
+
+说明：
+- `doctor`：检查默认流程必填项和常见配置错误。
+- `light-gate`：默认轻量门禁。
+- `verify-target`：目标环境健康检查 + 按需关键 API / 页面验证。
+- `record-closure`：默认轻量闭环记录。
+- `check-matrix`、`gen-summary`、`runtime-up/down`：保留为按需工具。

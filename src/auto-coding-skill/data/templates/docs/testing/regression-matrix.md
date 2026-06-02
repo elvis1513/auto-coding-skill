@@ -1,11 +1,11 @@
-# Regression Matrix（本地 Compose 环境回归矩阵：必须全量 PASS，0 fail）
+# Regression Matrix（按需回归记录，不是每个小改动的默认门禁）
 
-> 1. 仅记录当前真实实现，不要预填伪接口或目标态接口。
+> 1. 只记录真实执行过的回归项。
 > 2. `Status` 允许值：`TODO` / `PASS` / `FAIL`。
-> 3. 新增或未执行项默认填写 `TODO`，不得预填 `PASS`。
-> 4. `PASS` 只允许在真实执行后填写，且 `Evidence` 不得保留占位符。
-> 5. `python3 docs/tools/autopipeline/ap.py check-matrix` 会把非 `PASS` 行和占位符证据视为未完成。
+> 3. 未执行项保持 `TODO`，不得预填 `PASS`。
+> 4. 只有真实执行并具备证据时，才允许填写 `PASS`。
+> 5. `check-matrix` 只在显式要求完整回归时使用，不作为默认小改动门禁。
 
 | ID | Area | Endpoint/Feature | Test Type | Steps / Command | Expected | Status(TODO/PASS/FAIL) | Evidence |
 |---|---|---|---|---|---|---|---|
-| R-001 | API | <Endpoint or feature> | <smoke/regression/manual> | <command or manual steps> | <expected result> | TODO | <fill-with-log-path-screenshot-or-report> |
+| R-001 | <Area> | <Endpoint or feature> | <manual/smoke/regression> | <command or manual steps> | <expected result> | TODO | <real log path / screenshot / report> |

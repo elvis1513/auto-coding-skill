@@ -1,28 +1,19 @@
 # Deploy Record — <Task ID> — YYYY-MM-DD
 
-## 1. Local Compose Validation
-- Docker compose file:
-- Docker service:
-- Container name:
-- Image/tag:
-- Exposed port:
-- Env file:
-- Local health URL:
+> 仅在真实需要独立部署审计记录时使用。
 
-## 2. Jenkins Pipeline
-- Jenkins job name:
-- Jenkins build number:
-- Jenkins build URL:
-- Trigger branch:
-- Trigger commit:
-- Image repository:
-- Published image tag:
-- Deploy environment:
+## 1. Deployment Context
+- Task ID:
+- Commit:
+- Jenkins Build:
+- Target Env:
 
-## 3. Evidence
-- docker ps / compose ps:
-- local_health_check:
-- smoke_test:
-- api_regression:
-- jenkins_result:
-- production_health_check:
+## 2. Verification
+- Health check:
+- Key API:
+- Key page / business path:
+
+## 3. Notes
+- Risk:
+- Rollback:
+- Follow-up:

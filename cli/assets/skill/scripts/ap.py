@@ -8,7 +8,6 @@ import argparse
 import base64
 import datetime as _dt
 import json
-import os
 import time
 import urllib.parse
 import urllib.error
@@ -20,6 +19,7 @@ from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_confi
 
 
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
+_INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX"}
 
 
 def _skill_root() -> Path:
@@ -60,27 +60,21 @@ def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
 
 def _jenkins_basic_auth_headers(cfg: dict) -> dict:
     jenkins_cfg = (cfg.get("jenkins") or {})
-    direct_user = str(jenkins_cfg.get("api_user") or jenkins_cfg.get("ui_username") or "").strip()
-    direct_token = str(jenkins_cfg.get("api_token") or "").strip()
-    direct_password = str(jenkins_cfg.get("api_password") or jenkins_cfg.get("ui_password") or "").strip()
-    user_env = str(jenkins_cfg.get("api_user_env") or "JENKINS_USER").strip() or "JENKINS_USER"
-    token_env = str(jenkins_cfg.get("api_token_env") or "JENKINS_TOKEN").strip() or "JENKINS_TOKEN"
-    password_env = str(jenkins_cfg.get("api_password_env") or "JENKINS_PASSWORD").strip() or "JENKINS_PASSWORD"
-    user = direct_user or os.getenv(user_env) or os.getenv("JENKINS_USER")
-    token = (
-        direct_token
-        or direct_password
-        or os.getenv(token_env)
-        or os.getenv(password_env)
-        or os.getenv("JENKINS_TOKEN")
-        or os.getenv("JENKINS_PASSWORD")
-    )
-    if not user or not token:
+    user_candidates = [
+        jenkins_cfg.get("api_user"),
+        jenkins_cfg.get("ui_username"),
+    ]
+    secret_candidates = [
+        jenkins_cfg.get("api_password"),
+        jenkins_cfg.get("ui_password"),
+    ]
+    user = next((_text(v) for v in user_candidates if _is_explicit_fill(v)), "")
+    secret = next((_text(v) for v in secret_candidates if _is_explicit_fill(v)), "")
+    if not user or not secret:
         raise APError(
-            "Missing Jenkins API credentials. Fill jenkins.api_user / jenkins.api_token / jenkins.api_password "
-            f"in docs/ENGINEERING.md, or set env vars {user_env}, {token_env}, {password_env}."
+            "Missing Jenkins API credentials. Fill jenkins.api_user and jenkins.api_password in docs/ENGINEERING.md."
         )
-    raw = f"{user}:{token}".encode("utf-8")
+    raw = f"{user}:{secret}".encode("utf-8")
     auth = base64.b64encode(raw).decode("ascii")
     return {"Authorization": f"Basic {auth}"}
 
@@ -122,10 +116,6 @@ def _jenkins_root_url(cfg: dict, job_url: str = "") -> str:
 
 
 def _jenkins_crumb_api_url(cfg: dict, job_url: str = "") -> str:
-    jenkins_cfg = (cfg.get("jenkins") or {})
-    explicit = str(jenkins_cfg.get("crumb_url") or "").strip()
-    if explicit:
-        return explicit
     root = _jenkins_root_url(cfg, job_url=job_url)
     if not root:
         return ""
@@ -203,12 +193,12 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15, allow_404: b
                 except Exception as retry_exc:
                     raise APError(f"Jenkins API request failed after crumb retry: {url}\n{retry_exc}") from retry_exc
             else:
-                raise APError(
-                    f"Jenkins API request failed: {url}\n"
-                    f"HTTP 403\n{body or '(empty response body)'}\n"
-                    "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
-                    "Fill jenkins.base_url or jenkins.crumb_url in docs/ENGINEERING.md if needed."
-                ) from exc
+                    raise APError(
+                        f"Jenkins API request failed: {url}\n"
+                        f"HTTP 403\n{body or '(empty response body)'}\n"
+                        "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
+                    "Fill jenkins.base_url in docs/ENGINEERING.md if needed."
+                    ) from exc
         else:
             raise APError(
                 f"Jenkins API request failed: {url}\n"
@@ -296,15 +286,12 @@ def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -
     jenkins_cfg = (cfg.get("jenkins") or {})
     explicit_url = str(job_url or "").strip()
     requested_name = str(job_name or "").strip()
-    configured_name = str(jenkins_cfg.get("job_name") or "").strip()
     configured_url = str(jenkins_cfg.get("job_url") or "").strip()
     base_url = str(jenkins_cfg.get("base_url") or "").strip()
 
     if explicit_url:
         return explicit_url.rstrip("/")
     if requested_name:
-        if configured_name and requested_name == configured_name and configured_url:
-            return configured_url.rstrip("/")
         if base_url:
             return _jenkins_job_url_from_name(base_url, requested_name)
         raise APError(
@@ -313,11 +300,9 @@ def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -
         )
     if configured_url:
         return configured_url.rstrip("/")
-    if configured_name and base_url:
-        return _jenkins_job_url_from_name(base_url, configured_name)
     raise APError(
-        "Missing Jenkins job location. Fill jenkins.job_url, or fill both "
-        "jenkins.base_url and jenkins.job_name in docs/ENGINEERING.md."
+        "Missing Jenkins job location. Fill jenkins.job_url in docs/ENGINEERING.md, "
+        "or pass --job-url / --job-name explicitly."
     )
 
 
@@ -331,17 +316,16 @@ def _resolve_jenkins_job_candidates(
     branch_name: str = "",
 ) -> List[str]:
     jenkins_cfg = (cfg.get("jenkins") or {})
-    effective_branch = str(branch_name or jenkins_cfg.get("branch_name") or "").strip()
+    effective_branch = str(branch_name or "").strip()
     if not effective_branch:
         inferred_branch = _resolve_git_branch_name(repo, git_ref or "HEAD")
         if inferred_branch:
             effective_branch = inferred_branch
 
-    effective_root = str(multibranch_root_job or jenkins_cfg.get("multibranch_root_job") or "").strip()
+    effective_root = str(multibranch_root_job or "").strip()
     explicit_url = str(job_url or "").strip()
     explicit_name = str(job_name or "").strip()
     configured_url = str(jenkins_cfg.get("job_url") or "").strip()
-    configured_name = str(jenkins_cfg.get("job_name") or "").strip()
 
     if effective_branch:
         if explicit_url:
@@ -354,12 +338,9 @@ def _resolve_jenkins_job_candidates(
             return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, explicit_name), effective_branch)
         if configured_url:
             return _jenkins_branch_job_urls(configured_url, effective_branch)
-        if configured_name:
-            base_url = str(jenkins_cfg.get("base_url") or "").strip()
-            return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, configured_name), effective_branch)
         raise APError(
-            "Missing Jenkins multibranch root job location. Fill jenkins.multibranch_root_job + jenkins.base_url, "
-            "or pass --job-url / --job-name together with --branch-name."
+            "Missing Jenkins multibranch root job location. Pass --job-url / --job-name together with "
+            "--branch-name, or pass --multibranch-root-job with jenkins.base_url."
         )
 
     return [_resolve_jenkins_job_url(cfg, job_name=job_name, job_url=job_url)]
@@ -404,17 +385,8 @@ def cmd_install(args: argparse.Namespace) -> None:
     copy_tree(Path(__file__).resolve().parent / "core.py", tools_dir / "core.py")
     copy_tree(Path(__file__).resolve().parent / "http_checks.py", tools_dir / "http_checks.py")
 
-    gi = repo / ".gitignore"
-    secret_line = "docs/ENGINEERING.md"
-    if gi.exists():
-        txt = gi.read_text(encoding="utf-8")
-        if secret_line not in txt:
-            gi.write_text(txt.rstrip() + "\n" + secret_line + "\n", encoding="utf-8")
-    else:
-        gi.write_text(secret_line + "\n", encoding="utf-8")
-
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: edit docs/ENGINEERING.md frontmatter and fill project/commands/target_env/jenkins fields")
+    print("[install] Next: edit docs/ENGINEERING.md frontmatter, fill all platform credentials, and commit that file into Git.")
 
 
 def _infer_title(taskbook: Path, task_id: str) -> str:
@@ -568,12 +540,35 @@ def _load_cfg(repo: Path) -> dict:
     return load_yaml(cfg_path)
 
 
-def _pair_state(left: str, right: str) -> str:
-    if left and right:
-        return "complete"
-    if not left and not right:
-        return "empty"
-    return "partial"
+def _text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _is_placeholder(value: object) -> bool:
+    return _text(value).upper() in _INVALID_PLACEHOLDERS
+
+
+def _is_explicit_fill(value: object) -> bool:
+    return bool(_text(value)) and not _is_placeholder(value)
+
+
+def _validate_url_field(errors: List[str], field: str, value: object) -> None:
+    raw = _text(value)
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        errors.append(f"{field} must be a valid http/https URL")
+
+
+def _validate_path_field(errors: List[str], field: str, value: object) -> None:
+    raw = _text(value)
+    if not raw.startswith("/"):
+        errors.append(f"{field} must start with '/'")
+
+
+def _require_explicit_field(missing: List[str], field: str, value: object) -> None:
+    raw = _text(value)
+    if not _is_explicit_fill(raw):
+        missing.append(f"{field} (must be explicitly filled, not blank/TODO)")
 
 
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
@@ -611,6 +606,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
+    cmd_doctor(argparse.Namespace(repo=str(repo)))
     cfg = _load_cfg(repo)
     commands = (cfg.get("commands") or {})
 
@@ -770,10 +766,7 @@ def cmd_verify_target(args: argparse.Namespace) -> None:
             raise APError(f"Frontend target verification failed: {url} -> {status}\n{body[:400]}")
         checks.append(f"frontend:{url}->{status}")
 
-    note = str(target_cfg.get("verify_notes") or "").strip()
     summary = ", ".join(checks) if checks else "health-only"
-    if note:
-        summary = summary + f" | notes={note}"
     print(f"[verify-target] OK: {summary}")
 
 
@@ -788,6 +781,8 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
         raise APError(f"Jenkinsfile not found: {jenkinsfile}")
 
     required = [
+        ("jenkins.base_url", jenkins_cfg.get("base_url")),
+        ("jenkins.job_url", jenkins_cfg.get("job_url")),
         ("jenkins.trigger_branch", jenkins_cfg.get("trigger_branch")),
         ("jenkins.image_repository", jenkins_cfg.get("image_repository")),
         ("jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy")),
@@ -796,15 +791,6 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
         ("target_env.health_path", target_cfg.get("health_path")),
     ]
     missing = [name for name, value in required if not str(value or "").strip()]
-    if not str(jenkins_cfg.get("job_url") or "").strip():
-        base_url = str(jenkins_cfg.get("base_url") or "").strip()
-        job_name = str(jenkins_cfg.get("job_name") or "").strip()
-        multibranch_root = str(jenkins_cfg.get("multibranch_root_job") or "").strip()
-        if not (base_url and job_name) and not (base_url and multibranch_root):
-            missing.append(
-                "jenkins.job_url (or jenkins.base_url + jenkins.job_name, "
-                "or jenkins.base_url + jenkins.multibranch_root_job)"
-            )
     if missing:
         raise APError("Missing Jenkins config: " + ", ".join(missing))
     print(f"[verify-jenkins] OK: {jenkinsfile}")
@@ -831,27 +817,26 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         missing.append("commands.quick_test or commands.test")
     if not (str(commands.get("lint") or "").strip() or str(commands.get("typecheck") or "").strip()):
         missing.append("commands.lint or commands.typecheck")
-    if not str(target_cfg.get("name") or "").strip():
-        missing.append("target_env.name")
-    if not str(target_cfg.get("health_base_url") or "").strip():
-        missing.append("target_env.health_base_url")
-    if not str(target_cfg.get("health_path") or "").strip():
-        missing.append("target_env.health_path")
-    if not str(jenkins_cfg.get("trigger_branch") or "").strip():
-        missing.append("jenkins.trigger_branch")
-    if not str(jenkins_cfg.get("image_repository") or "").strip():
-        missing.append("jenkins.image_repository")
-    if not str(jenkins_cfg.get("image_tag_strategy") or "").strip():
-        missing.append("jenkins.image_tag_strategy")
-    if not str(jenkins_cfg.get("deploy_env") or "").strip():
-        missing.append("jenkins.deploy_env")
+    _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
+    _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
+    _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
+    _require_explicit_field(missing, "target_env.frontend_password", target_cfg.get("frontend_password"))
+    _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
+    _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
+    _require_explicit_field(missing, "target_env.backend_password", target_cfg.get("backend_password"))
+    _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
+    _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
 
-    base_url = str(jenkins_cfg.get("base_url") or "").strip()
-    job_name = str(jenkins_cfg.get("job_name") or "").strip()
-    job_url = str(jenkins_cfg.get("job_url") or "").strip()
-    multibranch_root = str(jenkins_cfg.get("multibranch_root_job") or "").strip()
-    if not job_url and not (base_url and job_name) and not (base_url and multibranch_root):
-        missing.append("jenkins.job_url or (jenkins.base_url + jenkins.job_name) or (jenkins.base_url + jenkins.multibranch_root_job)")
+    _require_explicit_field(missing, "jenkins.base_url", jenkins_cfg.get("base_url"))
+    _require_explicit_field(missing, "jenkins.ui_username", jenkins_cfg.get("ui_username"))
+    _require_explicit_field(missing, "jenkins.ui_password", jenkins_cfg.get("ui_password"))
+    _require_explicit_field(missing, "jenkins.job_url", jenkins_cfg.get("job_url"))
+    _require_explicit_field(missing, "jenkins.trigger_branch", jenkins_cfg.get("trigger_branch"))
+    _require_explicit_field(missing, "jenkins.image_repository", jenkins_cfg.get("image_repository"))
+    _require_explicit_field(missing, "jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy"))
+    _require_explicit_field(missing, "jenkins.deploy_env", jenkins_cfg.get("deploy_env"))
+    _require_explicit_field(missing, "jenkins.api_user", jenkins_cfg.get("api_user"))
+    _require_explicit_field(missing, "jenkins.api_password", jenkins_cfg.get("api_password"))
 
     repo_docs = {
         "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
@@ -863,30 +848,31 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if not path.exists():
             warnings.append(f"{key} missing on disk: {path}")
 
-    if _pair_state(str(target_cfg.get("backend_username") or "").strip(), str(target_cfg.get("backend_password") or "").strip()) == "partial":
-        warnings.append("target_env.backend_username / target_env.backend_password is partial")
-    if _pair_state(str(target_cfg.get("frontend_username") or "").strip(), str(target_cfg.get("frontend_password") or "").strip()) == "partial":
-        warnings.append("target_env.frontend_username / target_env.frontend_password is partial")
-    if _pair_state(str(jenkins_cfg.get("ui_username") or "").strip(), str(jenkins_cfg.get("ui_password") or "").strip()) == "partial":
-        warnings.append("jenkins.ui_username / jenkins.ui_password is partial")
-
-    api_user = str(jenkins_cfg.get("api_user") or "").strip()
-    api_secret = str(jenkins_cfg.get("api_token") or jenkins_cfg.get("api_password") or "").strip()
-    if _pair_state(api_user, api_secret) == "partial":
-        warnings.append("jenkins.api_user with jenkins.api_token/api_password is partial")
+    _validate_url_field(warnings, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
+    _validate_url_field(warnings, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
+    _validate_url_field(warnings, "target_env.health_base_url", target_cfg.get("health_base_url"))
+    _validate_path_field(warnings, "target_env.health_path", target_cfg.get("health_path"))
+    _validate_url_field(warnings, "jenkins.base_url", jenkins_cfg.get("base_url"))
+    _validate_url_field(warnings, "jenkins.job_url", jenkins_cfg.get("job_url"))
 
     runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
     if runtime_enabled and not (str(commands.get("compose_up") or "").strip() or str(runtime_cfg.get("docker_compose_file") or "").strip()):
         warnings.append("runtime config is partially enabled but compose_up or docker_compose_file is missing")
 
+    try:
+        timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)
+        if timeout_s <= 0:
+            warnings.append("jenkins.deploy_timeout_sec must be a positive integer")
+    except Exception:
+        warnings.append("jenkins.deploy_timeout_sec must be a positive integer")
+
+    if warnings:
+        missing.extend([f"invalid {item}" for item in warnings])
+
     if missing:
-        raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing) + (("\nWarnings:\n- " + "\n- ".join(warnings)) if warnings else ""))
+        raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing))
 
     print("[doctor] OK")
-    if warnings:
-        print("[doctor] Warnings:")
-        for item in warnings:
-            print(f"- {item}")
 
 
 def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
@@ -908,12 +894,10 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     timeout_s = int(args.timeout_sec or 300)
     poll_s = int(args.poll_sec or 5)
     inferred_branch = _resolve_git_branch_name(repo, git_ref)
-    branch_hint = str(args.branch_name or jenkins_cfg.get("branch_name") or inferred_branch or "").strip()
+    branch_hint = str(args.branch_name or inferred_branch or "").strip()
     root_hint = str(
         args.multibranch_root_job
-        or jenkins_cfg.get("multibranch_root_job")
         or args.job_name
-        or jenkins_cfg.get("job_name")
         or args.job_url
         or jenkins_cfg.get("job_url")
         or ""
@@ -1064,6 +1048,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
 def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
+    cmd_doctor(argparse.Namespace(repo=str(repo)))
 
     msg = args.msg
 

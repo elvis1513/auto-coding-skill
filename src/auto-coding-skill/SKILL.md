@@ -7,6 +7,8 @@ description: Use for a lightweight Jenkins-first engineering workflow in Claude/
 
 This skill is for Go backend + frontend monorepo projects that rely on Jenkins to build and deploy after push. It supports both Claude and Codex. The default workflow is lightweight locally, then uses Jenkins and the real target environment as the authoritative verification path.
 
+`docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Unused environment keys should be removed from the template instead of being left as placeholders.
+
 Prefer already available MCP servers, installed skills, plugins, and app connectors over ad-hoc manual work whenever they can complete the task reliably.
 
 Default to multi-agent execution when the client supports it. Break work into independent design, research, implementation, validation, and documentation subtasks so Claude/Codex can run them in parallel whenever that reduces cycle time without weakening control of the main task.
@@ -71,6 +73,7 @@ This contains all manual fields:
 - `docs.*`
 
 Do not duplicate config in other md/yaml files.
+Do not hide `docs/ENGINEERING.md` in `.gitignore`.
 
 Minimum required config for the default flow:
 - `project.name`
@@ -78,13 +81,24 @@ Minimum required config for the default flow:
 - `commands.quick_test` or `commands.test`
 - `commands.lint` or `commands.typecheck`
 - `target_env.name`
+- `target_env.frontend_base_url`
+- `target_env.frontend_username`
+- `target_env.frontend_password`
+- `target_env.backend_base_url`
+- `target_env.backend_username`
+- `target_env.backend_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
+- `jenkins.base_url`
+- `jenkins.ui_username`
+- `jenkins.ui_password`
+- `jenkins.api_user`
+- `jenkins.api_password`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`
 - `jenkins.deploy_env`
-- `jenkins.job_url` or `jenkins.base_url + jenkins.job_name` or `jenkins.base_url + jenkins.multibranch_root_job`
+- `jenkins.job_url`
 
 ## Branch policy
 
@@ -134,8 +148,9 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ## Quality policy
 
 - Default local gate is lightweight only: build, unit/quick test, lint, typecheck, API docs, Jenkinsfile / script syntax, `git diff --check`.
-- `doctor` should be used early to catch missing config before the first implementation loop.
+- `doctor` should be used early to catch missing or invalid config before the first implementation loop.
 - `light-gate` now fails if the required default commands are not configured.
+- `doctor`, `light-gate`, and `commit-push` all fail when required environment fields are missing, placeholder-like, or syntactically invalid.
 - Do not require local Docker Compose or full local regression for every small change.
 - Jenkins and target environment verification are more valuable than repeated local simulation of deploy-only problems.
 - `verify-target` should be used for real target-environment API/page checks when the task touches user-visible or deploy-sensitive behavior.

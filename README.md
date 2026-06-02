@@ -7,6 +7,8 @@ Engineering workflow skill for:
 
 This skill targets Go backend + frontend monorepo projects that rely on Jenkins for build and deployment. The optimized default flow is lightweight locally, then Jenkins-first and target-environment-first for real verification.
 
+`docs/ENGINEERING.md` is intentionally Git-tracked. The environment fields kept in that file are mandatory, must be filled with real values, and are committed as part of project maintenance. Unused environment items should be removed instead of being kept as placeholders.
+
 ## Install
 
 ```bash
@@ -108,6 +110,7 @@ python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 - `docs/ENGINEERING.md` frontmatter
 
 This frontmatter is the only manual config source.
+It must be committed to Git. Do not add it to `.gitignore`.
 
 重点字段：
 - `commands.*`
@@ -121,13 +124,24 @@ This frontmatter is the only manual config source.
 - `commands.quick_test` 或 `commands.test`
 - `commands.lint` 或 `commands.typecheck`
 - `target_env.name`
+- `target_env.frontend_base_url`
+- `target_env.frontend_username`
+- `target_env.frontend_password`
+- `target_env.backend_base_url`
+- `target_env.backend_username`
+- `target_env.backend_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
+- `jenkins.base_url`
+- `jenkins.ui_username`
+- `jenkins.ui_password`
+- `jenkins.api_user`
+- `jenkins.api_password`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`
 - `jenkins.deploy_env`
-- `jenkins.job_url` 或 `jenkins.base_url + jenkins.job_name` 或 `jenkins.base_url + jenkins.multibranch_root_job`
+- `jenkins.job_url`
 
 4. Start AI development by constraints:
 
@@ -185,7 +199,9 @@ This frontmatter is the only manual config source.
 - Purpose: single source of project config + workflow rules.
 - How to record:
   - Fill YAML frontmatter once.
-  - Keep target env accounts, Jenkins UI/API accounts, commands, docs paths here only.
+  - Keep target env front/backend usernames and passwords, Jenkins UI/API usernames and passwords, commands, docs paths here only.
+  - This file is expected to be committed to Git and maintained in plaintext for this workflow.
+  - Remaining environment keys are all mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
   - Do not duplicate config elsewhere.
 
 ### 2) docs/tasks/taskbook.md

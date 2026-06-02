@@ -45,28 +45,19 @@ target_env:
   backend_password: ""
   health_base_url: ""
   health_path: ""
-  verify_notes: ""
 
 jenkins:
   base_url: ""
   ui_username: ""
   ui_password: ""
-  crumb_url: ""
-  job_name: ""
   job_url: ""
-  multibranch_root_job: ""
-  branch_name: ""
   trigger_branch: ""
   image_repository: ""
   image_tag_strategy: ""
   deploy_env: ""
   deploy_timeout_sec: 1800
   api_user: ""
-  api_token: ""
   api_password: ""
-  api_user_env: "JENKINS_USER"
-  api_token_env: "JENKINS_TOKEN"
-  api_password_env: "JENKINS_PASSWORD"
 
 docs:
   taskbook: "docs/tasks/taskbook.md"
@@ -97,6 +88,9 @@ docs:
 补充规则：
 - 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、构建缓存等非必要产物；仅明确需要保留的本地诊断目录允许保留。
 - 所有手工填写信息，只维护在本文件 frontmatter 中，其他文档不得重复配置。
+- `docs/ENGINEERING.md` 必须提交到 Git 管理，不允许写入 `.gitignore`。
+- 本 workflow 明确允许在 `docs/ENGINEERING.md` 中明文维护平台账号、密码，并随 Git 一起版本化。
+- 未参与默认流程的环境项不要保留占位；模板中未保留的字段视为已清理，不再额外配置。
 
 ---
 
@@ -104,14 +98,14 @@ docs:
 
 先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
 - `commands.*`：本地轻量校验命令
-- `target_env.*`：目标环境地址、后台账号、前端验证信息
-- `jenkins.*`：Jenkins UI/API 账号、Job、分支、镜像、部署环境
+- `target_env.*`：目标环境前端 / 后端地址、用户名、密码，必须全部填写且真实可用
+- `jenkins.*`：Jenkins UI/API 用户名、密码、Job、分支、镜像、部署环境，必须全部填写且真实可用
 
 字段说明：
 - `target_env.backend_username` / `target_env.backend_password`：目标环境后台账号
-- `target_env.frontend_username` / `target_env.frontend_password`：目标环境前端登录账号（如需要）
+- `target_env.frontend_username` / `target_env.frontend_password`：目标环境前端登录账号
 - `jenkins.ui_username` / `jenkins.ui_password`：Jenkins 页面登录账号
-- `jenkins.api_user` + `jenkins.api_token` / `jenkins.api_password`：Jenkins API 校验凭据
+- `jenkins.api_user` / `jenkins.api_password`：Jenkins API 用户名 / 密码
 
 默认必填：
 - `project.name`
@@ -119,18 +113,27 @@ docs:
 - `commands.quick_test` 或 `commands.test`
 - `commands.lint` 或 `commands.typecheck`
 - `target_env.name`
+- `target_env.frontend_base_url`
+- `target_env.frontend_username`
+- `target_env.frontend_password`
+- `target_env.backend_base_url`
+- `target_env.backend_username`
+- `target_env.backend_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
+- `jenkins.ui_username`
+- `jenkins.ui_password`
+- `jenkins.api_user`
+- `jenkins.api_password`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`
 - `jenkins.deploy_env`
-- `jenkins.job_url` 或 `jenkins.base_url + jenkins.job_name` 或 `jenkins.base_url + jenkins.multibranch_root_job`
+- `jenkins.job_url`
 
 按需填写：
 - `runtime.*`：仅在本地运行诊断时使用
 - `commands.compose_up` / `commands.compose_down` / `commands.smoke` / `commands.regression`
-- `target_env.frontend_*` / `target_env.backend_*`：仅在需要额外页面/API验证或受保护资源校验时使用
 
 ---
 
@@ -216,6 +219,9 @@ docs:
 
 9. 闭环记录  
    每个任务必须留下轻量闭环记录：任务 ID、提交号、Jenkins Build URL、目标环境验证结果、是否通过、遗留问题。
+
+10. 配置入库  
+   `docs/ENGINEERING.md` 中保留下来的环境信息、前端/后端账号、Jenkins 账号与密码必须 100% 填写、正确填写，并提交 Git 作为项目权威配置持续维护。
 
 ---
 

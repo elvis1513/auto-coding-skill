@@ -62,19 +62,6 @@ function resolveTargetDir(ai, mode, destOverride){
   die(`unknown ai: ${ai}`);
 }
 
-function ensureGitignore(projectDir){
-  const gi = path.join(projectDir, ".gitignore");
-  const line = "docs/ENGINEERING.md";
-  if (!exists(gi)) {
-    fs.writeFileSync(gi, `${line}\n`, "utf-8");
-    return;
-  }
-  const txt = fs.readFileSync(gi, "utf-8");
-  if (!txt.includes(line)) {
-    fs.appendFileSync(gi, (txt.endsWith("\n") ? "" : "\n") + line + "\n");
-  }
-}
-
 function main(){
   const args = parseArgs(process.argv);
 
@@ -104,8 +91,6 @@ Examples:
   const assetSkill = path.resolve(here, "..", "assets", "skill");
   if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
 
-  const proj = projectRoot();
-
   for (const t of targets) {
     const dstOverride = args.dest
       ? (targets.length > 1 ? path.join(args.dest, t) : args.dest)
@@ -118,8 +103,6 @@ Examples:
     copyDir(assetSkill, dst);
     console.log(`[autocoding] installed skill to: ${dst}`);
   }
-
-  if (args.mode === "project") ensureGitignore(proj);
 
   console.log("[autocoding] done.");
 }

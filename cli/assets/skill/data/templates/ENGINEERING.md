@@ -1,4 +1,7 @@
 ---
+workflow:
+  mode: "dev"
+
 project:
   name: ""
   repo_root: "."
@@ -66,8 +69,10 @@ docs:
 
 # docs/ENGINEERING.md — Lightweight Default Workflow (Source of Truth)
 
-目标：默认采用高效率开发闭环：  
-需求/任务记录 → 最小设计 → 开发实现 → 本地轻量校验 → commit/push → Jenkins 构建部署 → 目标环境验证 → 闭环记录
+目标：默认采用高效率开发闭环，并通过 `workflow.mode` 控制流程长度。
+
+- `dev`：开发模式，最快闭环。轻量门禁通过后，提前写 `DEV-CLOSED` 闭环，commit + push 触发 Jenkins 后结束。
+- `verify`：验证模式，完整闭环。轻量门禁、commit + push、Jenkins 构建验证、目标环境验证全部完成后，写 `PASS` 闭环。
 
 默认原则：
 - 默认不要求本地 Docker Compose 启动。
@@ -90,6 +95,7 @@ docs:
 ## 0. 配置填写（必须）
 
 先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
+- `workflow.mode`：`dev` 或 `verify`，默认推荐 `dev`
 - `commands.light_gate`：推荐配置一个项目级快速门禁命令，作为默认本地校验入口
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码、Job、分支、镜像、部署环境，必须全部填写且真实可用
@@ -102,6 +108,7 @@ docs:
 - `jenkins.api_user` / `jenkins.api_password`：Jenkins API 用户名 / 密码
 
 默认必填：
+- `workflow.mode`
 - `project.name`
 - `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
 - `target_env.name`
@@ -181,6 +188,35 @@ docs:
 
 ## 2. 标准流程（默认）
 
+### 2.1 开发模式：`workflow.mode: "dev"`
+
+用于日常快速开发。默认闭环：
+
+需求确认 → 最小设计记录 → 开发实现 → 本地轻量校验 → 写 `DEV-CLOSED` 闭环 → commit + push → 结束
+
+规则：
+- 只跑最轻量门禁。
+- push 触发 Jenkins 后不等待、不轮询、不验证目标环境。
+- `closure-log.md` 必须提前写入本次提交。
+- 闭环结果写 `DEV-CLOSED`，不要伪装成完整 `PASS`。
+- Jenkins Build 写 `triggered by push, not verified in dev mode`。
+- Target Env 写 `not verified in dev mode`。
+
+### 2.2 验证模式：`workflow.mode: "verify"`
+
+用于发布前、验收、高风险变更或需要完整证据的任务。默认闭环：
+
+需求确认 → 最小设计 / 必要 DD → 开发实现 → 本地轻量校验 → commit + push → Jenkins 构建验证 → 目标环境验证 → 写 `PASS` 闭环
+
+规则：
+- Jenkins 构建必须成功。
+- 目标环境健康检查必须通过。
+- 关键接口 / 页面路径按任务需要补充验证。
+- 只有真实验证完成后，闭环结果才允许写 `PASS`。
+- 回归矩阵只有真实执行并有证据时才允许标 `PASS`。
+
+### 2.3 任务步骤
+
 1. 需求确认  
    明确任务范围、影响服务、是否涉及 API/数据库/部署/Jenkins/前端页面。
 
@@ -198,20 +234,20 @@ docs:
    - API 文档检查
    - Jenkins 配置检查
 
-5. 立即提交推送  
-   轻量校验通过后，commit + push，触发 Jenkins。
+5. 提交推送  
+   `dev` 模式先写开发闭环再 commit + push；`verify` 模式 commit + push 后继续验证 Jenkins 和目标环境。
 
 6. Jenkins 验证  
-   查看 Jenkins 构建、镜像、部署结果；失败则根据 Jenkins 日志修复，再次提交推送。
+   仅 `verify` 模式默认执行。查看 Jenkins 构建、镜像、部署结果；失败则根据 Jenkins 日志修复，再次提交推送。
 
 7. 目标环境验证  
-   在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+   仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 
 8. 回归与证据记录  
    只有真实执行过 Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
 
 9. 闭环记录  
-   每个任务必须留下轻量闭环记录：任务 ID、提交号、Jenkins Build URL、目标环境验证结果、是否通过、遗留问题。
+   每个任务必须留下轻量闭环记录。`dev` 模式用 `DEV-CLOSED`，`verify` 模式用 `PASS` / `FAIL` / `PARTIAL`。
 
 10. 配置入库  
    `docs/ENGINEERING.md` 中保留下来的环境信息、前端/后端账号、Jenkins 账号与密码必须 100% 填写、正确填写，并提交 Git 作为项目权威配置持续维护。
@@ -231,7 +267,7 @@ docs:
 
 高风险变更至少额外要求：
 - 明确 DD
-- 目标环境真实验证
+- 使用 `workflow.mode: "verify"`，或在 `dev` 快速闭环后显式补目标环境真实验证
 - 闭环记录写清楚验证路径和结果
 - 必要时补 summary / deployment record / regression matrix
 
@@ -254,6 +290,8 @@ docs:
 
 统一使用：
 - `python3 docs/tools/autopipeline/ap.py doctor`
+- `python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"`
+- `python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode verify --msg "<TASK_ID>: <summary>" ...`
 - `python3 docs/tools/autopipeline/ap.py light-gate`
 - `python3 docs/tools/autopipeline/ap.py verify-jenkins-build ...`
 - `python3 docs/tools/autopipeline/ap.py wait-health --scope target`
@@ -263,6 +301,7 @@ docs:
 说明：
 - `doctor`：检查默认流程必填项和常见配置错误。
 - `light-gate`：默认轻量门禁，优先执行项目自定义快速门禁命令。
+- `commit-push`：按 `workflow.mode` 自动选择开发闭环或完整验证闭环。
 - `verify-target`：目标环境健康检查 + 按需关键 API / 页面验证。
 - `record-closure`：默认轻量闭环记录。
 - `check-matrix`、`gen-summary`、`runtime-up/down`：保留为按需工具。

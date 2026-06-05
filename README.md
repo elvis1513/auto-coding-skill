@@ -5,7 +5,7 @@ Engineering workflow skill for:
 - Claude Code
 - Codex CLI
 
-This skill targets Go backend + frontend monorepo projects that rely on Jenkins for build and deployment. The optimized default flow is lightweight locally, then Jenkins-first and target-environment-first for real verification.
+This skill targets Go backend + frontend monorepo projects that rely on Jenkins for build and deployment. The default `dev` mode is optimized for fast development: light gate, early closure record, commit, push, then move to the next task. Switch to `verify` mode when Jenkins and target-environment evidence must be completed before closure.
 
 `docs/ENGINEERING.md` is intentionally Git-tracked. The environment fields kept in that file are mandatory, must be filled with real values, and are committed as part of project maintenance. Unused environment items should be removed instead of being kept as placeholders.
 
@@ -39,9 +39,20 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Optimized Standard Flow
 
-默认闭环：
+模式由 `docs/ENGINEERING.md` 顶部控制：
 
-`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> Jenkins 构建部署 -> 目标环境验证 -> 闭环记录`
+```yaml
+workflow:
+  mode: "dev" # dev | verify
+```
+
+`dev` 默认闭环：
+
+`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> 写 DEV-CLOSED 闭环 -> commit/push -> 结束`
+
+`verify` 完整闭环：
+
+`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> Jenkins 构建部署验证 -> 目标环境验证 -> 写 PASS 闭环`
 
 具体执行顺序：
 
@@ -58,16 +69,18 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
    - `git diff --check`
    - API 文档检查
    - Jenkins 配置检查
-5. 立即提交推送
-   - 本地轻量校验通过后，commit + push，触发 Jenkins。
+5. 提交推送
+   - `dev` 模式：轻量校验通过后，先写 `DEV-CLOSED` 闭环，再 commit + push，触发 Jenkins 后结束。
+   - `verify` 模式：commit + push 后继续等待 Jenkins 和目标环境验证。
 6. Jenkins 验证
-   - 看 Jenkins 构建、镜像、部署结果；失败则基于 Jenkins 日志修复并再次提交。
+   - 仅 `verify` 模式默认执行。看 Jenkins 构建、镜像、部署结果；失败则基于 Jenkins 日志修复并再次提交。
 7. 目标环境验证
-   - 在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+   - 仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 8. 回归与证据记录
    - 只有真实执行过 Jenkins / 目标环境验证，或明确要求本地运行验证时，才把 regression matrix 写成 `PASS`。
 9. 闭环记录
-   - 每个任务默认必须留下轻量闭环记录。
+   - `dev` 模式记录 `DEV-CLOSED`，表示开发闭环完成但 Jenkins/目标环境未验证。
+   - `verify` 模式记录 `PASS` / `FAIL` / `PARTIAL`，必须基于真实验证结果。
 
 ## Default vs On-demand
 
@@ -112,12 +125,14 @@ This frontmatter is the only manual config source.
 It must be committed to Git. Do not add it to `.gitignore`.
 
 重点字段：
+- `workflow.mode`
 - `commands.*`
 - `target_env.*`
 - `jenkins.*`
 - `docs.*`
 
 默认必填：
+- `workflow.mode`
 - `project.name`
 - `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
 - `target_env.name`
@@ -189,7 +204,8 @@ It must be committed to Git. Do not add it to `.gitignore`.
 ## Default Gate Policy
 - Default local gate is lightweight only.
 - Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
-- Push is not the finish line: Jenkins success, target environment verification, and closure record are mandatory.
+- In `dev` mode, push is the finish line after `DEV-CLOSED` is recorded.
+- In `verify` mode, Jenkins success, target environment verification, and closure record are mandatory.
 ```
 
 ## Docs Structure and Recording Rules
@@ -256,7 +272,7 @@ These categories require stronger verification and usually a DD:
 - File upload / download
 - Production configuration
 
-For these tasks, target environment verification is mandatory.
+For these tasks, use `workflow.mode: "verify"` or run an explicit verification pass after the fast `dev` closure.
 
 ## Commands
 
@@ -265,27 +281,32 @@ Recommended default flow:
 ```bash
 pip install pyyaml requests
 python3 docs/tools/autopipeline/ap.py doctor
-python3 docs/tools/autopipeline/ap.py light-gate
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>" --require-light-gate --require-jenkins
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+```
+
+Development mode can also be forced per run:
+
+```bash
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode dev --msg "<TASK_ID>: <summary>"
+```
+
+Verification mode runs the full Jenkins + target-environment loop:
+
+```bash
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
+  --mode verify \
+  --msg "<TASK_ID>: <summary>" \
+  --backend-path /health \
+  --frontend-path /
+```
+
+Manual verification commands remain available:
+
+```bash
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py wait-health --scope target
 python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
 python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --jenkins <build-url> --result PASS --verification "health check" --verification "key api" --verification "key page"
-```
-
-Or let `commit-push` append the closure record directly:
-
-```bash
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
-  --msg "<TASK_ID>: <summary>" \
-  --require-light-gate \
-  --require-jenkins \
-  --record-closure \
-  --jenkins-build <build-url> \
-  --result PASS \
-  --verification "health check" \
-  --verification "key api" \
-  --verification "key page"
 ```
 
 Available on-demand commands:
@@ -328,7 +349,7 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - `verify-target`
   - Performs real target-environment verification beyond health checks when you provide key backend/frontend paths.
 - `commit-push --record-closure`
-  - Lets you append the closure record as part of the same close loop.
+  - Kept for compatibility; normal `commit-push` now records closure automatically based on `workflow.mode`.
 
 ## Publish (NPM)
 

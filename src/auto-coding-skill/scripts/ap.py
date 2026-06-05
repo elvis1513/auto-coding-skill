@@ -542,6 +542,15 @@ def _load_cfg(repo: Path) -> dict:
     return load_yaml(cfg_path)
 
 
+def _workflow_mode(cfg: dict, args: Optional[argparse.Namespace] = None) -> str:
+    explicit = str(getattr(args, "mode", "") or "").strip().lower() if args else ""
+    configured = str(((cfg.get("workflow") or {}).get("mode")) or "dev").strip().lower()
+    mode = explicit or configured or "dev"
+    if mode not in {"dev", "verify"}:
+        raise APError("workflow.mode must be 'dev' or 'verify'.")
+    return mode
+
+
 def _text(value: object) -> str:
     return str(value or "").strip()
 
@@ -742,6 +751,7 @@ def cmd_verify_target(args: argparse.Namespace) -> None:
 
     summary = ", ".join(checks) if checks else "health-only"
     print(f"[verify-target] OK: {summary}")
+    return summary
 
 
 def cmd_verify_jenkins(args: argparse.Namespace) -> None:
@@ -773,6 +783,7 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
 def cmd_doctor(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
+    workflow_cfg = (cfg.get("workflow") or {})
     project_cfg = (cfg.get("project") or {})
     commands = (cfg.get("commands") or {})
     target_cfg = (cfg.get("target_env") or {})
@@ -783,6 +794,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     missing: List[str] = []
     warnings: List[str] = []
 
+    mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
+    if mode not in {"dev", "verify"}:
+        missing.append("workflow.mode (must be dev or verify)")
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
     if not (
@@ -914,15 +928,16 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
             f"#{payload.get('number')} {payload.get('url')}",
             args.allow_no_deploy,
         )
+        build_url = str(payload.get("url") or "").strip()
         print(
             "[verify-jenkins-build] OK: "
             f"job={job_label} "
             f"build=#{payload.get('number')} "
             f"result={result} "
             f"description={description} "
-            f"url={payload.get('url')}"
+            f"url={build_url}"
         )
-        return
+        return build_url
 
     git_short_sha = _resolve_git_short_sha(repo, git_ref)
     matched = None
@@ -953,6 +968,7 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         f"#{matched.get('number')} {matched.get('url')}",
         args.allow_no_deploy,
     )
+    build_url = str(matched.get("url") or "").strip()
     print(
         "[verify-jenkins-build] OK: "
         f"commit={git_short_sha} "
@@ -960,8 +976,9 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         f"build=#{matched.get('number')} "
         f"result={result} "
         f"description={description} "
-        f"url={matched.get('url')}"
+        f"url={build_url}"
     )
+    return build_url
 
 
 def cmd_verify_api_docs(args: argparse.Namespace) -> None:
@@ -1024,27 +1041,73 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     print(f"[record-closure] OK: {closure_log}")
 
 
+def _record_commit_push_closure(
+    repo: Path,
+    args: argparse.Namespace,
+    *,
+    commit: str,
+    jenkins: str,
+    target_env: str,
+    verification: List[str],
+    result: str,
+    follow_up: str,
+) -> None:
+    cmd_record_closure(
+        argparse.Namespace(
+            repo=str(repo),
+            task_id=args.task_id,
+            title=args.title,
+            commit=commit,
+            jenkins=jenkins,
+            target_env=target_env,
+            verification=verification,
+            result=result,
+            follow_up=follow_up,
+            initial_commit=args.initial_commit,
+            jenkins_failure=args.jenkins_failure,
+            fix_commit=args.fix_commit,
+        )
+    )
+
+
 def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cmd_doctor(argparse.Namespace(repo=str(repo)))
+    cfg = _load_cfg(repo)
+    mode = _workflow_mode(cfg, args)
+    target_cfg = (cfg.get("target_env") or {})
 
     msg = args.msg
-
-    if args.record_closure and not args.result:
-        raise APError("When using --record-closure, --result is required.")
 
     if args.require_runtime_health:
         cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
 
-    if args.require_light_gate:
+    if mode in {"dev", "verify"} or args.require_light_gate:
         cmd_light_gate(argparse.Namespace(repo=str(repo)))
 
     if args.require_jenkins:
         cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
 
-    if args.require_matrix:
+    if args.require_matrix and mode != "verify":
         cmd_check_matrix(argparse.Namespace(repo=str(repo)))
+
+    if mode == "dev":
+        dev_verification = args.verification or [
+            "light-gate only",
+            "Jenkins triggered by push; build not verified in dev mode",
+            "target environment not verified in dev mode",
+        ]
+        _record_commit_push_closure(
+            repo,
+            args,
+            commit="generated by this commit-push run",
+            jenkins=args.jenkins_build or "triggered by push, not verified in dev mode",
+            target_env=args.target_env or "not verified in dev mode",
+            verification=dev_verification,
+            result=args.result or "DEV-CLOSED",
+            follow_up=args.follow_up or "Run verify mode when Jenkins and target-environment evidence is required.",
+        )
 
     run(["git", "add", "-A"], cwd=repo)
     diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
@@ -1053,24 +1116,65 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
 
     run(["git", "commit", "-m", msg], cwd=repo)
     run(["git", "push"], cwd=repo)
-    if args.record_closure:
-        cmd_record_closure(
+
+    if mode == "verify":
+        jenkins_build = cmd_verify_jenkins_build(
             argparse.Namespace(
                 repo=str(repo),
-                task_id=args.task_id,
-                title=args.title,
-                commit="HEAD",
-                jenkins=args.jenkins_build,
-                target_env=args.target_env,
-                verification=args.verification,
-                result=args.result,
-                follow_up=args.follow_up,
-                initial_commit=args.initial_commit,
-                jenkins_failure=args.jenkins_failure,
-                fix_commit=args.fix_commit,
+                git_ref="HEAD",
+                job_name=args.job_name,
+                job_url=args.job_url,
+                multibranch_root_job=args.multibranch_root_job,
+                branch_name=args.branch_name,
+                build_number=args.build_number,
+                max_builds=args.max_builds,
+                timeout_sec=args.timeout_sec,
+                poll_sec=args.poll_sec,
+                allow_no_deploy=args.allow_no_deploy,
             )
         )
-    print("[commit-push] OK - push completed, Jenkins should auto-trigger")
+        target_summary = cmd_verify_target(
+            argparse.Namespace(
+                repo=str(repo),
+                backend_path=args.backend_path,
+                frontend_path=args.frontend_path,
+                backend_basic_auth=args.backend_basic_auth,
+                frontend_basic_auth=args.frontend_basic_auth,
+            )
+        )
+        if args.require_matrix:
+            cmd_check_matrix(argparse.Namespace(repo=str(repo)))
+        verification = args.verification or [
+            f"Jenkins build verified: {jenkins_build or 'verified by git-ref HEAD'}",
+            f"Target verification: {target_summary}",
+        ]
+        _record_commit_push_closure(
+            repo,
+            args,
+            commit="HEAD",
+            jenkins=args.jenkins_build or jenkins_build or "verified by git-ref HEAD",
+            target_env=args.target_env or str(target_cfg.get("name") or "").strip(),
+            verification=verification,
+            result=args.result or "PASS",
+            follow_up=args.follow_up or "none",
+        )
+        run(["git", "add", "-A"], cwd=repo)
+        closure_diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
+        if closure_diff:
+            run(["git", "commit", "-m", f"{args.task_id}: record verification closure [skip ci]"], cwd=repo)
+            run(["git", "push"], cwd=repo)
+    elif args.record_closure and mode != "dev":
+        _record_commit_push_closure(
+            repo,
+            args,
+            commit="HEAD",
+            jenkins=args.jenkins_build or "TODO",
+            target_env=args.target_env or str(target_cfg.get("name") or "").strip(),
+            verification=args.verification or [],
+            result=args.result or "PARTIAL",
+            follow_up=args.follow_up or "none",
+        )
+    print(f"[commit-push] OK - mode={mode}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1144,7 +1248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--jenkins")
     s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
-    s.add_argument("--result", choices=["PASS", "FAIL", "PARTIAL"], required=True)
+    s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"], required=True)
     s.add_argument("--follow-up")
     s.add_argument("--initial-commit")
     s.add_argument("--jenkins-failure")
@@ -1155,15 +1259,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("task_id")
     s.add_argument("--title")
     s.add_argument("--msg", required=True)
+    s.add_argument("--mode", choices=["dev", "verify"])
     s.add_argument("--require-light-gate", action="store_true")
     s.add_argument("--require-runtime-health", action="store_true")
     s.add_argument("--require-jenkins", action="store_true")
     s.add_argument("--require-matrix", action="store_true")
     s.add_argument("--record-closure", action="store_true")
+    s.add_argument("--job-name")
+    s.add_argument("--job-url")
+    s.add_argument("--multibranch-root-job")
+    s.add_argument("--branch-name")
+    s.add_argument("--build-number", type=int)
+    s.add_argument("--max-builds", type=int, default=20)
+    s.add_argument("--timeout-sec", type=int, default=300)
+    s.add_argument("--poll-sec", type=int, default=5)
+    s.add_argument("--allow-no-deploy", action="store_true")
+    s.add_argument("--backend-path", action="append")
+    s.add_argument("--frontend-path", action="append")
+    s.add_argument("--backend-basic-auth", action="store_true")
+    s.add_argument("--frontend-basic-auth", action="store_true")
     s.add_argument("--jenkins-build")
     s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
-    s.add_argument("--result", choices=["PASS", "FAIL", "PARTIAL"])
+    s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"])
     s.add_argument("--follow-up")
     s.add_argument("--initial-commit")
     s.add_argument("--jenkins-failure")

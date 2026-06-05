@@ -1,11 +1,11 @@
 ---
 name: auto-coding-skill
-description: Use for a lightweight Jenkins-first engineering workflow in Claude/Codex. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->push->jenkins->target-env->closure.
+description: Use for a Claude/Codex engineering workflow with dev and verify modes. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->DEV-CLOSED->push in dev mode, or full Jenkins->target-env->PASS closure in verify mode.
 ---
 
 # Auto Coding Skill (Claude + Codex)
 
-This skill is for Go backend + frontend monorepo projects that rely on Jenkins to build and deploy after push. It supports both Claude and Codex. The default workflow is lightweight locally, then uses Jenkins and the real target environment as the authoritative verification path.
+This skill is for Go backend + frontend monorepo projects that rely on Jenkins to build and deploy after push. It supports both Claude and Codex. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when Jenkins and the real target environment must be completed before closure.
 
 `docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Unused environment keys should be removed from the template instead of being left as placeholders.
 
@@ -66,6 +66,7 @@ Fill only:
 - `docs/ENGINEERING.md` frontmatter
 
 This contains all manual fields:
+- `workflow.mode`
 - `commands.*`
 - `runtime.*` (only for optional local diagnostics)
 - `target_env.*`
@@ -76,6 +77,7 @@ Do not duplicate config in other md/yaml files.
 Do not hide `docs/ENGINEERING.md` in `.gitignore`.
 
 Minimum required config for the default flow:
+- `workflow.mode`
 - `project.name`
 - `commands.light_gate` or `commands.quick_test` or `commands.test` or `commands.build`
 - `target_env.name`
@@ -108,16 +110,28 @@ Minimum required config for the default flow:
 
 ## Execution order
 
+Read `workflow.mode` from `docs/ENGINEERING.md` before choosing the path.
+
+`dev` mode:
+
 1) read `docs/ENGINEERING.md`
 2) read / update `docs/tasks/taskbook.md`
 3) write minimal design notes; create a DD only when the change is cross-module, API, DB, deployment, Jenkins, or key-page-flow related
 4) implement only the necessary changes
 5) run the default local lightweight gate
-6) commit + push
-7) verify Jenkins build / deployment result
-8) verify the real target environment
-9) append `docs/tasks/closure-log.md`
-10) use summary / deployment record / regression matrix only when the task actually requires them
+6) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
+7) commit + push
+8) stop and start the next development task
+
+`verify` mode:
+
+1) read / update the same authoritative docs
+2) run the default local lightweight gate
+3) commit + push
+4) verify Jenkins build / deployment result
+5) verify the real target environment
+6) append `docs/tasks/closure-log.md` with `Result: PASS / FAIL / PARTIAL`
+7) use summary / deployment record / regression matrix only when the task actually requires them
 
 ## Commands
 
@@ -125,12 +139,9 @@ Default commands:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
-python3 docs/tools/autopipeline/ap.py light-gate
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>" --require-light-gate --require-jenkins
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
-python3 docs/tools/autopipeline/ap.py wait-health --scope target
-python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
-python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --jenkins <build-url> --result PASS --verification "health check" --verification "key api"
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode dev --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode verify --msg "<TASK_ID>: <summary>" --backend-path /health --frontend-path /
 ```
 
 On-demand commands:
@@ -146,12 +157,14 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ## Quality policy
 
 - Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/Jenkins checks.
+- `workflow.mode: dev` closes development after light gate, closure record, commit, and push.
+- `workflow.mode: verify` closes only after Jenkins and target-environment verification.
 - `doctor` should be used early to catch missing or invalid config before the first implementation loop.
 - `light-gate` now fails if no usable fast gate command is configured.
 - `doctor`, `light-gate`, and `commit-push` all fail when required environment fields are missing, placeholder-like, or syntactically invalid.
 - Do not require local Docker Compose or full local regression for every small change.
-- Jenkins and target environment verification are more valuable than repeated local simulation of deploy-only problems.
+- Jenkins and target environment verification are mandatory in `verify` mode, not in default `dev` mode.
 - `verify-target` should be used for real target-environment API/page checks when the task touches user-visible or deploy-sensitive behavior.
-- `commit-push --record-closure` can close the loop in one command when Jenkins build URL and verification results are already known.
+- `commit-push` records closure automatically according to `workflow.mode`.
 - `regression-matrix.md` can mark `PASS` only after real execution with evidence.
 - High-risk changes must include target environment verification and usually a DD.

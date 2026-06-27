@@ -31,6 +31,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - `autocoding sync` now creates a missing `docs/ENGINEERING.md` from the template, while still preserving existing project-specific config.
 - `autocoding init` now preflights both skill and agent targets before writing files, preventing partial installs when one target already exists.
 - Added CLI installer regression tests for dest variants, partial-init failure, sync convergence, bridge generation, custom-agent preservation, and managed bridge cleanup.
+- Made `npm test` runnable from the published package by testing packaged assets separately from source-tree asset synchronization checks.
 - `autocoding status/sync` now treats `.agents/agents` as a shared directory: managed templates are checked and refreshed, while project-specific custom agents are preserved.
 - Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
 - Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.

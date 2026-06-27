@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = path.join(repoRoot, "cli", "src", "index.js");
-const sourceAp = path.join(repoRoot, "src", "auto-coding-skill", "scripts", "ap.py");
+const assetAp = path.join(repoRoot, "cli", "assets", "skill", "scripts", "ap.py");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -131,7 +131,7 @@ function testUpgradeCleansManagedBridgeExtrasOnly() {
   run("node", [cli, "sync", "--projects", repo]);
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "data", "templates", "bridges", "OLD.md"), "old\n");
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt"), "custom\n");
-  run("python3", [sourceAp, "--repo", repo, "upgrade", "--write"]);
+  run("python3", [assetAp, "--repo", repo, "upgrade", "--write"]);
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "data", "templates", "bridges", "OLD.md")), "managed bridge extra should be removed");
   assert(exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt")), "non-managed extra should remain");
 }

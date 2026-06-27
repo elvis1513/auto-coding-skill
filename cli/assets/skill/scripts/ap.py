@@ -11,6 +11,7 @@ import fnmatch
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.error
@@ -1173,12 +1174,12 @@ def _configured_structure_docs(cfg: dict) -> dict[str, str]:
 
 
 def _structure_gate_enabled(cfg: dict) -> bool:
+    structure_cfg = cfg.get("structure")
+    if isinstance(structure_cfg, dict) and not _bool_config(structure_cfg.get("enabled"), default=True):
+        return False
     if _configured_command(cfg, "structure_check"):
         return True
-    structure_cfg = cfg.get("structure")
-    if not isinstance(structure_cfg, dict):
-        return False
-    return _bool_config(structure_cfg.get("enabled"), default=True)
+    return isinstance(structure_cfg, dict)
 
 
 def _print_limited(label: str, items: list[str], max_items: int = 60) -> None:
@@ -1273,7 +1274,8 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     if blocking:
         raise APError(f"structure-check failed with {len(blocking)} blocking issue(s)")
 
-    print(f"[structure-check] OK scope={selected_scope} inspected={inspected} warnings={len(warnings)}")
+    if not getattr(args, "json", False):
+        print(f"[structure-check] OK scope={selected_scope} inspected={inspected} warnings={len(warnings)}")
 
 
 def _run_structure_check_for_gate(repo: Path, cfg: dict, selected_scope: str, base_ref: str) -> list[str]:
@@ -2031,7 +2033,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.func(args)
         return 0
     except APError as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] {e}", file=sys.stderr)
         return 2
 
 

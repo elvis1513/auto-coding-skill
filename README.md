@@ -23,6 +23,12 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.6
+
+- Fixed `structure-check --json` so successful output stays machine-readable JSON without a trailing OK line.
+- Moved CLI error messages to stderr, preserving JSON stdout for failing machine-readable commands.
+- Made `structure.enabled: false` disable structure gate integration even when `commands.structure_check` is still present.
+
 ### v2.0.5
 
 - Added generic engineering-structure governance: `docs/architecture/structure-standard.md`, ADR template, project health baseline, and optimization backlog templates.

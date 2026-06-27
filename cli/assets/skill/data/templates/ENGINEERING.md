@@ -161,28 +161,75 @@ docs:
 
 ## 1.5 工具使用策略（Claude / Codex 专属）
 
-优先使用当前环境已安装、已授权、已可访问的工具能力：
+任务开始时先做能力盘点：当前可用的 MCP servers、已安装 skills、plugins / apps / connectors、浏览器控制能力、repo 脚本。能直接读取权威状态、当前文档或真实 UI 的能力，优先于手写推测。
 
-1) MCP servers
-2) 已安装 skills
-3) plugins / apps / connectors
-4) shell / 手工实现
+默认路由：
 
-规则：
-- 做设计、查资料、查文档、查 Jenkins、查页面、写回外部系统时，优先调用现成能力。
-- 工具不可用、权限不足、结果不可靠时，才回退到 shell 或手工流程。
+1) 本地代码 / 测试 / Git / 门禁
+   优先使用 shell、项目脚本、`docs/tools/autopipeline/ap.py`。本地 diff、提交、推送以 Git 实际状态为准。
+
+2) 当前库 / 框架 / SDK / API / CLI / 云服务文档
+   优先使用 Context7 等文档 MCP 或对应已安装 skill，先确认版本、参数、默认行为、废弃项，再改代码。
+
+3) 浏览器与 UI 验证
+   - localhost、file、应用内页面：优先 Browser / in-app browser；需要脚本控制时配合 node_repl。
+   - 必须复用用户 Chrome 登录态、扩展或已有标签页：使用 Chrome 控制能力；需要脚本控制时配合 node_repl。
+   - 需要稳定自动化复现、截图或 smoke test：使用 Playwright。
+   - 原生桌面 App 或没有专用连接器的 UI：才使用 Computer Use。
+
+4) GitHub / PR / Issue / CI
+   远端 PR、Issue、review comments、Actions/CI 状态优先用 GitHub connector；本地 diff、commit、push 仍用本地 Git。
+
+5) Figma / 视觉设计 / 前端体验
+   设计上下文先用 Figma；视觉强相关页面优先使用 frontend / build-web / product-design 类 skill，并用浏览器截图或真实页面验证收口。
+
+6) 安全敏感变更
+   鉴权、权限、支付、文件上传下载、部署、依赖、数据边界变更，默认安排 reviewer 或安全扫描能力做只读复核。
+
+7) 报告与文件类产物
+   Dashboard / 数据报告使用 Data Analytics；Word/PDF/表格/PPT/LaTeX 使用对应文档类 skill 或插件，并做渲染/校验。
+
+8) OpenAI/API key/密钥类操作
+   使用平台提供的安全 key 创建或写入流程；不要在普通文档、日志或提交中手写、复制、持久化密钥。
+
+9) 屏幕与近期操作上下文
+   当任务依赖用户当前屏幕、浏览器登录状态或最近手工操作时，优先使用 Chronicle / screenshot 类能力获取真实上下文。
+
+回退规则：
+- 工具不可用、权限不足、结果不可靠或比直接执行更慢时，才回退到 shell 或手工流程。
 - 不重复手写工具已经能直接读取或写回的权威数据。
+- 外部信息必须优先来自官方文档、项目连接器或真实运行状态。
 
 ---
 
 ## 1.6 多 Agent 协作策略（Claude / Codex 专属）
 
-整个流程尽可能使用多 agent 并行推进。
+默认使用 `.agents/agents` 中的角色模型来拆解任务；只有在当前客户端明确提供并允许子代理/多代理工具时，才实际并行派发。若运行时策略不允许子代理，则由主 agent 按同一角色顺序串行完成，不假装并行。
 
-规则：
-- 主 agent 负责任务定义、方案裁决、代码集成、轻量门禁、Jenkins/目标环境闭环、最终交付。
-- 子 agent 优先拆为：设计/调研、后端实现、前端实现、验证/文档。
-- 任务边界不清或需要强一致裁决时，由主 agent 保持控制，不机械拆分。
+默认角色：
+
+1) `explorer`
+   只读探索：定位入口、调用链、关键文件、配置项、根因候选。
+
+2) `docs_researcher`
+   文档/API 核对：确认当前版本行为、参数、兼容性、废弃项和官方建议。
+
+3) `browser_debugger`
+   浏览器验证：复现路径、控制台、网络请求、截图、实际/预期行为。
+
+4) `fixer`
+   定点实现：在问题和验收路径清晰后做最小可辩护修改，并运行聚焦校验。
+
+5) `reviewer`
+   只读复核：正确性、安全性、回归风险、边界条件和测试缺口。
+
+主 agent 始终负责：
+- 任务定义、范围裁决、方案取舍
+- 代码集成和冲突处理
+- 轻量门禁、Jenkins/目标环境闭环
+- 文档闭环、Git 状态、最终交付
+
+任务边界不清、需要强一致裁决或涉及架构取舍时，由主 agent 保持控制，不机械拆分。
 
 ---
 
@@ -217,16 +264,16 @@ docs:
 
 ### 2.3 任务步骤
 
-1. 需求确认  
+1. 需求确认
    明确任务范围、影响服务、是否涉及 API/数据库/部署/Jenkins/前端页面。
 
-2. 最小设计记录  
+2. 最小设计记录
    普通小改动只更新 `taskbook` 或设计文档中的最小必要段落；跨模块、接口、数据库、部署、Jenkins、关键页面流程变更才补 DD。
 
-3. 开发实现  
+3. 开发实现
    只修改本次任务必要文件，不做无关重构。
 
-4. 本地轻量校验  
+4. 本地轻量校验
    默认只跑最少必要检查：
    - 优先执行 `commands.light_gate`
    - 若未配置，则执行 `quick_test` / `test` / `build` 中最先配置的一项
@@ -234,22 +281,22 @@ docs:
    - API 文档检查
    - Jenkins 配置检查
 
-5. 提交推送  
+5. 提交推送
    `dev` 模式先写开发闭环再 commit + push；`verify` 模式 commit + push 后继续验证 Jenkins 和目标环境。
 
-6. Jenkins 验证  
+6. Jenkins 验证
    仅 `verify` 模式默认执行。查看 Jenkins 构建、镜像、部署结果；失败则根据 Jenkins 日志修复，再次提交推送。
 
-7. 目标环境验证  
+7. 目标环境验证
    仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 
-8. 回归与证据记录  
+8. 回归与证据记录
    只有真实执行过 Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
 
-9. 闭环记录  
+9. 闭环记录
    每个任务必须留下轻量闭环记录。`dev` 模式用 `DEV-CLOSED`，`verify` 模式用 `PASS` / `FAIL` / `PARTIAL`。
 
-10. 配置入库  
+10. 配置入库
    `docs/ENGINEERING.md` 中保留下来的环境信息、前端/后端账号、Jenkins 账号与密码必须 100% 填写、正确填写，并提交 Git 作为项目权威配置持续维护。
 
 ---

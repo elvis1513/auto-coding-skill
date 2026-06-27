@@ -9,9 +9,9 @@ This skill is for Go backend + frontend monorepo projects that rely on Jenkins t
 
 `docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Unused environment keys should be removed from the template instead of being left as placeholders.
 
-Prefer already available MCP servers, installed skills, plugins, and app connectors over ad-hoc manual work whenever they can complete the task reliably.
+At task start, inventory the current client capabilities before choosing a route: installed MCP servers, local skills, plugins/apps/connectors, browser/control tools, and repo scripts. Prefer those capabilities when they provide current, authoritative, or directly inspectable state.
 
-Default to multi-agent execution when the client supports it. Break work into independent design, research, implementation, validation, and documentation subtasks so Claude/Codex can run them in parallel whenever that reduces cycle time without weakening control of the main task.
+Use multi-agent roles deliberately. When the client exposes subagent tools and the active runtime policy permits delegation, split independent research, exploration, implementation, browser verification, and review work. When delegation is unavailable or restricted, execute the same role sequence in the main agent instead of pretending parallelism is possible.
 
 ## Supported clients
 
@@ -20,22 +20,30 @@ Default to multi-agent execution when the client supports it. Break work into in
 
 ## Tooling policy
 
-Use available platform capabilities first:
+Use the most direct authoritative capability for each task:
 
-1) Prefer installed MCP servers for design context, documentation lookup, browser automation, issue/docs systems, and deployment/runtime inspection.
-2) Prefer already installed local skills when the task matches them.
-3) Prefer supported plugins/apps/connectors when they provide authoritative project context or can write back records.
-4) Fall back to manual shell/code workflows only when the above are unavailable, insufficient, or slower than direct execution.
+1) Local repo work: use shell, repo scripts, and `docs/tools/autopipeline/ap.py` for edits, tests, gates, git, and project-local verification.
+2) Current library/framework/API/CLI/cloud behavior: use a documentation MCP such as Context7 or the matching installed skill before coding migrations, config changes, or API integrations.
+3) Browser and UI verification: use Browser/in-app browser for localhost and app-owned sessions; use Chrome when the user's existing logged-in Chrome state is required; use Playwright for deterministic browser automation or terminal-first smoke tests; use Computer Use only for native apps or UI surfaces without a purpose-built connector.
+4) Product/design sources: use Figma, Build Web Apps, Product Design, or frontend skills when the task depends on design context, visual implementation, screenshots, or generated UI.
+5) GitHub/PR/CI state: use GitHub connectors for PRs, issues, review comments, and Actions/CI metadata; use local git for local diff, staging, commits, and pushes.
+6) Security-sensitive changes: use reviewer/security skills or security scan capabilities for auth, permission, payment, file transfer, deployment, dependency, and data-boundary changes.
+7) Analytical or document artifacts: use Data Analytics, documents, PDFs, spreadsheets, presentations, or LaTeX skills/plugins for those artifact types, including render/validation steps.
+8) OpenAI/API keys and other secrets: use secure platform/key setup capabilities when available; do not paste, invent, or persist secrets outside the configured secure flow.
+9) Screen/recent-work context: use Chronicle or screenshot skills when the user references visible UI state or recent manual actions.
+10) Fall back to manual shell/code workflows only when the above are unavailable, insufficient, or slower than direct execution.
 
 ## Collaboration policy
 
-Prefer multi-agent mode across the workflow:
+Use `.agents/agents` role templates as the default collaboration model for Codex installs:
 
-1) Split independent subtasks early when they can run in parallel.
-2) Keep the main agent on the critical path: task framing, design decisions, integration, Jenkins / target-env verification, and final closure.
-3) Use side agents for bounded work such as research, code slices, documentation updates, targeted regression checks, or review passes.
-4) Do not delegate a blocking architectural decision without keeping one agent responsible for final integration and correctness.
-5) A practical default split for Go fullstack work is: design/research, backend implementation, frontend implementation, validation/documentation.
+1) `explorer`: read-only repo discovery, call-chain tracing, config mapping, and root-cause candidates.
+2) `docs_researcher`: current external documentation, API signatures, version behavior, and compatibility checks.
+3) `browser_debugger`: browser reproduction, console/network evidence, screenshots, and UI behavior verification.
+4) `fixer`: bounded implementation after the cause and acceptance path are clear.
+5) `reviewer`: read-only correctness, security, regression-risk, and missing-test review.
+
+The main agent always owns task framing, design decisions, integration, Jenkins / target-env verification, closure records, git state, and final delivery. Do not delegate a blocking architectural decision without keeping one agent responsible for final integration and correctness.
 
 ## Entry
 

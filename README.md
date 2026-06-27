@@ -28,6 +28,8 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - Added default Codex subagent templates under `.agents/agents`.
 - `autocoding init --ai codex` and `autocoding init --ai all` now install the Codex agent templates automatically.
 - Updated Codex agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
+- Added concrete capability routing for MCP servers, installed skills, plugins/apps/connectors, browser tools, GitHub, Figma, security review, and artifact workflows.
+- Changed multi-agent guidance from unconditional delegation to a role model that works either as real subagents or as sequential main-agent phases.
 
 ### v2.0.1
 
@@ -180,14 +182,19 @@ It must be committed to Git. Do not add it to `.gitignore`.
 
 5. Tool selection rule during execution:
 
-- Prefer current MCP / skills / plugins / apps first.
-- Fall back to shell / manual work only when those capabilities are unavailable or insufficient.
+- Local code, tests, git, and project gates: use shell, repo scripts, and `docs/tools/autopipeline/ap.py`.
+- Current library/framework/API/CLI/cloud docs: use Context7 or the matching installed skill before coding against uncertain behavior.
+- UI verification: use Browser/in-app browser for local pages, Chrome for the user's logged-in Chrome state, Playwright for deterministic automation, and Computer Use only for native or unsupported UI surfaces.
+- GitHub/PR/CI: use GitHub connectors for remote PR, issue, review, and CI state; use local git for local diff, commit, and push.
+- Figma/frontend/design, security review, data/reporting, and document artifacts: use the matching installed plugin or skill before manual recreation.
+- Fall back to shell/manual work only when those capabilities are unavailable, insufficient, unreliable, or slower than direct execution.
 
 6. Collaboration rule during execution:
 
-- Prefer multi-agent mode.
-- Split research, design, implementation, verification, and documentation into parallel subtasks whenever the boundaries are clear.
-- Keep one main agent responsible for integration and final gates.
+- Use `.agents/agents` as the default role model: `explorer`, `docs_researcher`, `browser_debugger`, `fixer`, `reviewer`.
+- If the client permits subagents, split independent work across those roles.
+- If the client cannot run subagents, execute the same role sequence in the main agent.
+- Keep one main agent responsible for scope, integration, quality gates, docs closure, git state, and final delivery.
 
 ## AGENTS.md Constraint Example
 
@@ -201,17 +208,23 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - If required docs are missing, create/update docs first, then code.
 
 ## Tooling Policy
-- Prefer currently available MCP servers, installed skills, plugins, and app connectors before shell/manual work.
+- Route by source of truth:
+  1) local code/tests/git -> shell + repo scripts
+  2) current docs/API behavior -> Context7 or matching docs skill
+  3) UI/browser proof -> Browser, Chrome, Playwright, or Computer Use by scenario
+  4) PR/Issue/CI -> GitHub connector
+  5) design/frontend/security/artifacts -> matching installed skill/plugin
 - When a connector or MCP can read or write the authoritative source directly, use it instead of retyping or duplicating state.
 
 ## Multi-Agent Policy
-- Default to multi-agent execution.
-- Before substantial work, split into parallel subtasks whenever boundaries are clear:
-  1) design / research
-  2) backend implementation
-  3) frontend implementation
-  4) validation / documentation / review
-- Keep one main agent responsible for task framing, integration, quality gates, and final delivery.
+- Use `.agents/agents` roles:
+  1) explorer
+  2) docs_researcher
+  3) browser_debugger
+  4) fixer
+  5) reviewer
+- Spawn subagents only when the client supports and allows it; otherwise run the same role phases in the main agent.
+- Keep one main agent responsible for task framing, integration, quality gates, docs closure, git state, and final delivery.
 
 ## Default Gate Policy
 - Default local gate is lightweight only.

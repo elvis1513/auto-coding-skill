@@ -433,8 +433,8 @@ docs:
    - 首次落基线：`python3 docs/tools/autopipeline/ap.py baseline init --write --update-config`
    - 项目升级预检：`python3 docs/tools/autopipeline/ap.py upgrade --dry-run`
    - 文档账本健康检查：`python3 docs/tools/autopipeline/ap.py docs-ledger-check`
-   - 文档账本归档预览：`python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan --period YYYY-MM`
-   - 文档账本归档执行：`python3 docs/tools/autopipeline/ap.py docs-ledger-archive --write --period YYYY-MM`
+   - 文档账本归档预览：`python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan`
+   - 文档账本归档执行：`python3 docs/tools/autopipeline/ap.py docs-ledger-archive --write`
    - 门禁耗时画像：`python3 docs/tools/autopipeline/ap.py gate-profile`
    - `doctor` 默认纳入文档账本健康检查；`light-gate` 会先跑 `doctor`，因此活跃账本超预算会阻塞后续任务，避免“只建索引、不归档瘦身”的状态长期存在。
    - `light-gate` 在 `structure.enabled: true` 时会自动纳入结构检查；如项目需要更强规则，可配置 `commands.structure_check` 覆盖内置实现。

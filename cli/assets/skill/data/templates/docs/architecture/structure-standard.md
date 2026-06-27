@@ -86,6 +86,6 @@
 
 - `docs/tasks/taskbook.md`、`docs/tasks/closure-log.md` 和顶层 `docs/design/T*.md` 是活跃工作账本，不是永久历史仓库。
 - 超过 `docs.active_taskbook_max_lines`、`docs.active_closure_log_max_lines` 或 `docs.active_design_max_files` 后，必须把已关闭历史内容物理归档到 `docs.task_archive_dir` / `docs.design_archive_dir`。
-- 归档必须先运行 `docs-ledger-archive --plan --period YYYY-MM` 并确认只包含已关闭任务、闭环记录和对应顶层 DD，再运行 `docs-ledger-archive --write --period YYYY-MM`。
+- 归档必须先运行 `docs-ledger-archive --plan` 并确认只包含已关闭任务、无 active task 冲突的闭环记录和对应顶层 DD，再运行 `docs-ledger-archive --write`。补历史月份时才加 `--period 2026-06`。
 - `docs.archive_index` 只能做导航和检索入口。只有索引、没有物理归档，仍然是不合格的账本瘦身。
 - `doctor` 默认执行 `docs-ledger-check`。迁移期可以临时调高预算或关闭阻塞，但必须在 backlog 中记录恢复条件。

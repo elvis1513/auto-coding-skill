@@ -164,7 +164,7 @@ python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py impact --scope auto
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
-python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan --period YYYY-MM
+python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py light-gate --scope full
@@ -181,7 +181,7 @@ python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
 python3 docs/tools/autopipeline/ap.py runtime-down
 python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
-python3 docs/tools/autopipeline/ap.py docs-ledger-archive --write --period YYYY-MM
+python3 docs/tools/autopipeline/ap.py docs-ledger-archive --write
 python3 docs/tools/autopipeline/ap.py structure-check --scope full
 python3 docs/tools/autopipeline/ap.py gate-profile
 python3 docs/tools/autopipeline/ap.py check-matrix
@@ -201,7 +201,7 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - “Optimization complete” means the scoped P0/P1/P2 work is closed, local gate passes, no new unclassified P0/P1 exists, and remaining P2/P3 work is tracked or accepted debt.
 - `baseline init` creates the first project health baseline and optimization backlog; use `--update-config` to seed `accepted_debt_paths`.
 - `docs-ledger-check` enforces active documentation ledger budgets. `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` are active working sets, not unbounded history stores.
-- When active ledger budgets are exceeded, run `docs-ledger-archive --plan --period YYYY-MM`, inspect the plan, then run `docs-ledger-archive --write --period YYYY-MM` only when the closed entries and DD files are correct. The archiver handles clearly closed task sections, closure records, and matching top-level `T*.md` DDs.
+- When active ledger budgets are exceeded, run `docs-ledger-archive --plan`, inspect the plan, then run `docs-ledger-archive --write` only when the closed entries and DD files are correct. Add `--period 2026-06` only when backfilling a specific archive month. The archiver handles clearly closed task sections, non-conflicting closure records, and matching top-level `T*.md` DDs.
 - `docs.archive_index` is only navigation; an index without physical archive files does not satisfy ledger health.
 - `docs/tasks/evidence.jsonl` is the machine-readable execution trail for gates, verification, and closure. Keep it aligned with closure Markdown.
 - `gate-profile` summarizes local gate duration and failure history so small-step development can keep the fast path honest.

@@ -1919,9 +1919,20 @@ def _plan_docs_ledger_archive(repo: Path, cfg: dict, period: str) -> dict:
 
     closed_taskbook_sections = [section for section in taskbook_sections if _is_closed_task_section(section)]
     active_taskbook_sections = [section for section in taskbook_sections if not _is_closed_task_section(section)]
-    closure_ids = {_normalize_task_id(section["id"]) for section in closure_sections}
+    active_task_ids = {_normalize_task_id(section["id"]) for section in active_taskbook_sections}
+    conflicting_closure_sections = [
+        section for section in closure_sections if _normalize_task_id(section["id"]) in active_task_ids
+    ]
+    archivable_closure_sections = [
+        section for section in closure_sections if _normalize_task_id(section["id"]) not in active_task_ids
+    ]
+    closure_ids = {_normalize_task_id(section["id"]) for section in archivable_closure_sections}
     closed_task_ids = {_normalize_task_id(section["id"]) for section in closed_taskbook_sections}
     archived_task_ids = closed_task_ids | closure_ids
+    blocking = [
+        f"closure record {section['id']} exists but the taskbook section is still active; update taskbook status to Done/Closed or repair the stale closure before archiving"
+        for section in conflicting_closure_sections
+    ]
 
     design_files: list[Path] = []
     if design_dir.exists() and design_dir.is_dir():
@@ -1944,16 +1955,19 @@ def _plan_docs_ledger_archive(repo: Path, cfg: dict, period: str) -> dict:
         },
         "counts": {
             "taskbook_sections": len(closed_taskbook_sections),
-            "closure_sections": len(closure_sections),
+            "closure_sections": len(archivable_closure_sections),
+            "blocked_closure_sections": len(conflicting_closure_sections),
             "design_files": len(design_files),
             "active_taskbook_sections_after": len(active_taskbook_sections),
         },
         "archived_task_ids": sorted(archived_task_ids),
+        "active_task_conflicts": sorted(_normalize_task_id(section["id"]) for section in conflicting_closure_sections),
+        "blocking": blocking,
         "taskbook_preamble": taskbook_preamble,
         "active_taskbook_sections": active_taskbook_sections,
         "closed_taskbook_sections": closed_taskbook_sections,
         "closure_preamble": closure_preamble,
-        "closure_sections": closure_sections,
+        "closure_sections": archivable_closure_sections,
         "design_files": design_files,
         "archive_index": paths["archive_index"],
         "taskbook_archive": taskbook_archive,
@@ -1974,6 +1988,8 @@ def _public_docs_ledger_archive_result(repo: Path, result: dict, mode: str, wrot
         "paths": result.get("paths"),
         "counts": result.get("counts"),
         "archived_task_ids": result.get("archived_task_ids"),
+        "active_task_conflicts": result.get("active_task_conflicts"),
+        "blocking": result.get("blocking"),
         "design_files": [_repo_rel(repo, path) if isinstance(path, Path) else str(path) for path in result.get("design_files", [])],
     }
 
@@ -1986,6 +2002,9 @@ def cmd_docs_ledger_archive(args: argparse.Namespace) -> None:
     plan = _plan_docs_ledger_archive(repo, cfg, period)
     write = bool(getattr(args, "write", False))
     index_updated = False
+
+    if write and plan.get("blocking"):
+        raise APError("docs-ledger-archive has blocking issue(s):\n- " + "\n- ".join(plan["blocking"]))
 
     if write:
         design_archive_dir: Path = plan["design_archive_dir"]
@@ -2025,6 +2044,10 @@ def cmd_docs_ledger_archive(args: argparse.Namespace) -> None:
             print("[docs-ledger-archive] no closed ledger content to archive")
         else:
             print("[docs-ledger-archive] OK")
+        _print_limited("[docs-ledger-archive] blocking", public_result.get("blocking") or [])
+
+    if plan.get("blocking"):
+        raise APError(f"docs-ledger-archive blocked with {len(plan['blocking'])} issue(s)")
 
     if write:
         _record_evidence(repo, cfg, "docs_ledger_archive", "pass", public_result)

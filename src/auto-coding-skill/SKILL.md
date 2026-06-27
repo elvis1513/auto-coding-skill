@@ -79,6 +79,8 @@ This contains all manual fields:
 - `workflow.mode`
 - `commands.*`
 - `gate.*`
+- `structure.*`
+- `optimization.*`
 - `runtime.*` (only for optional local diagnostics)
 - `target_env.*`
 - `jenkins.*`
@@ -126,13 +128,14 @@ Read `workflow.mode` from `docs/ENGINEERING.md` before choosing the path.
 `dev` mode:
 
 1) read `docs/ENGINEERING.md`
-2) read / update `docs/tasks/taskbook.md`
-3) write minimal design notes; create a DD only when the change is cross-module, API, DB, deployment, Jenkins, or key-page-flow related
-4) implement only the necessary changes
-5) run the default local lightweight gate
-6) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
-7) commit + push
-8) stop and start the next development task
+2) read `docs/architecture/structure-standard.md` when the change adds or relocates code
+3) read / update `docs/tasks/taskbook.md`
+4) write minimal design notes; create a DD or ADR only when the change is cross-module, API, DB, deployment, Jenkins, key-page-flow, or long-term structure related
+5) implement only the necessary changes
+6) run the default local lightweight gate
+7) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
+8) commit + push
+9) stop and start the next development task
 
 `verify` mode:
 
@@ -151,6 +154,7 @@ Default commands:
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py impact --scope auto
+python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py light-gate --scope full
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
@@ -164,14 +168,27 @@ On-demand commands:
 python3 docs/tools/autopipeline/ap.py runtime-up
 python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
 python3 docs/tools/autopipeline/ap.py runtime-down
+python3 docs/tools/autopipeline/ap.py structure-check --scope full
 python3 docs/tools/autopipeline/ap.py check-matrix
 python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ```
+
+## Engineering structure policy
+
+- Before coding, locate the existing layer, module owner, helper APIs, scripts, and tests for the behavior being changed.
+- Put new code in the correct layer: domain rules stay out of controllers/pages, orchestration belongs in application/service/usecase code, external systems belong behind infrastructure adapters, and UI components should not own deep business workflows.
+- Reuse before building: search existing utilities, components, clients, validation, permissions, caching, retry, formatting, and automation scripts before adding another helper.
+- Do not add new responsibilities to large files. If a file exceeds `structure.max_file_lines_warn`, prefer extracting a focused module or component; if it exceeds `structure.max_file_lines_block`, only small fixes are acceptable unless the path is explicitly allowed.
+- Historical large files can be listed in `structure.accepted_debt_paths` only after they are recorded in the health baseline or optimization backlog; this does not permit large new additions to those files.
+- Self-built algorithms, concurrency controls, caches, protocol clients, or framework-like helpers require a concrete reason such as performance, concurrency, offline/deploy constraints, licensing, security, or compatibility, plus tests or benchmark/runtime evidence.
+- For structural reviews, read `docs/reviews/project-health-baseline.md` and `docs/reviews/optimization-backlog.md` first. Do not re-report accepted debt as a fresh blocker; report only new, worsened, unrecorded P0/P1, or backlog items that now deserve priority upgrade.
+- “Optimization complete” means the scoped P0/P1/P2 work is closed, local gate passes, no new unclassified P0/P1 exists, and remaining P2/P3 work is tracked or accepted debt.
 
 ## Quality policy
 
 - Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/Jenkins checks.
 - For small-step development, prefer the generic impact-aware gate: `light-gate --scope auto`. The skill provides the gate engine; each project owns its commands and optional `gate.rules` path mapping in `docs/ENGINEERING.md`.
+- `light-gate` automatically runs `structure-check` when `structure.enabled: true` or `commands.structure_check` is configured.
 - Keep `standard` as the backward-compatible default when no `gate.*` policy is configured. Use `changed` only when project commands/rules make the reduced scope explicit.
 - Automatically upgrade to `full` for CI/deploy/build-tool/lockfile/autopipeline config changes, project-declared full rules, unknown impact when configured, or release/verify tasks.
 - `workflow.mode: dev` closes development after light gate, closure record, commit, and push.

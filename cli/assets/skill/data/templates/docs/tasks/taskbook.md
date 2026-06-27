@@ -15,6 +15,9 @@
 - 是否高风险（Yes/No）：
 - 高风险分类（如有）：DB / Auth / Payment / Jenkins / Gateway / Upload / Prod Config
 - 影响面（API / DB / Jenkins / Page / Config / Deploy）：
+- 结构落位（Domain / Application / Infrastructure / Interface / Shared / Tooling / N/A）：
+- 复用检查（已有 helper / 组件 / 脚本 / 库）：
+- 是否需要 ADR（Yes/No）：
 - 最小设计记录：
 - 验收标准：
 - 子任务（如有）：

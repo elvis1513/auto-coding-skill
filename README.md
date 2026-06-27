@@ -23,6 +23,13 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.5
+
+- Added generic engineering-structure governance: `docs/architecture/structure-standard.md`, ADR template, project health baseline, and optimization backlog templates.
+- Added `ap.py structure-check --scope auto|changed|standard|full` for large-file thresholds, large-file growth blocking, function-size warnings, and baseline-doc checks.
+- Integrated `structure-check` into `light-gate` when `structure.enabled: true` or `commands.structure_check` is configured.
+- Added baseline-aware optimization policy so “optimization complete” means scoped P0/P1/P2 closure plus tracked/accepted remaining debt, not “no future optimizations exist.”
+
 ### v2.0.4
 
 - Added a generic impact-aware gate engine: `ap.py impact`, `light-gate --scope auto|changed|standard|full`, and `--explain`.
@@ -156,6 +163,8 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `workflow.mode`
 - `commands.*`
 - `gate.*`
+- `structure.*`
+- `optimization.*`
 - `target_env.*`
 - `jenkins.*`
 - `docs.*`
@@ -189,6 +198,9 @@ It must be committed to Git. Do not add it to `.gitignore`.
 4. Start AI development by constraints:
 
 - `docs/ENGINEERING.md`
+- `docs/architecture/structure-standard.md`
+- `docs/reviews/project-health-baseline.md`
+- `docs/reviews/optimization-backlog.md`
 - `docs/tasks/taskbook.md`
 - `docs/tasks/closure-log.md`
 - `docs/interfaces/**`
@@ -211,6 +223,26 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - If the client cannot run subagents, execute the same role sequence in the main agent.
 - Keep one main agent responsible for scope, integration, quality gates, docs closure, git state, and final delivery.
 
+## Structure Governance
+
+The default project scaffold includes a generic professional structure standard:
+
+- `docs/architecture/structure-standard.md`: layer boundaries, reuse-first rules, file/function size rules, and review priority definitions.
+- `docs/architecture/adr/_TEMPLATE-ADR.md`: architectural decision record template.
+- `docs/reviews/project-health-baseline.md`: accepted current structure, closed optimizations, accepted debt, and completion standard.
+- `docs/reviews/optimization-backlog.md`: ongoing P0/P1/P2/P3 optimization backlog.
+
+Useful commands:
+
+```bash
+python3 docs/tools/autopipeline/ap.py structure-check --scope auto
+python3 docs/tools/autopipeline/ap.py structure-check --scope full
+python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
+```
+
+`structure-check` is intentionally generic. Project-specific paths and stricter rules belong in `docs/ENGINEERING.md` under `structure.*`, `optimization.*`, and optional `commands.structure_check`.
+Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
+
 ## AGENTS.md Constraint Example
 
 ```md
@@ -218,7 +250,11 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - Always use `auto-coding-skill` for implementation tasks.
 - Before any code change, read and obey:
   1) docs/ENGINEERING.md
-  2) docs/tasks/taskbook.md
+  2) docs/architecture/structure-standard.md
+  3) docs/tasks/taskbook.md
+- Before any optimization review, also read:
+  1) docs/reviews/project-health-baseline.md
+  2) docs/reviews/optimization-backlog.md
 - Execute workflow commands using `python3 docs/tools/autopipeline/ap.py`.
 - If required docs are missing, create/update docs first, then code.
 
@@ -244,12 +280,21 @@ It must be committed to Git. Do not add it to `.gitignore`.
 ## Default Gate Policy
 - Default local gate is lightweight only.
 - Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
+- Use `python3 docs/tools/autopipeline/ap.py structure-check --scope auto` to catch file growth, large-file extension, and missing structure baseline docs.
 - Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.
 - Use `light-gate --scope standard` for the backward-compatible configured gate, and `light-gate --scope full` before release/deploy-sensitive closure.
 - The gate engine is generic. Project-specific path mapping belongs in `docs/ENGINEERING.md` under `gate.rules`; unknown or high-risk impact should upgrade to standard/full rather than silently skipping checks.
+- The structure gate is generic. Project-specific thresholds and accepted generated/vendor paths belong in `docs/ENGINEERING.md` under `structure.*`.
 - Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
 - In `dev` mode, push is the finish line after `DEV-CLOSED` is recorded.
 - In `verify` mode, Jenkins success, target environment verification, and closure record are mandatory.
+
+## Structure Policy
+- Before coding, identify the right layer and reuse points.
+- Do not add new responsibilities to already-large files.
+- Prefer existing libraries, helpers, components, and scripts over new local frameworks.
+- Self-built concurrency/performance/tooling primitives require a reason plus tests or runtime evidence.
+- For optimization review, read the health baseline and backlog first; accepted debt is not a fresh blocker.
 ```
 
 ## Docs Structure and Recording Rules
@@ -269,34 +314,51 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - Purpose: master task ledger.
 - How to record:
   - Every task writes scope, risk, impact area, minimal design note, acceptance, evidence links.
+  - For code changes, record structure placement, reuse check, and whether ADR is needed.
 
 ### 3) docs/tasks/closure-log.md
 - Purpose: default lightweight closure record.
 - How to record:
   - Append one record per task.
-  - Required fields: task, commit, Jenkins build, target env verification, result, follow-up.
+  - Required fields: task, commit, Jenkins build, target env verification, structure check, result, follow-up.
   - If Jenkins failed then was fixed, also record failure reason and fix commit.
 
-### 4) docs/design/
+### 4) docs/architecture/
+- Files:
+  - `docs/architecture/structure-standard.md`
+  - `docs/architecture/adr/_TEMPLATE-ADR.md`
+- Rule:
+  - Read the structure standard before adding or relocating code.
+  - Create an ADR for decisions that affect long-term structure, module boundaries, framework-like helpers, or major tradeoffs.
+
+### 5) docs/reviews/
+- Files:
+  - `docs/reviews/project-health-baseline.md`
+  - `docs/reviews/optimization-backlog.md`
+- Rule:
+  - Structure and optimization reviews must read these before listing findings.
+  - Accepted debt is not a fresh blocker unless it worsened or needs priority upgrade.
+
+### 6) docs/design/
 - Purpose: DD for cross-module / API / DB / deployment / Jenkins / key-page-flow changes.
 - How to record:
   - Small changes do not need a standalone DD file.
   - Higher-risk changes create `docs/design/<TASK_ID>-<slug>.md`.
 
-### 5) docs/interfaces/
+### 7) docs/interfaces/
 - Files:
   - `docs/interfaces/api.md`
   - `docs/interfaces/api-change-log.md`
 - Rule:
   - Any API change updates both files in the same task.
 
-### 6) docs/testing/regression-matrix.md
+### 8) docs/testing/regression-matrix.md
 - Purpose: on-demand regression evidence, not default gate for every small change.
 - Rule:
   - Only real executed items can be marked `PASS`.
   - `check-matrix` is used only when full regression is explicitly required.
 
-### 7) docs/tasks/summaries/
+### 9) docs/tasks/summaries/
 - Purpose: optional long-form summary.
 - Rule:
   - Only for high-risk changes, milestones, or tasks that need full retrospective.

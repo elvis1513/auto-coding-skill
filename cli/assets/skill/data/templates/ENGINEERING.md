@@ -16,6 +16,7 @@ commands:
   gate_changed: ""
   gate_standard: ""
   gate_full: ""
+  structure_check: ""
   light_gate: ""
   build: ""
   test: ""
@@ -52,6 +53,46 @@ gate:
       - "build.gradle*"
       - "settings.gradle*"
   rules: []
+
+structure:
+  enabled: true
+  architecture_standard: "clean-architecture-ddd-lite"
+  max_file_lines_warn: 800
+  max_file_lines_block: 1500
+  max_function_lines_warn: 120
+  max_added_lines_to_large_file: 80
+  require_reuse_search: true
+  block_new_responsibility_in_large_file: true
+  allow_large_files:
+    - ".agents/skills/**"
+    - ".claude/skills/**"
+    - "docs/tools/autopipeline/**"
+    - "generated/**"
+    - "**/generated/**"
+    - "**/__generated__/**"
+    - "vendor/**"
+    - "dist/**"
+    - "build/**"
+    - "target/**"
+    - "node_modules/**"
+    - "**/*.generated.*"
+    - "**/*.gen.*"
+    - "**/*.min.js"
+    - "**/*.bundle.js"
+    - "**/*.map"
+  accepted_debt_paths: []
+  reusable_tool_dirs:
+    - "docs/tools/**"
+    - "scripts/**"
+    - "tools/**"
+    - "packages/*/src/**"
+    - "src/**/shared/**"
+    - "src/**/utils/**"
+
+optimization:
+  completion_policy: "baseline-aware"
+  require_baseline_for_global_review: true
+  report_accepted_debt_as_findings: false
 
 runtime:
   docker_compose_file: ""
@@ -92,6 +133,10 @@ docs:
   closure_log: "docs/tasks/closure-log.md"
   design_dir: "docs/design"
   review_dir: "docs/reviews"
+  health_baseline: "docs/reviews/project-health-baseline.md"
+  optimization_backlog: "docs/reviews/optimization-backlog.md"
+  structure_standard: "docs/architecture/structure-standard.md"
+  adr_dir: "docs/architecture/adr"
   api_doc: "docs/interfaces/api.md"
   api_change_log: "docs/interfaces/api-change-log.md"
   regression_matrix: "docs/testing/regression-matrix.md"
@@ -130,6 +175,10 @@ docs:
 - `workflow.mode`：`dev` 或 `verify`，默认推荐 `dev`
 - `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`：推荐配置分层门禁命令；旧项目也可以继续只配置 `commands.light_gate`
 - `gate.*`：按项目声明路径规则和高风险升级规则；未配置时保持标准门禁行为
+- `commands.structure_check`：可覆盖内置结构检查；留空时使用通用 `ap.py structure-check`
+- `structure.*`：通用工程结构阈值、允许的大文件模式、复用搜索目录
+- `optimization.*`：健康基线感知的优化闭环口径，避免重复把已接受债务判定为当前未完成
+- `docs.health_baseline` / `docs.optimization_backlog` / `docs.structure_standard` / `docs.adr_dir`：项目结构治理文档位置
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
 
@@ -169,6 +218,12 @@ docs:
 按需填写：
 - `gate.default_scope`：默认 `standard`；需要小步快跑时设为 `auto` 或 `changed`
 - `gate.rules`：项目自定义路径规则。每条规则可包含 `name`、`paths`、`commands`、`scope`
+- `structure.enabled`：是否把结构检查纳入 `light-gate`
+- `structure.max_file_lines_warn` / `structure.max_file_lines_block`：文件长度预警 / 阻塞阈值
+- `structure.max_added_lines_to_large_file`：禁止在已偏大的文件里继续大块堆职责
+- `structure.allow_large_files`：生成物、供应商代码、构建产物等允许超长或跳过结构检查的路径
+- `structure.accepted_debt_paths`：已记录为接受债务的历史大文件；只豁免历史体量，不豁免继续大幅新增
+- `optimization.completion_policy`：默认 `baseline-aware`，表示“优化完成”按本轮范围和已记录基线判断，不等于仓库没有任何可优化点
 - `runtime.*`：仅在本地运行诊断时使用
 - `commands.build` / `commands.test` / `commands.quick_test` / `commands.lint` / `commands.typecheck` / `commands.format`：按项目实际情况保留
 
@@ -266,6 +321,36 @@ docs:
 - 文档闭环、Git 状态、最终交付
 
 任务边界不清、需要强一致裁决或涉及架构取舍时，由主 agent 保持控制，不机械拆分。
+
+---
+
+## 1.7 工程结构与优化标准
+
+默认采用 `docs/architecture/structure-standard.md` 中的通用结构标准。具体项目可以按技术栈细化目录名，但不得降低以下要求：
+
+1) 分层清晰
+   - 业务规则、用例编排、外部适配、接口入口、共享工具必须有清晰边界。
+   - 新代码先落到对应层；没有合适位置时，先补最小设计或 ADR，再新增目录 / 模块。
+
+2) 复用优先
+   - 新增工具、并发控制、缓存、请求封装、格式转换、权限判断、校验逻辑前，必须先搜索已有 helper、库、组件、脚本。
+   - 正常情况下复用成熟库或项目既有工具；只有明确的性能、并发、部署、许可证、兼容性约束才允许自研，并记录理由和验证。
+
+3) 单文件容量控制
+   - 超过 `structure.max_file_lines_warn` 的文件只允许小修和缺陷修复，新增职责应优先抽取模块。
+   - 超过 `structure.max_file_lines_block` 的文件不得继续承载新职责，除非该文件在 `structure.allow_large_files` 中声明为生成物或外部产物。
+   - 已记录为接受债务的历史大文件可放入 `structure.accepted_debt_paths`，但继续大幅新增仍会被阻塞。
+   - 对已偏大的文件一次性增加超过 `structure.max_added_lines_to_large_file` 行时，`structure-check` 会阻塞，要求拆分或写明例外理由。
+
+4) 优化完成标准
+   - “优化完成”不表示仓库没有任何可优化点。
+   - 默认定义为：本轮约定范围内的 P0/P1/P2 scoped items 已闭环，本地 gate 通过，没有新增未分级 P0/P1，剩余 P2/P3 已进入 backlog 或被接受为债务。
+   - 新会话做整体分析时，必须先读 `docs/reviews/project-health-baseline.md` 和 `docs/reviews/optimization-backlog.md`，只报告新增、恶化、未记录 P0/P1，或已记录但需要升级优先级的问题。
+
+5) 本地执行
+   - 小步快跑默认执行：`python3 docs/tools/autopipeline/ap.py structure-check --scope auto`
+   - 发布、跨模块重构、架构调整默认执行：`python3 docs/tools/autopipeline/ap.py structure-check --scope full`
+   - `light-gate` 在 `structure.enabled: true` 时会自动纳入结构检查；如项目需要更强规则，可配置 `commands.structure_check` 覆盖内置实现。
 
 ---
 

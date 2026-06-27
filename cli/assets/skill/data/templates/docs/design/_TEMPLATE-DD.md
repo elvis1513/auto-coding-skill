@@ -8,10 +8,16 @@
 ## 2. 范围与非目标
 ## 3. 现状与问题
 ## 4. 方案与取舍
-## 5. 接口设计（与 docs/interfaces/api.md 对齐）
-## 6. 数据设计（迁移/回滚）
+## 5. 架构落位与复用检查
+- 目标层级：Domain / Application / Infrastructure / Interface / Shared / Tooling
+- 既有复用点：
+- 是否需要 ADR：Yes / No；如 Yes，记录到 `docs/architecture/adr/`
+- 是否触及大文件 / 大组件：
 
-## 7. 时序图（强制）
+## 6. 接口设计（与 docs/interfaces/api.md 对齐）
+## 7. 数据设计（迁移/回滚）
+
+## 8. 时序图（强制）
 ```mermaid
 sequenceDiagram
   participant C as Client
@@ -26,7 +32,7 @@ sequenceDiagram
   A-->>C: response
 ```
 
-## 8. ER 图（强制）
+## 9. ER 图（强制）
 ```mermaid
 erDiagram
   ENTITY_A ||--o{ ENTITY_B : relates
@@ -34,10 +40,10 @@ erDiagram
   ENTITY_B { string id string a_id }
 ```
 
-## 9. 接口时序/调用编排（强制）
-## 10. 测试方案（必须自动化 + 覆盖历史 bug）
-## 11. 安全与合规
-## 12. 性能与容量
-## 13. 风险清单
-## 14. 回滚方案
-## 15. 影响面与发布计划
+## 10. 接口时序/调用编排（强制）
+## 11. 测试方案（必须自动化 + 覆盖历史 bug）
+## 12. 安全与合规
+## 13. 性能与容量
+## 14. 风险清单
+## 15. 回滚方案
+## 16. 影响面与发布计划

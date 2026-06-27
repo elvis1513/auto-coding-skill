@@ -10,6 +10,7 @@ import datetime as _dt
 import fnmatch
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.error
@@ -468,6 +469,7 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 
 ## 4. 质量证据
 - 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check — TODO
+- 结构检查：structure-check — TODO
 - Jenkins Build：TODO
 - 目标环境验证：TODO
 - 闭环记录：TODO
@@ -935,6 +937,362 @@ def _run_git_diff_check(repo: Path, cfg: dict) -> None:
     print("[diff-check] OK")
 
 
+_DEFAULT_STRUCTURE_ALLOW_PATTERNS = [
+    ".git/**",
+    ".agents/skills/**",
+    ".claude/skills/**",
+    ".next/**",
+    ".nuxt/**",
+    ".svelte-kit/**",
+    ".turbo/**",
+    "coverage/**",
+    "dist/**",
+    "build/**",
+    "out/**",
+    "target/**",
+    "vendor/**",
+    "node_modules/**",
+    "generated/**",
+    "**/generated/**",
+    "**/__generated__/**",
+    "docs/tools/autopipeline/**",
+    "**/*.generated.*",
+    "**/*.gen.*",
+    "**/*.min.js",
+    "**/*.bundle.js",
+    "**/*.map",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "go.sum",
+    "Cargo.lock",
+]
+_TEXT_SOURCE_EXTENSIONS = {
+    ".bash",
+    ".c",
+    ".cc",
+    ".cfg",
+    ".conf",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".go",
+    ".gradle",
+    ".graphql",
+    ".h",
+    ".hpp",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".less",
+    ".m",
+    ".md",
+    ".mm",
+    ".php",
+    ".properties",
+    ".py",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".zsh",
+}
+_TEXT_SOURCE_FILENAMES = {
+    "Dockerfile",
+    "Jenkinsfile",
+    "Makefile",
+    "go.mod",
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "tsconfig.json",
+}
+_FUNCTION_START_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:def|function|func)\s+[A-Za-z_][\w]*\b"
+    r"|^\s*(?:public|private|protected|static|final|async|\s)+\s*[\w<>\[\], ?]+\s+[A-Za-z_]\w*\s*\([^;]*\)\s*\{"
+    r"|^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_]\w*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
+)
+
+
+def _structure_cfg(cfg: dict) -> dict:
+    value = cfg.get("structure") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _optimization_cfg(cfg: dict) -> dict:
+    value = cfg.get("optimization") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _bool_config(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raw = _text(value).lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _int_config(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _tracked_files(repo: Path) -> list[str]:
+    return _unique_paths(_git_lines(repo, ["git", "ls-files"]))
+
+
+def _structure_allow_patterns(structure_cfg: dict) -> list:
+    patterns = list(_DEFAULT_STRUCTURE_ALLOW_PATTERNS)
+    patterns.extend(_as_list(structure_cfg.get("allow_large_files")))
+    patterns.extend(_as_list(structure_cfg.get("exclude")))
+    return patterns
+
+
+def _structure_accepted_debt_patterns(structure_cfg: dict) -> list:
+    return _as_list(structure_cfg.get("accepted_debt_paths"))
+
+
+def _is_structure_accepted_debt(path: str, structure_cfg: dict) -> bool:
+    return _path_matches(path, _structure_accepted_debt_patterns(structure_cfg))
+
+
+def _is_structure_candidate(path: str, structure_cfg: dict) -> bool:
+    normalized = path.replace("\\", "/").lstrip("./")
+    if _path_matches(normalized, _structure_allow_patterns(structure_cfg)):
+        return False
+    name = Path(normalized).name
+    suffix = Path(normalized).suffix.lower()
+    return suffix in _TEXT_SOURCE_EXTENSIONS or name in _TEXT_SOURCE_FILENAMES
+
+
+def _structure_paths_for_scope(repo: Path, scope: str, base_ref: str, structure_cfg: dict) -> list[str]:
+    if scope == "full":
+        paths = _tracked_files(repo)
+    else:
+        paths = _changed_files(repo, base_ref=base_ref)
+    return [path for path in paths if _is_structure_candidate(path, structure_cfg)]
+
+
+def _read_text_lines(repo: Path, path: str) -> Optional[list[str]]:
+    file_path = repo / path
+    if not file_path.exists() or not file_path.is_file():
+        return None
+    try:
+        return file_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None
+    except OSError:
+        return None
+
+
+def _parse_numstat_line(line: str) -> tuple[str, int]:
+    parts = line.split("\t", 2)
+    if len(parts) < 3:
+        return "", 0
+    added_raw, _, path = parts
+    if added_raw == "-":
+        return "", 0
+    try:
+        added = int(added_raw)
+    except ValueError:
+        return "", 0
+    return path.replace("\\", "/").strip(), added
+
+
+def _added_lines_by_path(repo: Path, base_ref: str = "") -> dict[str, int]:
+    added: dict[str, int] = {}
+    commands: list[list[str]] = []
+    effective_base = base_ref or _default_base_ref(repo)
+    if effective_base:
+        commands.append(["git", "diff", "--numstat", f"{effective_base}...HEAD"])
+    commands.extend([
+        ["git", "diff", "--numstat"],
+        ["git", "diff", "--cached", "--numstat"],
+    ])
+
+    for cmd in commands:
+        for line in _git_lines(repo, cmd):
+            path, count = _parse_numstat_line(line)
+            if path:
+                added[path] = added.get(path, 0) + count
+
+    for path in _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]):
+        lines = _read_text_lines(repo, path)
+        if lines is not None:
+            added[path] = added.get(path, 0) + len(lines)
+    return added
+
+
+def _function_size_warnings(path: str, lines: list[str], threshold: int) -> list[str]:
+    if threshold <= 0:
+        return []
+    starts: list[int] = []
+    for index, line in enumerate(lines):
+        if _FUNCTION_START_RE.search(line):
+            starts.append(index)
+    warnings: list[str] = []
+    for pos, start in enumerate(starts):
+        end = starts[pos + 1] if pos + 1 < len(starts) else len(lines)
+        size = end - start
+        if size > threshold:
+            warnings.append(f"{path}:{start + 1} function-like block has {size} lines (warn>{threshold})")
+    return warnings
+
+
+def _configured_structure_docs(cfg: dict) -> dict[str, str]:
+    docs_cfg = cfg.get("docs") or {}
+    return {
+        "docs.health_baseline": _text(docs_cfg.get("health_baseline")),
+        "docs.optimization_backlog": _text(docs_cfg.get("optimization_backlog")),
+        "docs.structure_standard": _text(docs_cfg.get("structure_standard")),
+    }
+
+
+def _structure_gate_enabled(cfg: dict) -> bool:
+    if _configured_command(cfg, "structure_check"):
+        return True
+    structure_cfg = cfg.get("structure")
+    if not isinstance(structure_cfg, dict):
+        return False
+    return _bool_config(structure_cfg.get("enabled"), default=True)
+
+
+def _print_limited(label: str, items: list[str], max_items: int = 60) -> None:
+    if not items:
+        return
+    print(label)
+    for item in items[:max_items]:
+        print(f"- {item}")
+    remaining = len(items) - max_items
+    if remaining > 0:
+        print(f"- ... {remaining} more")
+
+
+def cmd_structure_check(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
+    impact = _impact_summary(cfg, repo, requested_scope=requested_scope, base_ref=str(getattr(args, "base", "") or ""))
+    selected_scope = str(impact["selected_scope"])
+    base_ref = str(getattr(args, "base", "") or "")
+
+    structure_cfg = _structure_cfg(cfg)
+    optimization_cfg = _optimization_cfg(cfg)
+    warn_file_lines = _int_config(structure_cfg.get("max_file_lines_warn"), 800)
+    block_file_lines = _int_config(structure_cfg.get("max_file_lines_block"), 1500)
+    warn_function_lines = _int_config(structure_cfg.get("max_function_lines_warn"), 120)
+    max_added_to_large = _int_config(structure_cfg.get("max_added_lines_to_large_file"), 80)
+    block_large_growth = _bool_config(structure_cfg.get("block_new_responsibility_in_large_file"), True)
+
+    paths = _structure_paths_for_scope(repo, selected_scope, base_ref, structure_cfg)
+    added_by_path = _added_lines_by_path(repo, base_ref=base_ref) if selected_scope != "full" else {}
+
+    blocking: list[str] = []
+    warnings: list[str] = []
+    inspected = 0
+
+    for path in paths:
+        lines = _read_text_lines(repo, path)
+        if lines is None:
+            continue
+        inspected += 1
+        line_count = len(lines)
+        accepted_debt = _is_structure_accepted_debt(path, structure_cfg)
+        if block_file_lines > 0 and line_count > block_file_lines:
+            message = f"{path} has {line_count} lines (block>{block_file_lines}); split responsibilities before adding more work"
+            if accepted_debt:
+                warnings.append(message + " [accepted_debt_paths]")
+            else:
+                blocking.append(message)
+        elif warn_file_lines > 0 and line_count > warn_file_lines:
+            warnings.append(f"{path} has {line_count} lines (warn>{warn_file_lines}); prefer extraction before extending it")
+
+        added_lines = added_by_path.get(path, 0)
+        if (
+            block_large_growth
+            and selected_scope != "full"
+            and warn_file_lines > 0
+            and max_added_to_large > 0
+            and line_count > warn_file_lines
+            and added_lines > max_added_to_large
+        ):
+            blocking.append(
+                f"{path} adds {added_lines} lines to an already large file ({line_count} lines); "
+                "extract a module/helper or document why this is intentionally co-located"
+            )
+
+        warnings.extend(_function_size_warnings(path, lines, warn_function_lines))
+
+    missing_docs: list[str] = []
+    for key, rel_path in _configured_structure_docs(cfg).items():
+        if rel_path and not Path(repo, rel_path).exists():
+            missing_docs.append(f"{key} missing on disk: {rel_path}")
+    require_baseline = _bool_config(optimization_cfg.get("require_baseline_for_global_review"), True)
+    if missing_docs and selected_scope == "full" and require_baseline:
+        blocking.extend(missing_docs)
+    else:
+        warnings.extend(missing_docs)
+
+    result = {
+        "scope": selected_scope,
+        "inspected_files": inspected,
+        "blocking": blocking,
+        "warnings": warnings,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        _print_limited("[structure-check] blocking", blocking)
+        _print_limited("[structure-check] warnings", warnings)
+
+    if blocking:
+        raise APError(f"structure-check failed with {len(blocking)} blocking issue(s)")
+
+    print(f"[structure-check] OK scope={selected_scope} inspected={inspected} warnings={len(warnings)}")
+
+
+def _run_structure_check_for_gate(repo: Path, cfg: dict, selected_scope: str, base_ref: str) -> list[str]:
+    if not _structure_gate_enabled(cfg):
+        return []
+    if _configured_command(cfg, "structure_check"):
+        _run_configured_command(repo, cfg, "structure_check")
+        return ["structure_check"]
+    cmd_structure_check(
+        argparse.Namespace(
+            repo=str(repo),
+            scope=selected_scope,
+            base=base_ref,
+            json=False,
+        )
+    )
+    return ["structure_check"]
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """
     Run any configured gate command by name.
@@ -970,13 +1328,15 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     selected_scope = str(impact["selected_scope"])
     paths = list(impact.get("changed_files") or [])
     matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
+    executed: list[str] = []
+    executed.extend(_run_structure_check_for_gate(repo, cfg, selected_scope, str(getattr(args, "base", "") or "")))
 
     if selected_scope == "changed":
-        executed = _run_changed_gate(repo, cfg, paths, matching_rules)
+        executed.extend(_run_changed_gate(repo, cfg, paths, matching_rules))
     elif selected_scope == "full":
-        executed = _run_full_gate(repo, cfg)
+        executed.extend(_run_full_gate(repo, cfg))
     else:
-        executed = _run_standard_gate(repo, cfg)
+        executed.extend(_run_standard_gate(repo, cfg))
 
     _run_git_diff_check(repo, cfg)
     cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
@@ -1367,6 +1727,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     verification_text = "; ".join(verification_items) if verification_items else "TODO"
     follow_up = str(args.follow_up or "").strip() or "none"
     jenkins_build = str(args.jenkins or "").strip() or "TODO"
+    structure_check = str(getattr(args, "structure_check", "") or "").strip() or "TODO"
 
     lines = [
         f"## {task_id} — {title} — {timestamp}",
@@ -1375,6 +1736,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
         f"- Jenkins Build: {jenkins_build}",
         f"- Target Env: {target_env}",
         f"- Verification: {verification_text}",
+        f"- Structure Check: {structure_check}",
         f"- Result: {args.result}",
         f"- Follow-up: {follow_up}",
     ]
@@ -1403,6 +1765,7 @@ def _record_commit_push_closure(
     verification: List[str],
     result: str,
     follow_up: str,
+    structure_check: str,
 ) -> None:
     cmd_record_closure(
         argparse.Namespace(
@@ -1415,6 +1778,7 @@ def _record_commit_push_closure(
             verification=verification,
             result=result,
             follow_up=follow_up,
+            structure_check=structure_check,
             initial_commit=args.initial_commit,
             jenkins_failure=args.jenkins_failure,
             fix_commit=args.fix_commit,
@@ -1431,12 +1795,14 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     target_cfg = (cfg.get("target_env") or {})
 
     msg = args.msg
+    structure_check_status = "skipped"
 
     if args.require_runtime_health:
         cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
 
     if mode in {"dev", "verify"} or args.require_light_gate:
         cmd_light_gate(argparse.Namespace(repo=str(repo)))
+        structure_check_status = "passed via light-gate" if _structure_gate_enabled(cfg) else "skipped (structure disabled)"
 
     if args.require_jenkins:
         cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
@@ -1459,6 +1825,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             verification=dev_verification,
             result=args.result or "DEV-CLOSED",
             follow_up=args.follow_up or "Run verify mode when Jenkins and target-environment evidence is required.",
+            structure_check=args.structure_check or structure_check_status,
         )
 
     run(["git", "add", "-A"], cwd=repo)
@@ -1509,6 +1876,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             verification=verification,
             result=args.result or "PASS",
             follow_up=args.follow_up or "none",
+            structure_check=args.structure_check or structure_check_status,
         )
         run(["git", "add", "-A"], cwd=repo)
         closure_diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
@@ -1525,6 +1893,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             verification=args.verification or [],
             result=args.result or "PARTIAL",
             follow_up=args.follow_up or "none",
+            structure_check=args.structure_check or structure_check_status,
         )
     print(f"[commit-push] OK - mode={mode}")
 
@@ -1556,6 +1925,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_impact)
+
+    s = sp.add_parser("structure-check")
+    s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--base")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_structure_check)
 
     s = sp.add_parser("light-gate")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
@@ -1609,6 +1984,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--jenkins")
     s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
+    s.add_argument("--structure-check")
     s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"], required=True)
     s.add_argument("--follow-up")
     s.add_argument("--initial-commit")
@@ -1642,6 +2018,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--jenkins-build")
     s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
+    s.add_argument("--structure-check")
     s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"])
     s.add_argument("--follow-up")
     s.add_argument("--initial-commit")

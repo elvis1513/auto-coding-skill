@@ -76,7 +76,8 @@ function listFiles(root, base = root){
   return out.sort();
 }
 
-function compareDirs(src, dst){
+function compareDirs(src, dst, options = {}){
+  const includeExtra = options.includeExtra ?? true;
   const diffs = [];
   const srcFiles = listFiles(src);
   const dstFiles = listFiles(dst);
@@ -91,8 +92,10 @@ function compareDirs(src, dst){
     const dstBuf = fs.readFileSync(path.join(dst, rel));
     if (!srcBuf.equals(dstBuf)) diffs.push({ path: rel, status: "stale" });
   }
-  for (const rel of dstFiles) {
-    if (!srcSet.has(rel)) diffs.push({ path: rel, status: "extra" });
+  if (includeExtra) {
+    for (const rel of dstFiles) {
+      if (!srcSet.has(rel)) diffs.push({ path: rel, status: "extra" });
+    }
   }
   return diffs;
 }
@@ -192,7 +195,7 @@ function projectStatus(project, assetSkill, assetAgents){
     if (!exists(path.join(root, "docs", rel))) missingDocs.push(path.join("docs", rel));
   }
   const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
-  const agentDiffs = exists(agentsDir) ? compareDirs(assetAgents, agentsDir) : [{ path: ".agents/agents", status: "missing" }];
+  const agentDiffs = exists(agentsDir) ? compareDirs(assetAgents, agentsDir, { includeExtra: false }) : [{ path: ".agents/agents", status: "missing" }];
   const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0;
   return {
     project: root,
@@ -231,7 +234,6 @@ function syncProject(project, assetSkill, assetAgents, dryRun){
   if (!dryRun) {
     rmrf(skillDir);
     copyDir(assetSkill, skillDir);
-    rmrf(agentsDir);
     copyDir(assetAgents, agentsDir);
     fs.mkdirSync(toolDir, { recursive: true });
     for (const name of ["ap.py", "core.py", "http_checks.py"]) {

@@ -241,4 +241,4 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
 autocoding sync --projects /path/to/repo1,/path/to/repo2
 ```
 
-`status` reports drift in project-local `.agents`, Codex agent templates, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated skill/tooling assets and only creates missing docs; it does not overwrite project-specific `docs/ENGINEERING.md`, which should be merged through `ap.py upgrade --write`.
+`status` reports drift in project-local `.agents`, managed Codex agent templates, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated skill/tooling assets and only creates missing docs; it preserves custom files in `.agents/agents` and does not overwrite project-specific `docs/ENGINEERING.md`, which should be merged through `ap.py upgrade --write`.

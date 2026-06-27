@@ -25,6 +25,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ### Unreleased
 
+- `autocoding status/sync` now treats `.agents/agents` as a shared directory: managed templates are checked and refreshed, while project-specific custom agents are preserved.
 - Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
 - Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.
 - Added generic `--ci-build` / `--ci-failure` aliases for closure commands while keeping legacy Jenkins flags compatible.
@@ -333,7 +334,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
 autocoding sync --projects /path/to/repo1,/path/to/repo2
 ```
 
-`status` reports drift in `.agents`, Codex agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, but leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
+`status` reports drift in `.agents`, managed Codex agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, preserves custom files in `.agents/agents`, and leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
 
 ## AGENTS.md Constraint Example
 

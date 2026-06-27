@@ -22,7 +22,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
-### Unreleased
+### v2.1.1
 
 - Removed client-specific init targets from the npm CLI; installs now target the shared `.agents` layout only.
 - `ap.py install --bridges` now creates a generic `AGENTS.md` bridge instead of client-named bridge files.

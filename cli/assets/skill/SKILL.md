@@ -49,7 +49,7 @@ autocoding init --ai codex
 2) Initialize docs/tooling:
 
 ```bash
-python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
+python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
 # or .claude path
 ```
 

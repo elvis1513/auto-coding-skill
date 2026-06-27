@@ -55,8 +55,8 @@ function resolveTargetDir(ai, mode, destOverride){
 
   if (ai === "codex") {
     return mode === "project"
-      ? path.join(projectRoot(), ".codex", "skills", "auto-coding-skill")
-      : path.join(os.homedir(), ".codex", "skills", "auto-coding-skill");
+      ? path.join(projectRoot(), ".agents", "skills", "auto-coding-skill")
+      : path.join(os.homedir(), ".agents", "skills", "auto-coding-skill");
   }
 
   die(`unknown ai: ${ai}`);

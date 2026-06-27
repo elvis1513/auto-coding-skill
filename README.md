@@ -23,6 +23,10 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.1
+
+- Updated the Codex installer target from `.codex/skills` to `.agents/skills`, matching current Codex global and project skill discovery.
+
 ### v0.3.1
 
 - Added Jenkins crumb / CSRF retry support for API verification requests.
@@ -112,7 +116,7 @@ autocoding init --ai all
 2. Initialize docs and local scripts:
 
 ```bash
-python3 .codex/skills/auto-coding-skill/scripts/ap.py --repo . install
+python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
 # or
 python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```

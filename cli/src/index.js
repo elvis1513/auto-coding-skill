@@ -159,6 +159,7 @@ function projectStatus(project, assetSkill, assetAgents){
   const agentsDir = path.join(root, ".agents", "agents");
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
   const engineering = path.join(root, "docs", "ENGINEERING.md");
+  const engineeringMissing = !exists(engineering);
   const requiredConfigPaths = [
     { label: "structure", path: ["structure"] },
     { label: "optimization", path: ["optimization"] },
@@ -176,7 +177,7 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "docs.structure_standard", path: ["docs", "structure_standard"] },
   ];
   let missingConfigTokens = requiredConfigPaths.map(item => item.label);
-  if (exists(engineering)) {
+  if (!engineeringMissing) {
     const text = fs.readFileSync(engineering, "utf8");
     missingConfigTokens = requiredConfigPaths
       .filter(item => !frontmatterHasPath(text, item.path))
@@ -197,6 +198,16 @@ function projectStatus(project, assetSkill, assetAgents){
   const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
   const agentDiffs = exists(agentsDir) ? compareDirs(assetAgents, agentsDir, { includeExtra: false }) : [{ path: ".agents/agents", status: "missing" }];
   const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0;
+  let next = "";
+  if (!exists(skillDir) || !exists(agentsDir)) {
+    next = "run autocoding init --force";
+  } else if (skillDiffs.length || agentDiffs.length) {
+    next = "run autocoding sync --projects <repo>";
+  } else if (engineeringMissing || scriptDiffs.length || missingDocs.length) {
+    next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
+  } else if (missingConfigTokens.length) {
+    next = "run project-local ap.py upgrade --write to merge docs/ENGINEERING.md safely";
+  }
   return {
     project: root,
     ok,
@@ -205,7 +216,7 @@ function projectStatus(project, assetSkill, assetAgents){
     scriptDiffs,
     missingDocs,
     missingConfigTokens,
-    next: missingConfigTokens.length ? "run project-local ap.py upgrade --write to merge docs/ENGINEERING.md safely" : "",
+    next,
   };
 }
 
@@ -226,6 +237,9 @@ function syncProject(project, assetSkill, assetAgents, dryRun){
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
   const agentsDir = path.join(root, ".agents", "agents");
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
+  const engineering = path.join(root, "docs", "ENGINEERING.md");
+  const engineeringWasMissing = !exists(engineering);
+  const templateEngineering = path.join(assetSkill, "data", "templates", "ENGINEERING.md");
   actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, skillDir) });
   actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, agentsDir) });
   for (const name of ["ap.py", "core.py", "http_checks.py"]) {
@@ -240,13 +254,21 @@ function syncProject(project, assetSkill, assetAgents, dryRun){
       fs.copyFileSync(path.join(assetSkill, "scripts", name), path.join(toolDir, name));
     }
     for (const copied of copyMissingDocs(assetSkill, root)) actions.push({ action: "create", path: copied });
+    if (engineeringWasMissing) {
+      fs.mkdirSync(path.dirname(engineering), { recursive: true });
+      fs.copyFileSync(templateEngineering, engineering);
+      actions.push({ action: "create", path: path.join("docs", "ENGINEERING.md") });
+    }
   } else {
     const srcDocs = path.join(assetSkill, "data", "templates", "docs");
     for (const rel of listFiles(srcDocs)) {
       if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
     }
+    if (engineeringWasMissing) actions.push({ action: "would-create", path: path.join("docs", "ENGINEERING.md") });
   }
-  actions.push({ action: "manual", path: "docs/ENGINEERING.md", detail: "merge with ap.py upgrade --write" });
+  if (!engineeringWasMissing) {
+    actions.push({ action: "manual", path: "docs/ENGINEERING.md", detail: "merge existing files with ap.py upgrade --write" });
+  }
   return { project: root, dryRun, actions };
 }
 
@@ -263,6 +285,24 @@ function resolveInstallDirs(mode, destOverride){
       return {
         skillDir: dest,
         agentsDir: path.join(grandparent, "agents"),
+      };
+    }
+    if (path.basename(dest) === "skills" && path.basename(parent) === ".agents") {
+      return {
+        skillDir: path.join(dest, "auto-coding-skill"),
+        agentsDir: path.join(parent, "agents"),
+      };
+    }
+    if (path.basename(dest) === "agents" && path.basename(parent) === ".agents") {
+      return {
+        skillDir: path.join(parent, "skills", "auto-coding-skill"),
+        agentsDir: dest,
+      };
+    }
+    if (path.basename(dest) === ".agents") {
+      return {
+        skillDir: path.join(dest, "skills", "auto-coding-skill"),
+        agentsDir: path.join(dest, "agents"),
       };
     }
     return {
@@ -286,7 +326,7 @@ function main(){
 autocoding - install auto-coding-skill into generic .agents paths
 
 Usage:
-  autocoding init [--mode project|global] [--dest <repo-or-home-root>] [--force]
+  autocoding init [--mode project|global] [--dest <repo-root|.agents-dir|skill-dir>] [--force]
   autocoding status --projects <path[,path...]> [--json]
   autocoding sync --projects <path[,path...]> [--dry-run] [--json]
 

@@ -54,6 +54,8 @@ autocoding init
 
 This also installs the managed default subagent templates into `.agents/agents/`. Existing custom agent files in `.agents/agents/` are preserved even when `--force` is used; managed template files with the same names are refreshed.
 
+For non-current-directory installs, `--dest` accepts a repo root, a `.agents` directory, `.agents/skills`, or the direct `.agents/skills/auto-coding-skill` directory.
+
 2) Initialize docs/tooling:
 
 ```bash

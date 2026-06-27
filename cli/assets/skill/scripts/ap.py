@@ -485,6 +485,11 @@ def _copy_conflicts(src: Path, dst: Path) -> list[Path]:
     return conflicts
 
 
+_MANAGED_EXTRA_CLEANUP_DIRS = {
+    Path("data/templates/bridges"),
+}
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
@@ -580,7 +585,12 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         for dst in _iter_files(project_skill):
             rel = dst.relative_to(project_skill)
             if not (source_root / rel).exists():
-                add_action("skill", dst, "extra", "present only in project copy")
+                if rel.parent in _MANAGED_EXTRA_CLEANUP_DIRS:
+                    add_action("skill", dst, "delete", "stale managed template")
+                    if write:
+                        dst.unlink()
+                else:
+                    add_action("skill", dst, "extra", "present only in project copy")
     else:
         add_action("skill", project_skill, "missing", "run autocoding init --mode project --force")
 
@@ -799,11 +809,28 @@ def _load_cfg(repo: Path) -> dict:
 
 
 def _candidate_skill_roots(repo: Path) -> list[Path]:
-    return [
-        _skill_root(),
-        repo / ".agents" / "skills" / "auto-coding-skill",
-        Path.home() / ".agents" / "skills" / "auto-coding-skill",
-    ]
+    local_root = _skill_root()
+    project_root = repo / ".agents" / "skills" / "auto-coding-skill"
+    global_root = Path.home() / ".agents" / "skills" / "auto-coding-skill"
+
+    # When upgrade is launched from a project-local skill copy, that copy may be
+    # stale. Prefer an external source or the global installation, and use the
+    # project-local copy only as a last resort.
+    candidates = []
+    if local_root != project_root:
+        candidates.append(local_root)
+    candidates.extend([global_root, project_root])
+    if local_root == project_root:
+        candidates.append(local_root)
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in candidates:
+        if root in seen:
+            continue
+        seen.add(root)
+        unique.append(root)
+    return unique
 
 
 def _find_skill_asset_root(repo: Path) -> Path:

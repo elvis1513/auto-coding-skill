@@ -508,7 +508,7 @@ docs:
    仅 `verify` 模式且 `verification.jenkins_required: true` 时默认执行。查看 CI/Jenkins 构建、镜像、部署结果；失败则根据日志修复，再次提交推送。
 
 7. 目标环境验证
-   仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+   仅 `verify` 模式且 `verification.target_env_required: true` 时默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 
 8. 回归与证据记录
    只有真实执行过已启用的 CI/Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
@@ -534,7 +534,7 @@ docs:
 
 高风险变更至少额外要求：
 - 明确 DD
-- 使用 `workflow.mode: "verify"`，或在 `dev` 快速闭环后显式补目标环境真实验证
+- 使用 `workflow.mode: "verify"`，或在 `dev` 快速闭环后显式补已启用的目标环境真实验证
 - 闭环记录写清楚验证路径和结果
 - 必要时补 summary / deployment record / regression matrix
 

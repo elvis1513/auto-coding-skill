@@ -229,7 +229,7 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - `verify-target` should be used for real target-environment API/page checks when the task touches user-visible or deploy-sensitive behavior.
 - `commit-push` records closure automatically according to `workflow.mode`.
 - `regression-matrix.md` can mark `PASS` only after real execution with evidence.
-- High-risk changes must include target environment verification and usually a DD.
+- High-risk changes must include a DD and the strongest configured verification path; target-environment verification is required when `verification.target_env_required: true` or the task explicitly depends on runtime behavior.
 
 ## Multi-project operations
 

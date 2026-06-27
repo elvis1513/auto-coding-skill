@@ -668,11 +668,11 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 变更记录位置：`{api_change_log}`
 
 ## 4. 质量证据
-- 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check — TODO
+- 本地轻量校验：light_gate or quick_test/test/build / api docs / CI/Jenkins / diff-check — TODO
 - 结构检查：structure-check — TODO
 - 结构化证据：docs/tasks/evidence.jsonl — TODO
 - 门禁画像：.local/auto-coding-skill/gate-profile.jsonl — TODO
-- Jenkins Build：TODO
+- CI/Jenkins Build：TODO
 - 目标环境验证：TODO
 - 闭环记录：TODO
 - 回归矩阵（如有）：`{regression_matrix}`
@@ -3093,7 +3093,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
         f"## {task_id} — {title} — {timestamp}",
         f"- Task: {task_id}",
         f"- Commit: {commit_value}",
-        f"- Jenkins Build: {jenkins_build}",
+        f"- CI/Jenkins Build: {jenkins_build}",
         f"- Target Env: {target_env}",
         f"- Verification: {verification_text}",
         f"- Structure Check: {structure_check}",
@@ -3103,7 +3103,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     if str(args.initial_commit or "").strip():
         lines.append(f"- Initial Commit: {args.initial_commit.strip()}")
     if str(args.jenkins_failure or "").strip():
-        lines.append(f"- Jenkins Failure: {args.jenkins_failure.strip()}")
+        lines.append(f"- CI/Jenkins Failure: {args.jenkins_failure.strip()}")
     if str(args.fix_commit or "").strip():
         lines.append(f"- Fix Commit: {args.fix_commit.strip()}")
 

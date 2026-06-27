@@ -113,15 +113,15 @@ workflow:
 
 `verify` 完整闭环：
 
-`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> Jenkins 构建部署验证 -> 目标环境验证 -> 写 PASS 闭环`
+`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> 已启用的 CI/Jenkins 验证 -> 已启用的目标环境验证 -> 写 PASS 闭环`
 
 具体执行顺序：
 
 1. 需求确认
-   - 明确任务范围、影响服务、是否涉及 API / 数据库 / 部署 / Jenkins / 前端页面。
+   - 明确任务范围、影响服务、是否涉及 API / 数据库 / 部署 / CI/Jenkins / 前端页面。
 2. 最小设计记录
    - 普通小改动只更新 `taskbook` 或相关设计文档的一小段。
-   - 跨模块、接口、数据库、部署、Jenkins、关键页面流程变更才补 DD。
+   - 跨模块、接口、数据库、部署、CI/Jenkins、关键页面流程变更才补 DD。
 3. 开发实现
    - 只修改本次任务必要文件，不做无关重构。
 4. 本地轻量校验
@@ -129,18 +129,18 @@ workflow:
    - 若未配置，再执行 quick test / test / build 中最先配置的一项
    - `git diff --check`
    - API 文档检查
-   - Jenkins 配置检查
+   - 已启用的 CI/Jenkins 配置检查
 5. 提交推送
-   - `dev` 模式：轻量校验通过后，先写 `DEV-CLOSED` 闭环，再 commit + push，触发 Jenkins 后结束。
-   - `verify` 模式：commit + push 后继续等待 Jenkins 和目标环境验证。
-6. Jenkins 验证
-   - 仅 `verify` 模式默认执行。看 Jenkins 构建、镜像、部署结果；失败则基于 Jenkins 日志修复并再次提交。
+   - `dev` 模式：轻量校验通过后，先写 `DEV-CLOSED` 闭环，再 commit + push 后结束。
+   - `verify` 模式：commit + push 后继续等待已启用的 CI/Jenkins 和目标环境验证。
+6. CI/Jenkins 验证
+   - 仅 `verify` 模式且 `verification.jenkins_required: true` 时默认执行。看 CI/Jenkins 构建、镜像、部署结果；失败则基于日志修复并再次提交。
 7. 目标环境验证
-   - 仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
+   - 仅 `verify` 模式且 `verification.target_env_required: true` 时默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 8. 回归与证据记录
-   - 只有真实执行过 Jenkins / 目标环境验证，或明确要求本地运行验证时，才把 regression matrix 写成 `PASS`。
+   - 只有真实执行过已启用的 CI/Jenkins / 目标环境验证，或明确要求本地运行验证时，才把 regression matrix 写成 `PASS`。
 9. 闭环记录
-   - `dev` 模式记录 `DEV-CLOSED`，表示开发闭环完成但 Jenkins/目标环境未验证。
+   - `dev` 模式记录 `DEV-CLOSED`，表示开发闭环完成但 CI/Jenkins/目标环境未验证。
    - `verify` 模式记录 `PASS` / `FAIL` / `PARTIAL`，必须基于真实验证结果。
 
 ## Default vs On-demand
@@ -408,8 +408,8 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 - Purpose: default lightweight closure record.
 - How to record:
   - Append one record per task.
-  - Required fields: task, commit, Jenkins build, target env verification, structure check, result, follow-up.
-  - If Jenkins failed then was fixed, also record failure reason and fix commit.
+  - Required fields: task, commit, configured CI/Jenkins status, target env status, structure check, result, follow-up.
+  - If CI/Jenkins failed then was fixed, also record failure reason and fix commit.
   - Keep this file active-only. Historical closure records belong under `docs/tasks/archives/**`.
 
 ### 4) docs/architecture/
@@ -429,7 +429,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
   - Accepted debt is not a fresh blocker unless it worsened or needs priority upgrade.
 
 ### 6) docs/design/
-- Purpose: DD for cross-module / API / DB / deployment / Jenkins / key-page-flow changes.
+- Purpose: DD for cross-module / API / DB / deployment / CI/Jenkins / key-page-flow changes.
 - How to record:
   - Small changes do not need a standalone DD file.
   - Higher-risk changes create `docs/design/<TASK_ID>-<slug>.md`.
@@ -471,7 +471,7 @@ These categories require stronger verification and usually a DD:
 - Database migration
 - Authentication / authorization
 - Payment / order
-- Deployment / Jenkins
+- Deployment / CI / Jenkins
 - Nginx / gateway
 - File upload / download
 - Production configuration
@@ -494,7 +494,7 @@ Development mode can also be forced per run:
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode dev --msg "<TASK_ID>: <summary>"
 ```
 
-Verification mode runs the full Jenkins + target-environment loop:
+Verification mode runs the configured CI/Jenkins + target-environment loop. Disabled surfaces are recorded as skipped:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
@@ -532,7 +532,7 @@ python3 docs/tools/autopipeline/ap.py check-matrix
 python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ```
 
-## Jenkins Build Tracking
+## Optional Jenkins Build Tracking
 
 - `verify-jenkins-build --git-ref HEAD`
   - Use when Jenkins build descriptions include commit SHA and you want to find the latest build automatically.

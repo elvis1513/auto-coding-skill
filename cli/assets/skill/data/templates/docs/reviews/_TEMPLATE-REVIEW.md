@@ -3,7 +3,7 @@
 > 仅在任务需要独立 review 记录时使用；不是每个小改动的默认强制文档。
 
 ## 1. 静态分析结果
-- Command：structure-check / light_gate / diff_check / verify_api_docs / verify_jenkins
+- Command：structure-check / light_gate / diff_check / verify_api_docs / verify_jenkins / verify_jenkins_skipped
 - Summary：
 - Issues：
 
@@ -21,13 +21,13 @@
 - gate-profile：`.local/auto-coding-skill/gate-profile.jsonl`
 - evidence-log：`docs/tasks/evidence.jsonl`
 - api docs：
-- jenkins：
+- ci/jenkins：
 
 ## 4. 按需本地运行验证（如果有）
 - runtime-up / health：
 
-## 5. Jenkins 与目标环境
-- Jenkins readiness：
+## 5. CI/Jenkins 与目标环境
+- CI/Jenkins readiness：
 - Target env verification：
 
 ## 6. 风险与结论

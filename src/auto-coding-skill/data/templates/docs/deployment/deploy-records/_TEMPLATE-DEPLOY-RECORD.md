@@ -5,7 +5,7 @@
 ## 1. Deployment Context
 - Task ID:
 - Commit:
-- Jenkins Build:
+- CI/Jenkins Build:
 - Target Env:
 
 ## 2. Verification

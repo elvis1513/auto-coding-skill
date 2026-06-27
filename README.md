@@ -23,6 +23,12 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.3
+
+- Fixed `doctor`, `light-gate`, `verify-target`, and Jenkins API verification to accept secret references via `*_password_env`.
+- Kept direct `*_password` fields compatible for legacy projects while making the default template use environment-variable secret references.
+- Updated docs so `docs/ENGINEERING.md` can stay Git-tracked without requiring committed secrets.
+
 ### v2.0.2
 
 - Added default Codex subagent templates under `.agents/agents`.
@@ -153,19 +159,19 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
-- `target_env.frontend_password`
+- `target_env.frontend_password` 或 `target_env.frontend_password_env`
 - `target_env.backend_base_url`
 - `target_env.backend_username`
-- `target_env.backend_password`
+- `target_env.backend_password` 或 `target_env.backend_password_env`
 - `target_env.backend_root_username`
-- `target_env.backend_root_password`
+- `target_env.backend_root_password` 或 `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.base_url`
 - `jenkins.ui_username`
-- `jenkins.ui_password`
+- `jenkins.ui_password` 或 `jenkins.ui_password_env`
 - `jenkins.api_user`
-- `jenkins.api_password`
+- `jenkins.api_password` 或 `jenkins.api_password_env`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`
@@ -240,10 +246,11 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - Purpose: single source of project config + workflow rules.
 - How to record:
   - Fill YAML frontmatter once.
-  - Keep target env front/backend usernames and passwords, Jenkins UI/API usernames and passwords, commands, docs paths here only.
+  - Keep target env front/backend usernames, Jenkins UI/API usernames, password fields or `*_password_env` references, commands, and docs paths here only.
   - Target environment also includes backend server root username/password.
-  - This file is expected to be committed to Git and maintained in plaintext for this workflow.
+  - This file is expected to be committed to Git; prefer `*_password_env` for secrets so actual secret values stay in the current shell.
   - Remaining environment keys are all mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
+  - For secret fields, `doctor` requires either a direct `*_password` value or a `*_password_env` variable name. Commands that actually authenticate require the referenced environment variable to be set at execution time.
   - Do not duplicate config elsewhere.
 
 ### 2) docs/tasks/taskbook.md

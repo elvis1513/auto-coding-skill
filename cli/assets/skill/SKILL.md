@@ -7,7 +7,7 @@ description: Use for a Claude/Codex engineering workflow with dev and verify mod
 
 This skill is for Go backend + frontend monorepo projects that rely on Jenkins to build and deploy after push. It supports both Claude and Codex. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when Jenkins and the real target environment must be completed before closure.
 
-`docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Unused environment keys should be removed from the template instead of being left as placeholders.
+`docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Secret fields may be represented either as direct `*_password` values for legacy projects or as `*_password_env` names that point to environment variables in the current shell. Unused environment keys should be removed from the template instead of being left as placeholders.
 
 At task start, inventory the current client capabilities before choosing a route: installed MCP servers, local skills, plugins/apps/connectors, browser/control tools, and repo scripts. Prefer those capabilities when they provide current, authoritative, or directly inspectable state.
 
@@ -93,19 +93,19 @@ Minimum required config for the default flow:
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
-- `target_env.frontend_password`
+- `target_env.frontend_password` or `target_env.frontend_password_env`
 - `target_env.backend_base_url`
 - `target_env.backend_username`
-- `target_env.backend_password`
+- `target_env.backend_password` or `target_env.backend_password_env`
 - `target_env.backend_root_username`
-- `target_env.backend_root_password`
+- `target_env.backend_root_password` or `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.base_url`
 - `jenkins.ui_username`
-- `jenkins.ui_password`
+- `jenkins.ui_password` or `jenkins.ui_password_env`
 - `jenkins.api_user`
-- `jenkins.api_password`
+- `jenkins.api_password` or `jenkins.api_password_env`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`

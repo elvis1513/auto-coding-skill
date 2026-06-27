@@ -8,6 +8,7 @@ import argparse
 import base64
 import datetime as _dt
 import json
+import os
 import time
 import urllib.parse
 import urllib.error
@@ -60,23 +61,32 @@ def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
 
 def _jenkins_basic_auth_headers(cfg: dict) -> dict:
     jenkins_cfg = (cfg.get("jenkins") or {})
-    user_candidates = [
-        jenkins_cfg.get("api_user"),
-        jenkins_cfg.get("ui_username"),
+    credential_pairs = [
+        ("api_user", "api_password"),
+        ("ui_username", "ui_password"),
     ]
-    secret_candidates = [
-        jenkins_cfg.get("api_password"),
-        jenkins_cfg.get("ui_password"),
-    ]
-    user = next((_text(v) for v in user_candidates if _is_explicit_fill(v)), "")
-    secret = next((_text(v) for v in secret_candidates if _is_explicit_fill(v)), "")
-    if not user or not secret:
-        raise APError(
-            "Missing Jenkins API credentials. Fill jenkins.api_user and jenkins.api_password in docs/ENGINEERING.md."
-        )
-    raw = f"{user}:{secret}".encode("utf-8")
-    auth = base64.b64encode(raw).decode("ascii")
-    return {"Authorization": f"Basic {auth}"}
+    errors: list[str] = []
+
+    for user_field, secret_field in credential_pairs:
+        user = _text(jenkins_cfg.get(user_field))
+        if not _is_explicit_fill(user):
+            continue
+        try:
+            secret = _resolve_secret("jenkins", jenkins_cfg, secret_field)
+        except APError as exc:
+            errors.append(str(exc))
+            continue
+        raw = f"{user}:{secret}".encode("utf-8")
+        auth = base64.b64encode(raw).decode("ascii")
+        return {"Authorization": f"Basic {auth}"}
+
+    detail = "\n- " + "\n- ".join(errors) if errors else ""
+    raise APError(
+        "Missing Jenkins API credentials. Configure jenkins.api_user with "
+        "jenkins.api_password or jenkins.api_password_env, or configure "
+        "jenkins.ui_username with jenkins.ui_password or jenkins.ui_password_env."
+        + detail
+    )
 
 
 def _http_error_body(exc: urllib.error.HTTPError) -> str:
@@ -593,6 +603,41 @@ def _require_explicit_field(missing: List[str], field: str, value: object) -> No
         missing.append(f"{field} (must be explicitly filled, not blank/TODO)")
 
 
+def _has_secret_reference(section_cfg: dict, field: str) -> bool:
+    return _is_explicit_fill(section_cfg.get(field)) or _is_explicit_fill(section_cfg.get(f"{field}_env"))
+
+
+def _require_secret_reference(missing: List[str], section_name: str, section_cfg: dict, field: str) -> None:
+    if not _has_secret_reference(section_cfg, field):
+        missing.append(
+            f"{section_name}.{field} or {section_name}.{field}_env "
+            "(must be explicitly filled, not blank/TODO)"
+        )
+
+
+def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
+    direct_value = section_cfg.get(field)
+    if _is_explicit_fill(direct_value):
+        return _text(direct_value)
+
+    env_field = f"{field}_env"
+    env_name = _text(section_cfg.get(env_field))
+    if _is_explicit_fill(env_name):
+        env_value = os.environ.get(env_name, "")
+        if _is_explicit_fill(env_value):
+            return _text(env_value)
+        raise APError(
+            f"Missing secret value for {section_name}.{field}. "
+            f"Set environment variable {env_name} declared by {section_name}.{env_field}, "
+            f"or fill {section_name}.{field}."
+        )
+
+    raise APError(
+        f"Missing {section_name}.{field}. Fill {section_name}.{field} "
+        f"or declare {section_name}.{env_field}."
+    )
+
+
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
     print("[diff-check] git diff --check")
     run(["git", "diff", "--check"], cwd=repo)
@@ -733,15 +778,15 @@ def cmd_verify_target(args: argparse.Namespace) -> None:
     frontend_headers: dict[str, str] = {}
     if args.backend_basic_auth:
         user = str(target_cfg.get("backend_username") or "").strip()
-        password = str(target_cfg.get("backend_password") or "").strip()
-        if not user or not password:
-            raise APError("Missing target_env.backend_username / target_env.backend_password for backend basic auth.")
+        if not user:
+            raise APError("Missing target_env.backend_username for backend basic auth.")
+        password = _resolve_secret("target_env", target_cfg, "backend_password")
         backend_headers = _basic_auth_header(user, password)
     if args.frontend_basic_auth:
         user = str(target_cfg.get("frontend_username") or "").strip()
-        password = str(target_cfg.get("frontend_password") or "").strip()
-        if not user or not password:
-            raise APError("Missing target_env.frontend_username / target_env.frontend_password for frontend basic auth.")
+        if not user:
+            raise APError("Missing target_env.frontend_username for frontend basic auth.")
+        password = _resolve_secret("target_env", target_cfg, "frontend_password")
         frontend_headers = _basic_auth_header(user, password)
 
     for path in args.backend_path or []:
@@ -822,25 +867,25 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
     _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
     _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
-    _require_explicit_field(missing, "target_env.frontend_password", target_cfg.get("frontend_password"))
+    _require_secret_reference(missing, "target_env", target_cfg, "frontend_password")
     _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
     _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
-    _require_explicit_field(missing, "target_env.backend_password", target_cfg.get("backend_password"))
+    _require_secret_reference(missing, "target_env", target_cfg, "backend_password")
     _require_explicit_field(missing, "target_env.backend_root_username", target_cfg.get("backend_root_username"))
-    _require_explicit_field(missing, "target_env.backend_root_password", target_cfg.get("backend_root_password"))
+    _require_secret_reference(missing, "target_env", target_cfg, "backend_root_password")
     _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
     _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
 
     _require_explicit_field(missing, "jenkins.base_url", jenkins_cfg.get("base_url"))
     _require_explicit_field(missing, "jenkins.ui_username", jenkins_cfg.get("ui_username"))
-    _require_explicit_field(missing, "jenkins.ui_password", jenkins_cfg.get("ui_password"))
+    _require_secret_reference(missing, "jenkins", jenkins_cfg, "ui_password")
     _require_explicit_field(missing, "jenkins.job_url", jenkins_cfg.get("job_url"))
     _require_explicit_field(missing, "jenkins.trigger_branch", jenkins_cfg.get("trigger_branch"))
     _require_explicit_field(missing, "jenkins.image_repository", jenkins_cfg.get("image_repository"))
     _require_explicit_field(missing, "jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy"))
     _require_explicit_field(missing, "jenkins.deploy_env", jenkins_cfg.get("deploy_env"))
     _require_explicit_field(missing, "jenkins.api_user", jenkins_cfg.get("api_user"))
-    _require_explicit_field(missing, "jenkins.api_password", jenkins_cfg.get("api_password"))
+    _require_secret_reference(missing, "jenkins", jenkins_cfg, "api_password")
 
     repo_docs = {
         "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),

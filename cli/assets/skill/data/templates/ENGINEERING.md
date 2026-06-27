@@ -33,19 +33,19 @@ target_env:
   name: ""
   frontend_base_url: ""
   frontend_username: ""
-  frontend_password: ""
+  frontend_password_env: ""
   backend_base_url: ""
   backend_username: ""
-  backend_password: ""
+  backend_password_env: ""
   backend_root_username: ""
-  backend_root_password: ""
+  backend_root_password_env: ""
   health_base_url: ""
   health_path: ""
 
 jenkins:
   base_url: ""
   ui_username: ""
-  ui_password: ""
+  ui_password_env: ""
   job_url: ""
   trigger_branch: ""
   image_repository: ""
@@ -53,7 +53,7 @@ jenkins:
   deploy_env: ""
   deploy_timeout_sec: 1800
   api_user: ""
-  api_password: ""
+  api_password_env: ""
 
 docs:
   taskbook: "docs/tasks/taskbook.md"
@@ -87,7 +87,7 @@ docs:
 - 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、构建缓存等非必要产物；仅明确需要保留的本地诊断目录允许保留。
 - 所有手工填写信息，只维护在本文件 frontmatter 中，其他文档不得重复配置。
 - `docs/ENGINEERING.md` 必须提交到 Git 管理，不允许写入 `.gitignore`。
-- 本 workflow 明确允许在 `docs/ENGINEERING.md` 中明文维护平台账号、密码，并随 Git 一起版本化。
+- 目标环境和 Jenkins 密码默认通过 `*_password_env` 指向当前 shell 中的环境变量；确需兼容旧项目时才使用明文 `*_password` 字段。
 - 未参与默认流程的环境项不要保留占位；模板中未保留的字段视为已清理，不再额外配置。
 
 ---
@@ -97,15 +97,15 @@ docs:
 先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
 - `workflow.mode`：`dev` 或 `verify`，默认推荐 `dev`
 - `commands.light_gate`：推荐配置一个项目级快速门禁命令，作为默认本地校验入口
-- `target_env.*`：目标环境前端 / 后端地址、用户名、密码，必须全部填写且真实可用
-- `jenkins.*`：Jenkins UI/API 用户名、密码、Job、分支、镜像、部署环境，必须全部填写且真实可用
+- `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
+- `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
 
 字段说明：
-- `target_env.backend_username` / `target_env.backend_password`：目标环境后台账号
-- `target_env.backend_root_username` / `target_env.backend_root_password`：目标环境后台服务器 root 账号
-- `target_env.frontend_username` / `target_env.frontend_password`：目标环境前端登录账号
-- `jenkins.ui_username` / `jenkins.ui_password`：Jenkins 页面登录账号
-- `jenkins.api_user` / `jenkins.api_password`：Jenkins API 用户名 / 密码
+- `target_env.backend_username` + `target_env.backend_password_env` 或 `target_env.backend_password`：目标环境后台账号
+- `target_env.backend_root_username` + `target_env.backend_root_password_env` 或 `target_env.backend_root_password`：目标环境后台服务器 root 账号
+- `target_env.frontend_username` + `target_env.frontend_password_env` 或 `target_env.frontend_password`：目标环境前端登录账号
+- `jenkins.ui_username` + `jenkins.ui_password_env` 或 `jenkins.ui_password`：Jenkins 页面登录账号
+- `jenkins.api_user` + `jenkins.api_password_env` 或 `jenkins.api_password`：Jenkins API 用户名 / 密码
 
 默认必填：
 - `workflow.mode`
@@ -114,19 +114,19 @@ docs:
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
-- `target_env.frontend_password`
+- `target_env.frontend_password` 或 `target_env.frontend_password_env`
 - `target_env.backend_base_url`
 - `target_env.backend_username`
-- `target_env.backend_password`
+- `target_env.backend_password` 或 `target_env.backend_password_env`
 - `target_env.backend_root_username`
-- `target_env.backend_root_password`
+- `target_env.backend_root_password` 或 `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
 - `jenkins.base_url`
 - `jenkins.ui_username`
-- `jenkins.ui_password`
+- `jenkins.ui_password` 或 `jenkins.ui_password_env`
 - `jenkins.api_user`
-- `jenkins.api_password`
+- `jenkins.api_password` 或 `jenkins.api_password_env`
 - `jenkins.trigger_branch`
 - `jenkins.image_repository`
 - `jenkins.image_tag_strategy`

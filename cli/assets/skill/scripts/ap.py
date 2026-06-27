@@ -1602,6 +1602,18 @@ def _docs_cfg(cfg: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _docs_ledger_paths(repo: Path, cfg: dict) -> tuple[dict, dict[str, Path]]:
+    docs_cfg = _docs_cfg(cfg)
+    return docs_cfg, {
+        "taskbook": Path(repo, _text(docs_cfg.get("taskbook")) or "docs/tasks/taskbook.md"),
+        "closure_log": Path(repo, _text(docs_cfg.get("closure_log")) or "docs/tasks/closure-log.md"),
+        "design_dir": Path(repo, _text(docs_cfg.get("design_dir")) or "docs/design"),
+        "task_archive_dir": Path(repo, _text(docs_cfg.get("task_archive_dir")) or "docs/tasks/archives"),
+        "design_archive_dir": Path(repo, _text(docs_cfg.get("design_archive_dir")) or "docs/archive/design"),
+        "archive_index": Path(repo, _text(docs_cfg.get("archive_index")) or "docs/tasks/archive-index.md"),
+    }
+
+
 def _count_lines(path: Path) -> Optional[int]:
     if not path.exists() or not path.is_file():
         return None
@@ -1628,16 +1640,16 @@ def _ledger_message(blocking: list[str], warnings: list[str], block: bool, messa
 
 
 def _docs_ledger_check_result(repo: Path, cfg: dict) -> dict:
-    docs_cfg = _docs_cfg(cfg)
+    docs_cfg, paths = _docs_ledger_paths(repo, cfg)
     enabled = _bool_config(docs_cfg.get("ledger_check_enabled"), True)
     block_on_exceed = _bool_config(docs_cfg.get("ledger_block_on_exceed"), True)
 
-    taskbook = Path(repo, _text(docs_cfg.get("taskbook")) or "docs/tasks/taskbook.md")
-    closure_log = Path(repo, _text(docs_cfg.get("closure_log")) or "docs/tasks/closure-log.md")
-    design_dir = Path(repo, _text(docs_cfg.get("design_dir")) or "docs/design")
-    task_archive_dir = Path(repo, _text(docs_cfg.get("task_archive_dir")) or "docs/tasks/archives")
-    design_archive_dir = Path(repo, _text(docs_cfg.get("design_archive_dir")) or "docs/archive/design")
-    archive_index = Path(repo, _text(docs_cfg.get("archive_index")) or "docs/tasks/archive-index.md")
+    taskbook = paths["taskbook"]
+    closure_log = paths["closure_log"]
+    design_dir = paths["design_dir"]
+    task_archive_dir = paths["task_archive_dir"]
+    design_archive_dir = paths["design_archive_dir"]
+    archive_index = paths["archive_index"]
 
     taskbook_max = _int_config(docs_cfg.get("active_taskbook_max_lines"), 1200)
     closure_max = _int_config(docs_cfg.get("active_closure_log_max_lines"), 800)
@@ -1660,6 +1672,13 @@ def _docs_ledger_check_result(repo: Path, cfg: dict) -> dict:
             "blocking": blocking,
             "warnings": warnings,
         }
+
+    if taskbook_lines is None:
+        blocking.append(f"docs.taskbook missing or unreadable: {_repo_rel(repo, taskbook)}")
+    if closure_lines is None:
+        blocking.append(f"docs.closure_log missing or unreadable: {_repo_rel(repo, closure_log)}")
+    if not design_dir.exists() or not design_dir.is_dir():
+        blocking.append(f"docs.design_dir missing on disk: {_repo_rel(repo, design_dir)}")
 
     if taskbook_lines is not None and taskbook_max > 0 and taskbook_lines > taskbook_max:
         exceeded.append("taskbook")
@@ -1748,6 +1767,267 @@ def _docs_ledger_check_result(repo: Path, cfg: dict) -> dict:
         "blocking": blocking,
         "warnings": warnings,
     }
+
+
+_TASKBOOK_ARCHIVE_HEADING_RE = re.compile(r"^##\s+Task\s+([A-Za-z][A-Za-z0-9]*\d+(?:-\d+)?)\b")
+_CLOSURE_ARCHIVE_HEADING_RE = re.compile(r"^##\s+([A-Za-z][A-Za-z0-9]*\d+(?:-\d+)?)\b")
+_TASK_RESULT_RE = re.compile(r"(?:^|\n)\s*-\s*Result\s*[:：]\s*(DEV-CLOSED|PASS|FAIL|PARTIAL)\b", re.IGNORECASE)
+_TASK_STATUS_RE = re.compile(r"(?:^|\n)\s*-\s*(?:状态|Status)\s*[:：]\s*([^|\n]+)", re.IGNORECASE)
+_DESIGN_TASK_FILE_RE = re.compile(r"^([Tt][A-Za-z0-9]*\d+(?:-\d+)?)")
+_CLOSED_TASK_STATUSES = {
+    "done",
+    "closed",
+    "dev-closed",
+    "pass",
+    "passed",
+    "fail",
+    "failed",
+    "partial",
+    "完成",
+    "已完成",
+    "关闭",
+    "已关闭",
+}
+
+
+def _normalize_task_id(task_id: str) -> str:
+    return str(task_id or "").strip().upper()
+
+
+def _resolve_archive_period(period: str) -> str:
+    value = str(period or "").strip()
+    if not value:
+        return _dt.date.today().strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-\d{2}", value):
+        raise APError("--period must use YYYY-MM")
+    month = int(value.split("-", 1)[1])
+    if month < 1 or month > 12:
+        raise APError("--period month must be between 01 and 12")
+    return value
+
+
+def _split_markdown_sections(text: str, heading_re: re.Pattern[str]) -> tuple[list[str], list[dict]]:
+    preamble: list[str] = []
+    sections: list[dict] = []
+    current: Optional[dict] = None
+
+    for line in text.splitlines():
+        match = heading_re.match(line.strip())
+        if match:
+            if current is not None:
+                sections.append(current)
+            current = {"id": match.group(1), "lines": [line]}
+            continue
+        if current is None:
+            preamble.append(line)
+        else:
+            current["lines"].append(line)
+
+    if current is not None:
+        sections.append(current)
+    return preamble, sections
+
+
+def _section_text(section: dict) -> str:
+    lines = section.get("lines") or []
+    return "\n".join(str(line) for line in lines).rstrip() + "\n"
+
+
+def _render_markdown_doc(preamble: list[str], sections: list[dict]) -> str:
+    parts: list[str] = []
+    preamble_text = "\n".join(preamble).rstrip()
+    if preamble_text:
+        parts.append(preamble_text)
+    for section in sections:
+        text = _section_text(section).rstrip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts).rstrip() + "\n"
+
+
+def _is_closed_task_section(section: dict) -> bool:
+    text = _section_text(section)
+    if _TASK_RESULT_RE.search(text):
+        return True
+    status_match = _TASK_STATUS_RE.search(text)
+    if not status_match:
+        return False
+    status = status_match.group(1).strip()
+    status = re.split(r"[\s/，,;；。]+", status, maxsplit=1)[0].strip().lower()
+    return status in _CLOSED_TASK_STATUSES
+
+
+def _append_archive_sections(path: Path, title: str, period: str, sections: list[dict]) -> bool:
+    if not sections:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    header = f"# {title} — {period}\n\n"
+    body = "\n\n".join(_section_text(section).rstrip() for section in sections).rstrip() + "\n"
+    if existing.strip():
+        path.write_text(existing.rstrip() + "\n\n" + body, encoding="utf-8")
+    else:
+        path.write_text(header + body, encoding="utf-8")
+    return True
+
+
+def _append_archive_index(repo: Path, archive_index: Path, period: str, result: dict) -> bool:
+    counts = result.get("counts") or {}
+    if not any(int(counts.get(key) or 0) for key in ["taskbook_sections", "closure_sections", "design_files"]):
+        return False
+
+    paths = result.get("paths") or {}
+    entry = (
+        f"## {period}\n"
+        f"- Generated: {_now_iso()}\n"
+        f"- Taskbook archive: `{paths.get('taskbook_archive', '')}` ({counts.get('taskbook_sections', 0)} sections)\n"
+        f"- Closure archive: `{paths.get('closure_archive', '')}` ({counts.get('closure_sections', 0)} sections)\n"
+        f"- Design archive: `{paths.get('design_archive_dir', '')}` ({counts.get('design_files', 0)} files)\n"
+    )
+    archive_index.parent.mkdir(parents=True, exist_ok=True)
+    existing = archive_index.read_text(encoding="utf-8") if archive_index.exists() else ""
+    if existing.strip():
+        archive_index.write_text(existing.rstrip() + "\n\n" + entry, encoding="utf-8")
+    else:
+        archive_index.write_text("# Docs Archive Index\n\n" + entry, encoding="utf-8")
+    return True
+
+
+def _plan_docs_ledger_archive(repo: Path, cfg: dict, period: str) -> dict:
+    _docs_cfg_value, paths = _docs_ledger_paths(repo, cfg)
+    taskbook = paths["taskbook"]
+    closure_log = paths["closure_log"]
+    design_dir = paths["design_dir"]
+    task_archive_dir = paths["task_archive_dir"] / period
+    design_archive_dir = paths["design_archive_dir"] / period
+    taskbook_archive = task_archive_dir / "taskbook.md"
+    closure_archive = task_archive_dir / "closure-log.md"
+
+    if not taskbook.exists() or not taskbook.is_file():
+        raise APError(f"docs.taskbook missing on disk: {_repo_rel(repo, taskbook)}")
+    if not closure_log.exists() or not closure_log.is_file():
+        raise APError(f"docs.closure_log missing on disk: {_repo_rel(repo, closure_log)}")
+
+    taskbook_preamble, taskbook_sections = _split_markdown_sections(
+        taskbook.read_text(encoding="utf-8"),
+        _TASKBOOK_ARCHIVE_HEADING_RE,
+    )
+    closure_preamble, closure_sections = _split_markdown_sections(
+        closure_log.read_text(encoding="utf-8"),
+        _CLOSURE_ARCHIVE_HEADING_RE,
+    )
+
+    closed_taskbook_sections = [section for section in taskbook_sections if _is_closed_task_section(section)]
+    active_taskbook_sections = [section for section in taskbook_sections if not _is_closed_task_section(section)]
+    closure_ids = {_normalize_task_id(section["id"]) for section in closure_sections}
+    closed_task_ids = {_normalize_task_id(section["id"]) for section in closed_taskbook_sections}
+    archived_task_ids = closed_task_ids | closure_ids
+
+    design_files: list[Path] = []
+    if design_dir.exists() and design_dir.is_dir():
+        for path in sorted(design_dir.glob("T*.md")):
+            match = _DESIGN_TASK_FILE_RE.match(path.name)
+            if match and _normalize_task_id(match.group(1)) in archived_task_ids:
+                design_files.append(path)
+
+    return {
+        "enabled": True,
+        "period": period,
+        "paths": {
+            "taskbook": _repo_rel(repo, taskbook),
+            "closure_log": _repo_rel(repo, closure_log),
+            "design_dir": _repo_rel(repo, design_dir),
+            "taskbook_archive": _repo_rel(repo, taskbook_archive),
+            "closure_archive": _repo_rel(repo, closure_archive),
+            "design_archive_dir": _repo_rel(repo, design_archive_dir),
+            "archive_index": _repo_rel(repo, paths["archive_index"]),
+        },
+        "counts": {
+            "taskbook_sections": len(closed_taskbook_sections),
+            "closure_sections": len(closure_sections),
+            "design_files": len(design_files),
+            "active_taskbook_sections_after": len(active_taskbook_sections),
+        },
+        "archived_task_ids": sorted(archived_task_ids),
+        "taskbook_preamble": taskbook_preamble,
+        "active_taskbook_sections": active_taskbook_sections,
+        "closed_taskbook_sections": closed_taskbook_sections,
+        "closure_preamble": closure_preamble,
+        "closure_sections": closure_sections,
+        "design_files": design_files,
+        "archive_index": paths["archive_index"],
+        "taskbook_archive": taskbook_archive,
+        "closure_archive": closure_archive,
+        "design_archive_dir": design_archive_dir,
+        "taskbook_path": taskbook,
+        "closure_log_path": closure_log,
+    }
+
+
+def _public_docs_ledger_archive_result(repo: Path, result: dict, mode: str, wrote: bool, index_updated: bool = False) -> dict:
+    return {
+        "enabled": result.get("enabled", True),
+        "mode": mode,
+        "wrote": wrote,
+        "archive_index_updated": index_updated,
+        "period": result.get("period"),
+        "paths": result.get("paths"),
+        "counts": result.get("counts"),
+        "archived_task_ids": result.get("archived_task_ids"),
+        "design_files": [_repo_rel(repo, path) if isinstance(path, Path) else str(path) for path in result.get("design_files", [])],
+    }
+
+
+def cmd_docs_ledger_archive(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    period = _resolve_archive_period(getattr(args, "period", ""))
+    plan = _plan_docs_ledger_archive(repo, cfg, period)
+    write = bool(getattr(args, "write", False))
+    index_updated = False
+
+    if write:
+        design_archive_dir: Path = plan["design_archive_dir"]
+        for src in plan["design_files"]:
+            dst = design_archive_dir / src.name
+            if dst.exists():
+                raise APError(f"archive destination already exists: {_repo_rel(repo, dst)}")
+
+        taskbook_path: Path = plan["taskbook_path"]
+        closure_log_path: Path = plan["closure_log_path"]
+        taskbook_path.write_text(_render_markdown_doc(plan["taskbook_preamble"], plan["active_taskbook_sections"]), encoding="utf-8")
+        closure_log_path.write_text(_render_markdown_doc(plan["closure_preamble"], []), encoding="utf-8")
+        _append_archive_sections(plan["taskbook_archive"], "Taskbook Archive", period, plan["closed_taskbook_sections"])
+        _append_archive_sections(plan["closure_archive"], "Closure Log Archive", period, plan["closure_sections"])
+
+        for src in plan["design_files"]:
+            dst = design_archive_dir / src.name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dst)
+        index_updated = _append_archive_index(repo, plan["archive_index"], period, _public_docs_ledger_archive_result(repo, plan, "write", True))
+
+    public_result = _public_docs_ledger_archive_result(repo, plan, "write" if write else "plan", write, index_updated=index_updated)
+    if getattr(args, "json", False):
+        print(json.dumps(public_result, ensure_ascii=False, indent=2))
+    else:
+        counts = public_result.get("counts") or {}
+        print(
+            "[docs-ledger-archive] "
+            f"mode={public_result['mode']} period={period} "
+            f"taskbook_sections={counts.get('taskbook_sections', 0)} "
+            f"closure_sections={counts.get('closure_sections', 0)} "
+            f"design_files={counts.get('design_files', 0)}"
+        )
+        if not write:
+            print("[docs-ledger-archive] plan only; re-run with --write to apply")
+        elif not any(int(counts.get(key) or 0) for key in ["taskbook_sections", "closure_sections", "design_files"]):
+            print("[docs-ledger-archive] no closed ledger content to archive")
+        else:
+            print("[docs-ledger-archive] OK")
+
+    if write:
+        _record_evidence(repo, cfg, "docs_ledger_archive", "pass", public_result)
 
 
 def cmd_docs_ledger_check(args: argparse.Namespace) -> None:
@@ -2561,6 +2841,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         validation_errors.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
 
     ledger_result = _docs_ledger_check_result(repo, cfg)
+    ledger_status = "skipped" if not ledger_result.get("enabled", True) else ("fail" if ledger_result.get("blocking") else "pass")
+    _record_evidence(repo, cfg, "docs_ledger_check", ledger_status, ledger_result)
     for issue in ledger_result.get("blocking") or []:
         validation_errors.append(f"docs-ledger: {issue}")
     for warning in ledger_result.get("warnings") or []:
@@ -2988,6 +3270,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sp.add_parser("docs-ledger-check")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_docs_ledger_check)
+
+    s = sp.add_parser("docs-ledger-archive")
+    mode = s.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--write", action="store_true")
+    s.add_argument("--period", help="Archive period in YYYY-MM; defaults to current month")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_docs_ledger_archive)
 
     s = sp.add_parser("light-gate")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")

@@ -123,30 +123,59 @@ function readPackageVersion(){
   }
 }
 
+function extractFrontmatter(text){
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  return match ? match[1] : "";
+}
+
+function frontmatterHasPath(text, keyPath){
+  const frontmatter = extractFrontmatter(text);
+  if (!frontmatter) return false;
+
+  const stack = [];
+  for (const rawLine of frontmatter.split(/\r?\n/)) {
+    if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue;
+    const match = rawLine.match(/^(\s*)(["']?[^:"']+["']?)\s*:/);
+    if (!match) continue;
+
+    const indent = match[1].replace(/\t/g, "  ").length;
+    const key = match[2].replace(/^["']|["']$/g, "").trim();
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    const currentPath = [...stack.map(item => item.key), key];
+    if (currentPath.length === keyPath.length && currentPath.every((part, index) => part === keyPath[index])) {
+      return true;
+    }
+    stack.push({ indent, key });
+  }
+  return false;
+}
+
 function projectStatus(project, assetSkill, assetAgents){
   const root = path.resolve(project);
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
   const agentsDir = path.join(root, ".agents", "agents");
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
   const engineering = path.join(root, "docs", "ENGINEERING.md");
-  const requiredConfigTokens = [
-    "structure:",
-    "optimization:",
-    "evidence_log:",
-    "task_archive_dir:",
-    "design_archive_dir:",
-    "archive_index:",
-    "active_taskbook_max_lines:",
-    "active_closure_log_max_lines:",
-    "active_design_max_files:",
-    "health_baseline:",
-    "optimization_backlog:",
-    "structure_standard:",
+  const requiredConfigPaths = [
+    { label: "structure", path: ["structure"] },
+    { label: "optimization", path: ["optimization"] },
+    { label: "docs.evidence_log", path: ["docs", "evidence_log"] },
+    { label: "docs.task_archive_dir", path: ["docs", "task_archive_dir"] },
+    { label: "docs.design_archive_dir", path: ["docs", "design_archive_dir"] },
+    { label: "docs.archive_index", path: ["docs", "archive_index"] },
+    { label: "docs.active_taskbook_max_lines", path: ["docs", "active_taskbook_max_lines"] },
+    { label: "docs.active_closure_log_max_lines", path: ["docs", "active_closure_log_max_lines"] },
+    { label: "docs.active_design_max_files", path: ["docs", "active_design_max_files"] },
+    { label: "docs.health_baseline", path: ["docs", "health_baseline"] },
+    { label: "docs.optimization_backlog", path: ["docs", "optimization_backlog"] },
+    { label: "docs.structure_standard", path: ["docs", "structure_standard"] },
   ];
-  let missingConfigTokens = requiredConfigTokens;
+  let missingConfigTokens = requiredConfigPaths.map(item => item.label);
   if (exists(engineering)) {
     const text = fs.readFileSync(engineering, "utf8");
-    missingConfigTokens = requiredConfigTokens.filter(token => !text.includes(token));
+    missingConfigTokens = requiredConfigPaths
+      .filter(item => !frontmatterHasPath(text, item.path))
+      .map(item => item.label);
   }
   const scriptDiffs = [];
   for (const name of ["ap.py", "core.py", "http_checks.py"]) {
@@ -182,7 +211,7 @@ function printProjectStatus(result){
     for (const item of items) console.log(`[autocoding] ${label} ${item.status}: ${item.path}`);
   }
   for (const item of result.missingDocs) console.log(`[autocoding] doc missing: ${item}`);
-  for (const item of result.missingConfigTokens) console.log(`[autocoding] config missing token: ${item}`);
+  for (const item of result.missingConfigTokens) console.log(`[autocoding] config missing path: ${item}`);
   if (result.next) console.log(`[autocoding] next: ${result.next}`);
 }
 

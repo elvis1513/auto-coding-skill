@@ -26,7 +26,11 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 ### Unreleased
 
 - Added `ap.py docs-ledger-check` to prevent documentation ledgers from growing without a real archive.
+- Added `ap.py docs-ledger-archive --plan|--write --period YYYY-MM` for generic physical archiving of closed taskbook entries, closure records, and matching top-level DD files.
 - `doctor` now runs docs ledger health checks by default: large `taskbook.md`, `closure-log.md`, or active `docs/design/T*.md` sets require physical archives.
+- `doctor` records a standalone `docs_ledger_check` evidence event with counts and blocking details.
+- `docs-ledger-check` now fails on missing active ledger files instead of treating them as empty ledgers.
+- `autocoding status` now parses `docs/ENGINEERING.md` frontmatter key paths instead of matching config tokens in prose.
 - Added `docs.task_archive_dir`, `docs.design_archive_dir`, `docs.archive_index`, and active ledger budget settings to `docs/ENGINEERING.md`.
 - Clarified that `archive-index.md` is only navigation; it does not replace monthly or legacy physical archives.
 
@@ -260,6 +264,7 @@ Useful commands:
 ```bash
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
+python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan --period YYYY-MM
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py structure-check --scope full
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
@@ -272,6 +277,8 @@ python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
 
 `docs-ledger-check` is intentionally separate from `structure-check`. It treats `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` as active working sets. When they exceed `docs.active_*` budgets, the fix is physical archiving under `docs.task_archive_dir` / `docs.design_archive_dir`; `docs.archive_index` is only a navigation index and does not count as archive slimming.
+
+Use `docs-ledger-archive --plan --period YYYY-MM` first. If the plan only contains closed task sections, closure records, and matching top-level `T*.md` DD files, apply it with `docs-ledger-archive --write --period YYYY-MM`, then rerun `docs-ledger-check`.
 
 ## Project Upgrade
 
@@ -304,7 +311,7 @@ Execution evidence is written as JSONL:
 - `.local/auto-coding-skill/gate-profile.jsonl`
 
 Use `python3 docs/tools/autopipeline/ap.py gate-profile` to summarize command duration and failure history.
-Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` to verify that active docs ledgers remain small enough for fast lookup.
+Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` to verify that active docs ledgers remain small enough for fast lookup. Use `python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan --period YYYY-MM` before applying physical archives.
 
 ## Multi-project Sync
 
@@ -353,7 +360,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 ## Default Gate Policy
 - Default local gate is lightweight only.
 - Use `python3 docs/tools/autopipeline/ap.py classify --scope auto` to classify risk, required docs, verification surfaces, and recommended commands.
-- Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` when docs/task ledgers grow; do not treat `archive-index.md` as a substitute for physical archives.
+- Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` when docs/task ledgers grow; use `docs-ledger-archive --plan` before `--write`; do not treat `archive-index.md` as a substitute for physical archives.
 - Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
 - Use `python3 docs/tools/autopipeline/ap.py structure-check --scope auto` to catch file growth, large-file extension, and missing structure baseline docs.
 - Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.
@@ -506,6 +513,7 @@ Available on-demand commands:
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
+python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan --period YYYY-MM
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /

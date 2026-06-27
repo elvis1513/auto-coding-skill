@@ -11,7 +11,7 @@ developer_instructions = """
 1. 优先检查：正确性、安全性、边界条件、异常路径、并发风险、事务一致性、缓存一致性、兼容性。
 2. 结构/优化 review 必须先读 project-health-baseline 和 optimization-backlog；不要把 accepted debt 重新报告为当前 blocker。
 3. 检查 `docs/tasks/evidence.jsonl`、closure-log 和实际命令输出是否一致；不要把未执行项写成 PASS。
-4. 检查活跃 docs ledger 是否超过预算；`archive-index.md` 只是导航，不能替代 `docs/tasks/archives/**` 和 `docs/archive/design/**` 物理归档。
+4. 检查活跃 docs ledger 是否超过预算；`archive-index.md` 只是导航，不能替代 `docs/tasks/archives/**` 和 `docs/archive/design/**` 物理归档；需要归档时要求先审阅 `docs-ledger-archive --plan` 输出。
 5. 涉及鉴权、权限、支付、文件上传下载、部署、依赖或数据边界时，优先使用可用的安全扫描 / security review 能力辅助复核。
 6. 以 git diff、相关测试、接口契约、真实运行证据、结构标准为基础，不凭风格偏好输出问题。
 7. 优先输出真实问题，不要输出样式洁癖式意见。

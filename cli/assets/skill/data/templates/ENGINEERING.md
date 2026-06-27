@@ -30,6 +30,7 @@ gate:
   fallback_scope: "standard"
   full_on_unknown: true
   no_change_scope: "standard"
+  profile_log: ".local/auto-coding-skill/gate-profile.jsonl"
   full_on:
     paths:
       - "Jenkinsfile"
@@ -81,6 +82,63 @@ structure:
     - "**/*.bundle.js"
     - "**/*.map"
   accepted_debt_paths: []
+  layer_rules:
+    enabled: true
+    block: true
+    rules:
+      - name: "domain"
+        paths:
+          - "**/domain/**"
+          - "**/domains/**"
+          - "**/model/**"
+          - "**/models/**"
+        forbidden_imports:
+          - "**/infrastructure/**"
+          - "**/infra/**"
+          - "**/adapter/**"
+          - "**/repository/**"
+          - "**/repositories/**"
+          - "**/client/**"
+          - "**/clients/**"
+          - "**/controller/**"
+          - "**/handler/**"
+          - "**/page/**"
+          - "**/pages/**"
+          - "**/component/**"
+          - "**/components/**"
+          - "**/view/**"
+          - "**/views/**"
+      - name: "application"
+        paths:
+          - "**/application/**"
+          - "**/service/**"
+          - "**/services/**"
+          - "**/usecase/**"
+          - "**/usecases/**"
+        forbidden_imports:
+          - "**/controller/**"
+          - "**/handler/**"
+          - "**/page/**"
+          - "**/pages/**"
+          - "**/component/**"
+          - "**/components/**"
+          - "**/view/**"
+          - "**/views/**"
+      - name: "shared"
+        paths:
+          - "**/shared/**"
+          - "**/common/**"
+          - "**/utils/**"
+          - "**/lib/**"
+        forbidden_imports:
+          - "**/domain/**"
+          - "**/application/**"
+          - "**/service/**"
+          - "**/services/**"
+          - "**/infrastructure/**"
+          - "**/controller/**"
+          - "**/page/**"
+          - "**/pages/**"
   reusable_tool_dirs:
     - "docs/tools/**"
     - "scripts/**"
@@ -131,6 +189,7 @@ jenkins:
 docs:
   taskbook: "docs/tasks/taskbook.md"
   closure_log: "docs/tasks/closure-log.md"
+  evidence_log: "docs/tasks/evidence.jsonl"
   design_dir: "docs/design"
   review_dir: "docs/reviews"
   health_baseline: "docs/reviews/project-health-baseline.md"
@@ -177,7 +236,9 @@ docs:
 - `gate.*`：按项目声明路径规则和高风险升级规则；未配置时保持标准门禁行为
 - `commands.structure_check`：可覆盖内置结构检查；留空时使用通用 `ap.py structure-check`
 - `structure.*`：通用工程结构阈值、允许的大文件模式、复用搜索目录
+- `structure.layer_rules`：通用分层 import 边界检查；项目可按技术栈细化路径
 - `optimization.*`：健康基线感知的优化闭环口径，避免重复把已接受债务判定为当前未完成
+- `docs.evidence_log`：结构化证据 JSONL，记录 doctor / gate / verify / closure 等实际执行结果
 - `docs.health_baseline` / `docs.optimization_backlog` / `docs.structure_standard` / `docs.adr_dir`：项目结构治理文档位置
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
@@ -217,8 +278,10 @@ docs:
 
 按需填写：
 - `gate.default_scope`：默认 `standard`；需要小步快跑时设为 `auto` 或 `changed`
+- `gate.profile_log`：本地门禁耗时画像，默认写入 `.local/auto-coding-skill/gate-profile.jsonl`
 - `gate.rules`：项目自定义路径规则。每条规则可包含 `name`、`paths`、`commands`、`scope`
 - `structure.enabled`：是否把结构检查纳入 `light-gate`
+- `structure.layer_rules.enabled` / `block`：是否检查分层 import 边界，以及违规时阻塞还是仅提示
 - `structure.max_file_lines_warn` / `structure.max_file_lines_block`：文件长度预警 / 阻塞阈值
 - `structure.max_added_lines_to_large_file`：禁止在已偏大的文件里继续大块堆职责
 - `structure.allow_large_files`：生成物、供应商代码、构建产物等允许超长或跳过结构检查的路径
@@ -348,8 +411,12 @@ docs:
    - 新会话做整体分析时，必须先读 `docs/reviews/project-health-baseline.md` 和 `docs/reviews/optimization-backlog.md`，只报告新增、恶化、未记录 P0/P1，或已记录但需要升级优先级的问题。
 
 5) 本地执行
+   - 任务开始分类：`python3 docs/tools/autopipeline/ap.py classify --scope auto`
    - 小步快跑默认执行：`python3 docs/tools/autopipeline/ap.py structure-check --scope auto`
    - 发布、跨模块重构、架构调整默认执行：`python3 docs/tools/autopipeline/ap.py structure-check --scope full`
+   - 首次落基线：`python3 docs/tools/autopipeline/ap.py baseline init --write --update-config`
+   - 项目升级预检：`python3 docs/tools/autopipeline/ap.py upgrade --dry-run`
+   - 门禁耗时画像：`python3 docs/tools/autopipeline/ap.py gate-profile`
    - `light-gate` 在 `structure.enabled: true` 时会自动纳入结构检查；如项目需要更强规则，可配置 `commands.structure_check` 覆盖内置实现。
 
 ---

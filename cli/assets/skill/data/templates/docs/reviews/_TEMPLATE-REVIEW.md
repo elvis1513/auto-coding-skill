@@ -18,6 +18,8 @@
 ## 3. 本地轻量校验
 - light_gate or quick_test/test/build：
 - structure-check：
+- gate-profile：`.local/auto-coding-skill/gate-profile.jsonl`
+- evidence-log：`docs/tasks/evidence.jsonl`
 - api docs：
 - jenkins：
 

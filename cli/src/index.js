@@ -16,7 +16,7 @@ function takeValue(rest, index, flag){
 }
 
 function parseArgs(argv){
-  const args = { cmd: null, ai: null, mode: "project", dest: null, force: false };
+  const args = { cmd: null, ai: null, mode: "project", dest: null, force: false, dryRun: false, json: false, projects: [] };
   const [,, cmd, ...rest] = argv;
   args.cmd = (!cmd || cmd === "-h" || cmd === "--help") ? "help" : cmd;
   for (let i = 0; i < rest.length; i++) {
@@ -33,8 +33,15 @@ function parseArgs(argv){
       args.dest = takeValue(rest, i, a);
       i += 1;
     }
+    else if (a === "--projects") {
+      args.projects.push(...takeValue(rest, i, a).split(",").map(x => x.trim()).filter(Boolean));
+      i += 1;
+    }
+    else if (a === "--dry-run") args.dryRun = true;
+    else if (a === "--json") args.json = true;
     else if (a === "--force") args.force = true;
     else if (a === "-h" || a === "--help") args.cmd = "help";
+    else if (!a.startsWith("--")) args.projects.push(a);
     else die(`unknown argument: ${a}`);
   }
   return args;
@@ -55,6 +62,153 @@ function copyDir(src, dst){
     if (ent.isDirectory()) copyDir(s, d);
     else fs.copyFileSync(s, d);
   }
+}
+
+function listFiles(root, base = root){
+  if (!exists(root)) return [];
+  const out = [];
+  for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+    if (shouldSkip(ent.name)) continue;
+    const p = path.join(root, ent.name);
+    if (ent.isDirectory()) out.push(...listFiles(p, base));
+    else out.push(path.relative(base, p));
+  }
+  return out.sort();
+}
+
+function compareDirs(src, dst){
+  const diffs = [];
+  const srcFiles = listFiles(src);
+  const dstFiles = listFiles(dst);
+  const srcSet = new Set(srcFiles);
+  const dstSet = new Set(dstFiles);
+  for (const rel of srcFiles) {
+    if (!dstSet.has(rel)) {
+      diffs.push({ path: rel, status: "missing" });
+      continue;
+    }
+    const srcBuf = fs.readFileSync(path.join(src, rel));
+    const dstBuf = fs.readFileSync(path.join(dst, rel));
+    if (!srcBuf.equals(dstBuf)) diffs.push({ path: rel, status: "stale" });
+  }
+  for (const rel of dstFiles) {
+    if (!srcSet.has(rel)) diffs.push({ path: rel, status: "extra" });
+  }
+  return diffs;
+}
+
+function copyMissingDocs(assetSkill, project){
+  const srcDocs = path.join(assetSkill, "data", "templates", "docs");
+  const dstDocs = path.join(project, "docs");
+  const copied = [];
+  for (const rel of listFiles(srcDocs)) {
+    const src = path.join(srcDocs, rel);
+    const dst = path.join(dstDocs, rel);
+    if (!exists(dst)) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+      copied.push(path.join("docs", rel));
+    }
+  }
+  return copied;
+}
+
+function readPackageVersion(){
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const pkgPath = path.resolve(here, "..", "..", "package.json");
+  try {
+    return JSON.parse(fs.readFileSync(pkgPath, "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function projectStatus(project, assetSkill, assetAgents){
+  const root = path.resolve(project);
+  const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
+  const agentsDir = path.join(root, ".agents", "agents");
+  const toolDir = path.join(root, "docs", "tools", "autopipeline");
+  const engineering = path.join(root, "docs", "ENGINEERING.md");
+  const requiredConfigTokens = [
+    "structure:",
+    "optimization:",
+    "evidence_log:",
+    "health_baseline:",
+    "optimization_backlog:",
+    "structure_standard:",
+  ];
+  let missingConfigTokens = requiredConfigTokens;
+  if (exists(engineering)) {
+    const text = fs.readFileSync(engineering, "utf8");
+    missingConfigTokens = requiredConfigTokens.filter(token => !text.includes(token));
+  }
+  const scriptDiffs = [];
+  for (const name of ["ap.py", "core.py", "http_checks.py"]) {
+    const src = path.join(assetSkill, "scripts", name);
+    const dst = path.join(toolDir, name);
+    if (!exists(dst)) scriptDiffs.push({ path: path.join("docs/tools/autopipeline", name), status: "missing" });
+    else if (!fs.readFileSync(src).equals(fs.readFileSync(dst))) scriptDiffs.push({ path: path.join("docs/tools/autopipeline", name), status: "stale" });
+  }
+  const missingDocs = [];
+  const srcDocs = path.join(assetSkill, "data", "templates", "docs");
+  for (const rel of listFiles(srcDocs)) {
+    if (!exists(path.join(root, "docs", rel))) missingDocs.push(path.join("docs", rel));
+  }
+  const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
+  const agentDiffs = exists(agentsDir) ? compareDirs(assetAgents, agentsDir) : [{ path: ".agents/agents", status: "missing" }];
+  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0;
+  return {
+    project: root,
+    ok,
+    skillDiffs,
+    agentDiffs,
+    scriptDiffs,
+    missingDocs,
+    missingConfigTokens,
+    next: missingConfigTokens.length ? "run project-local ap.py upgrade --write to merge docs/ENGINEERING.md safely" : "",
+  };
+}
+
+function printProjectStatus(result){
+  console.log(`[autocoding] project=${result.project}`);
+  console.log(`[autocoding] ok=${result.ok}`);
+  for (const [label, items] of [["skill", result.skillDiffs], ["agents", result.agentDiffs], ["scripts", result.scriptDiffs]]) {
+    for (const item of items) console.log(`[autocoding] ${label} ${item.status}: ${item.path}`);
+  }
+  for (const item of result.missingDocs) console.log(`[autocoding] doc missing: ${item}`);
+  for (const item of result.missingConfigTokens) console.log(`[autocoding] config missing token: ${item}`);
+  if (result.next) console.log(`[autocoding] next: ${result.next}`);
+}
+
+function syncProject(project, assetSkill, assetAgents, dryRun){
+  const root = path.resolve(project);
+  const actions = [];
+  const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
+  const agentsDir = path.join(root, ".agents", "agents");
+  const toolDir = path.join(root, "docs", "tools", "autopipeline");
+  actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, skillDir) });
+  actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, agentsDir) });
+  for (const name of ["ap.py", "core.py", "http_checks.py"]) {
+    actions.push({ action: dryRun ? "would-sync" : "sync", path: path.join("docs/tools/autopipeline", name) });
+  }
+  if (!dryRun) {
+    rmrf(skillDir);
+    copyDir(assetSkill, skillDir);
+    rmrf(agentsDir);
+    copyDir(assetAgents, agentsDir);
+    fs.mkdirSync(toolDir, { recursive: true });
+    for (const name of ["ap.py", "core.py", "http_checks.py"]) {
+      fs.copyFileSync(path.join(assetSkill, "scripts", name), path.join(toolDir, name));
+    }
+    for (const copied of copyMissingDocs(assetSkill, root)) actions.push({ action: "create", path: copied });
+  } else {
+    const srcDocs = path.join(assetSkill, "data", "templates", "docs");
+    for (const rel of listFiles(srcDocs)) {
+      if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
+    }
+  }
+  actions.push({ action: "manual", path: "docs/ENGINEERING.md", detail: "merge with ap.py upgrade --write" });
+  return { project: root, dryRun, actions };
 }
 
 function projectRoot(){ return process.cwd(); }
@@ -99,13 +253,52 @@ autocoding - install auto-coding-skill (Claude Code + Codex CLI)
 
 Usage:
   autocoding init --ai claude|codex|all [--mode project|global] [--dest <path>] [--force]
+  autocoding status --projects <path[,path...]> [--json]
+  autocoding sync --projects <path[,path...]> [--dry-run] [--json]
 
 Examples:
   autocoding init --ai claude
   autocoding init --ai codex
   autocoding init --ai all --mode project
   autocoding init --ai all --dest /tmp/skills
+  autocoding status --projects /Users/elvis/Product/xjmate,/Users/elvis/Product/geesight
+  autocoding sync --projects /Users/elvis/Product/xjmate --dry-run
 `);
+    process.exit(0);
+  }
+
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const assetSkill = path.resolve(here, "..", "assets", "skill");
+  const assetAgents = path.resolve(here, "..", "assets", "agents");
+  if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
+  if (!exists(assetAgents)) die(`missing assets at ${assetAgents}`);
+
+  if (args.cmd === "status") {
+    const projects = args.projects.length ? args.projects : [projectRoot()];
+    const results = projects.map(project => projectStatus(project, assetSkill, assetAgents));
+    if (args.json) console.log(JSON.stringify({ version: readPackageVersion(), results }, null, 2));
+    else {
+      console.log(`[autocoding] version=${readPackageVersion()}`);
+      for (const result of results) printProjectStatus(result);
+    }
+    process.exit(results.every(result => result.ok) ? 0 : 2);
+  }
+
+  if (args.cmd === "sync") {
+    const projects = args.projects.length ? args.projects : [projectRoot()];
+    const results = projects.map(project => syncProject(project, assetSkill, assetAgents, args.dryRun));
+    if (args.json) console.log(JSON.stringify({ version: readPackageVersion(), results }, null, 2));
+    else {
+      console.log(`[autocoding] version=${readPackageVersion()}`);
+      for (const result of results) {
+        console.log(`[autocoding] project=${result.project}`);
+        console.log(`[autocoding] dryRun=${result.dryRun}`);
+        for (const item of result.actions) {
+          const detail = item.detail ? ` - ${item.detail}` : "";
+          console.log(`[autocoding] ${item.action}: ${item.path}${detail}`);
+        }
+      }
+    }
     process.exit(0);
   }
 
@@ -114,12 +307,6 @@ Examples:
   const ai = (args.ai ?? "").toLowerCase();
   const targets = ai === "all" ? ["claude", "codex"] : [ai];
   if (!(["claude", "codex", "all"].includes(ai))) die(`--ai must be claude|codex|all`);
-
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const assetSkill = path.resolve(here, "..", "assets", "skill");
-  const assetAgents = path.resolve(here, "..", "assets", "agents");
-  if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
-  if (!exists(assetAgents)) die(`missing assets at ${assetAgents}`);
 
   for (const t of targets) {
     const dstOverride = args.dest

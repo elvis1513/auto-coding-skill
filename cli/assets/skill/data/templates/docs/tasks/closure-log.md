@@ -16,6 +16,7 @@
 - Target Env: <env name / health url / page path>
 - Verification: <health / key api / key page / business path>
 - Structure Check: <passed / blocked / skipped with reason>
+- Evidence Log: `docs/tasks/evidence.jsonl`
 - Result: DEV-CLOSED / PASS / FAIL / PARTIAL
 - Follow-up: <none or todo>
 - Jenkins Failure: <optional>

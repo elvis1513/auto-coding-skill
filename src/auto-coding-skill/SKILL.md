@@ -63,6 +63,13 @@ python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
 # or .claude path
 ```
 
+Existing projects should use upgrade mode before replacing tracked docs:
+
+```bash
+python3 docs/tools/autopipeline/ap.py upgrade --dry-run
+python3 docs/tools/autopipeline/ap.py upgrade --write
+```
+
 3) Install runtime deps:
 
 ```bash
@@ -128,14 +135,15 @@ Read `workflow.mode` from `docs/ENGINEERING.md` before choosing the path.
 `dev` mode:
 
 1) read `docs/ENGINEERING.md`
-2) read `docs/architecture/structure-standard.md` when the change adds or relocates code
-3) read / update `docs/tasks/taskbook.md`
-4) write minimal design notes; create a DD or ADR only when the change is cross-module, API, DB, deployment, Jenkins, key-page-flow, or long-term structure related
-5) implement only the necessary changes
-6) run the default local lightweight gate
-7) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
-8) commit + push
-9) stop and start the next development task
+2) run or reason through `classify --scope auto` for changed work
+3) read `docs/architecture/structure-standard.md` when the change adds or relocates code
+4) read / update `docs/tasks/taskbook.md`
+5) write minimal design notes; create a DD or ADR only when the change is cross-module, API, DB, deployment, Jenkins, key-page-flow, or long-term structure related
+6) implement only the necessary changes
+7) run the default local lightweight gate
+8) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
+9) commit + push
+10) stop and start the next development task
 
 `verify` mode:
 
@@ -153,6 +161,7 @@ Default commands:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py impact --scope auto
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
@@ -168,7 +177,10 @@ On-demand commands:
 python3 docs/tools/autopipeline/ap.py runtime-up
 python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
 python3 docs/tools/autopipeline/ap.py runtime-down
+python3 docs/tools/autopipeline/ap.py upgrade --dry-run
+python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
 python3 docs/tools/autopipeline/ap.py structure-check --scope full
+python3 docs/tools/autopipeline/ap.py gate-profile
 python3 docs/tools/autopipeline/ap.py check-matrix
 python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ```
@@ -180,9 +192,13 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - Reuse before building: search existing utilities, components, clients, validation, permissions, caching, retry, formatting, and automation scripts before adding another helper.
 - Do not add new responsibilities to large files. If a file exceeds `structure.max_file_lines_warn`, prefer extracting a focused module or component; if it exceeds `structure.max_file_lines_block`, only small fixes are acceptable unless the path is explicitly allowed.
 - Historical large files can be listed in `structure.accepted_debt_paths` only after they are recorded in the health baseline or optimization backlog; this does not permit large new additions to those files.
+- `structure.layer_rules` enforces configurable import boundaries between domain, application, infrastructure, interface, and shared layers.
 - Self-built algorithms, concurrency controls, caches, protocol clients, or framework-like helpers require a concrete reason such as performance, concurrency, offline/deploy constraints, licensing, security, or compatibility, plus tests or benchmark/runtime evidence.
 - For structural reviews, read `docs/reviews/project-health-baseline.md` and `docs/reviews/optimization-backlog.md` first. Do not re-report accepted debt as a fresh blocker; report only new, worsened, unrecorded P0/P1, or backlog items that now deserve priority upgrade.
 - “Optimization complete” means the scoped P0/P1/P2 work is closed, local gate passes, no new unclassified P0/P1 exists, and remaining P2/P3 work is tracked or accepted debt.
+- `baseline init` creates the first project health baseline and optimization backlog; use `--update-config` to seed `accepted_debt_paths`.
+- `docs/tasks/evidence.jsonl` is the machine-readable execution trail for gates, verification, and closure. Keep it aligned with closure Markdown.
+- `gate-profile` summarizes local gate duration and failure history so small-step development can keep the fast path honest.
 
 ## Quality policy
 
@@ -202,3 +218,15 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - `commit-push` records closure automatically according to `workflow.mode`.
 - `regression-matrix.md` can mark `PASS` only after real execution with evidence.
 - High-risk changes must include target environment verification and usually a DD.
+
+## Multi-project operations
+
+Use the npm CLI from outside or inside a repo:
+
+```bash
+autocoding status --projects /path/to/repo1,/path/to/repo2
+autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
+autocoding sync --projects /path/to/repo1,/path/to/repo2
+```
+
+`status` reports drift in project-local `.agents`, Codex agent templates, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated skill/tooling assets and only creates missing docs; it does not overwrite project-specific `docs/ENGINEERING.md`, which should be merged through `ap.py upgrade --write`.

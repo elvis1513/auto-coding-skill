@@ -30,6 +30,16 @@
 - UI 组件应拆分为容器、状态/数据适配、纯展示组件；不要在单个页面里混合远程请求、权限、复杂计算和大段渲染。
 - 跨模块、跨层、数据库、API、部署、权限、并发、缓存、核心页面流的变更，需要最小设计；影响长期结构的决策需要 ADR。
 
+## 3.1 Import Boundary Rules
+
+`structure.layer_rules` 会做轻量 import 边界检查。默认规则：
+
+- Domain / Model 不依赖 Infrastructure、Repository、Client、Controller、Handler、Page、Component、View。
+- Application / Service / Usecase 不依赖 Controller、Handler、Page、Component、View。
+- Shared / Common / Utils / Lib 不依赖业务层、应用层、基础设施层或 UI 入口。
+
+项目可以按技术栈调整路径规则。调整规则时必须保持方向：内层业务规则不反向依赖外层技术细节。
+
 ## 4. 文件和函数规模
 
 默认阈值来自 `docs/ENGINEERING.md`：
@@ -65,3 +75,9 @@
 - P3 可选建议：命名、风格、进一步抽象、审美类优化。
 
 “优化完成”只表示当前约定范围闭环，不表示没有任何后续可优化点。新会话必须先读健康基线和 backlog，只报告新增、恶化、未记录 P0/P1，或需要升级优先级的已记录问题。
+
+## 7. Evidence And Gate Profile
+
+- `docs/tasks/evidence.jsonl` 记录 doctor、classify、structure-check、light-gate、verify、closure 等结构化证据。
+- `.local/auto-coding-skill/gate-profile.jsonl` 记录门禁命令耗时和失败率，用于优化小步快跑的 gate 范围。
+- Markdown 记录面向人读，JSONL 记录面向工具复盘；两者不互相替代。

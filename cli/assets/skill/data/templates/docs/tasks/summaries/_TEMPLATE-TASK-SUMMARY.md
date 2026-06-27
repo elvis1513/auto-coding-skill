@@ -21,6 +21,8 @@
 ## 3. 质量证据
 - 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check
 - 结构检查：structure-check
+- 结构化证据：`docs/tasks/evidence.jsonl`
+- 门禁画像：`.local/auto-coding-skill/gate-profile.jsonl`
 - Jenkins Build：
 - 目标环境验证：
 - 闭环记录：`docs/tasks/closure-log.md`

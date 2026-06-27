@@ -23,6 +23,16 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.1.0
+
+- Added project upgrade support: `ap.py upgrade --dry-run|--write` safely syncs tooling and merges missing `docs/ENGINEERING.md` keys without overwriting existing values.
+- Added baseline initialization: `ap.py baseline init --write --update-config` scans large files/hotspots, creates health baseline + optimization backlog, and can seed `structure.accepted_debt_paths`.
+- Added configurable structure import-boundary checks through `structure.layer_rules`.
+- Added local gate profiling: configured gate commands write `.local/auto-coding-skill/gate-profile.jsonl`, summarized by `ap.py gate-profile`.
+- Added multi-project npm CLI operations: `autocoding status --projects ...` and `autocoding sync --projects ...`.
+- Added structured evidence logging to `docs/tasks/evidence.jsonl` for classify, doctor, structure-check, gates, verification, and closure.
+- Added task classification: `ap.py classify --scope auto` reports risk, categories, required DD/ADR/browser/Jenkins/target checks, and recommended commands.
+
 ### v2.0.6
 
 - Fixed `structure-check --json` so successful output stays machine-readable JSON without a trailing OK line.
@@ -241,13 +251,59 @@ The default project scaffold includes a generic professional structure standard:
 Useful commands:
 
 ```bash
+python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py structure-check --scope full
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
+python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
+python3 docs/tools/autopipeline/ap.py gate-profile
+python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 ```
 
 `structure-check` is intentionally generic. Project-specific paths and stricter rules belong in `docs/ENGINEERING.md` under `structure.*`, `optimization.*`, and optional `commands.structure_check`.
 Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
+
+## Project Upgrade
+
+For existing projects, do not rerun initialization blindly. Use:
+
+```bash
+python3 docs/tools/autopipeline/ap.py upgrade --dry-run
+python3 docs/tools/autopipeline/ap.py upgrade --write
+```
+
+`upgrade` updates autopipeline scripts, syncs project-local `.agents` skill copies when present, creates missing template docs, and merges only missing frontmatter keys into `docs/ENGINEERING.md`.
+
+## Baseline And Evidence
+
+Initialize a project health baseline:
+
+```bash
+python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
+```
+
+This creates:
+
+- `docs/reviews/project-health-baseline.md`
+- `docs/reviews/optimization-backlog.md`
+- optional `structure.accepted_debt_paths` entries for existing large files
+
+Execution evidence is written as JSONL:
+
+- `docs/tasks/evidence.jsonl`
+- `.local/auto-coding-skill/gate-profile.jsonl`
+
+Use `python3 docs/tools/autopipeline/ap.py gate-profile` to summarize command duration and failure history.
+
+## Multi-project Sync
+
+```bash
+autocoding status --projects /path/to/repo1,/path/to/repo2
+autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
+autocoding sync --projects /path/to/repo1,/path/to/repo2
+```
+
+`status` reports drift in `.agents`, Codex agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, but leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
 
 ## AGENTS.md Constraint Example
 
@@ -285,6 +341,7 @@ Historical large-file debt can be listed in `structure.accepted_debt_paths` afte
 
 ## Default Gate Policy
 - Default local gate is lightweight only.
+- Use `python3 docs/tools/autopipeline/ap.py classify --scope auto` to classify risk, required docs, verification surfaces, and recommended commands.
 - Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
 - Use `python3 docs/tools/autopipeline/ap.py structure-check --scope auto` to catch file growth, large-file extension, and missing structure baseline docs.
 - Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.

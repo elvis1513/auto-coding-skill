@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import datetime as _dt
 import fnmatch
 import json
@@ -18,6 +19,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional, List
+
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
 
 from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status
 
@@ -51,14 +57,92 @@ def _join_url(base: str, path: str) -> str:
     return base + path
 
 
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _repo_rel(repo: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo.resolve())).replace("\\", "/")
+    except Exception:
+        return str(path).replace("\\", "/")
+
+
+def _append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        handle.write("\n")
+
+
+def _evidence_log_path(repo: Path, cfg: dict) -> Path:
+    docs_cfg = cfg.get("docs") or {}
+    rel = _text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl"
+    return Path(repo, rel)
+
+
+def _gate_profile_path(repo: Path, cfg: dict) -> Path:
+    gate_cfg = _gate_cfg(cfg)
+    rel = _text(gate_cfg.get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl"
+    return Path(repo, rel)
+
+
+def _record_evidence(repo: Path, cfg: dict, event: str, status: str, payload: Optional[dict] = None) -> None:
+    record = {
+        "timestamp": _now_iso(),
+        "event": event,
+        "status": status,
+        "repo": str(repo),
+    }
+    if payload:
+        record.update(payload)
+    try:
+        _append_jsonl(_evidence_log_path(repo, cfg), record)
+    except Exception as exc:
+        print(f"[evidence] WARN: failed to write evidence log: {exc}", file=sys.stderr)
+
+
+def _record_gate_profile(
+    repo: Path,
+    cfg: dict,
+    name: str,
+    status: str,
+    duration_s: float,
+    scope: str = "",
+    detail: str = "",
+) -> None:
+    record = {
+        "timestamp": _now_iso(),
+        "name": name,
+        "status": status,
+        "duration_s": round(duration_s, 3),
+        "scope": scope,
+        "detail": detail,
+    }
+    try:
+        _append_jsonl(_gate_profile_path(repo, cfg), record)
+    except Exception as exc:
+        print(f"[gate-profile] WARN: failed to write profile log: {exc}", file=sys.stderr)
+
+
 def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
     commands = (cfg.get("commands") or {})
     command = str(commands.get(name) or "").strip()
     if not command:
         return False
     print(f"[run] {name}: {command}")
-    run_shell(command, cwd=repo)
-    print(f"[run] OK: {name}")
+    start = time.time()
+    try:
+        run_shell(command, cwd=repo)
+    except APError as exc:
+        duration_s = time.time() - start
+        _record_gate_profile(repo, cfg, name, "fail", duration_s, detail=str(exc))
+        _record_evidence(repo, cfg, "command", "fail", {"name": name, "duration_s": round(duration_s, 3)})
+        raise
+    duration_s = time.time() - start
+    _record_gate_profile(repo, cfg, name, "pass", duration_s)
+    _record_evidence(repo, cfg, "command", "pass", {"name": name, "duration_s": round(duration_s, 3)})
+    print(f"[run] OK: {name} ({duration_s:.1f}s)")
     return True
 
 
@@ -402,6 +486,121 @@ def cmd_install(args: argparse.Namespace) -> None:
     print("[install] Next: edit docs/ENGINEERING.md frontmatter, fill all platform credentials, and commit that file into Git.")
 
 
+def cmd_upgrade(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    write = bool(args.write) and not bool(args.dry_run)
+    source_root = _find_skill_asset_root(repo)
+    templates = source_root / "data" / "templates"
+    actions: list[dict] = []
+
+    def add_action(kind: str, path: Path, action: str, detail: str = "") -> None:
+        actions.append({
+            "kind": kind,
+            "path": _repo_rel(repo, path),
+            "action": action,
+            "detail": detail,
+        })
+
+    tool_files = [
+        (source_root / "scripts" / "ap.py", repo / "docs" / "tools" / "autopipeline" / "ap.py"),
+        (source_root / "scripts" / "core.py", repo / "docs" / "tools" / "autopipeline" / "core.py"),
+        (source_root / "scripts" / "http_checks.py", repo / "docs" / "tools" / "autopipeline" / "http_checks.py"),
+    ]
+    for src, dst in tool_files:
+        if not src.exists():
+            continue
+        if not dst.exists():
+            add_action("tool", dst, "create")
+            if write:
+                copy_tree(src, dst)
+        elif _files_differ(src, dst):
+            add_action("tool", dst, "update")
+            if write:
+                copy_tree(src, dst)
+        else:
+            add_action("tool", dst, "ok")
+
+    project_skill = repo / ".agents" / "skills" / "auto-coding-skill"
+    if project_skill.exists():
+        for src in _iter_files(source_root):
+            if ".git" in src.parts:
+                continue
+            rel = src.relative_to(source_root)
+            dst = project_skill / rel
+            if not dst.exists():
+                add_action("skill", dst, "create")
+                if write:
+                    copy_tree(src, dst)
+            elif _files_differ(src, dst):
+                add_action("skill", dst, "update")
+                if write:
+                    copy_tree(src, dst)
+        for dst in _iter_files(project_skill):
+            rel = dst.relative_to(project_skill)
+            if not (source_root / rel).exists():
+                add_action("skill", dst, "extra", "present only in project copy")
+    else:
+        add_action("skill", project_skill, "missing", "run autocoding init --ai codex --mode project --force")
+
+    docs_template = templates / "docs"
+    for src in _iter_files(docs_template):
+        rel = src.relative_to(docs_template)
+        dst = repo / "docs" / rel
+        if not dst.exists():
+            add_action("doc", dst, "create")
+            if write:
+                copy_tree(src, dst)
+        elif _files_differ(src, dst) and str(rel).startswith(("architecture/", "reviews/optimization-backlog.md", "reviews/project-health-baseline.md")):
+            add_action("doc", dst, "stale", "kept unchanged; review manually")
+        else:
+            add_action("doc", dst, "ok")
+
+    engineering = repo / "docs" / "ENGINEERING.md"
+    template_engineering = templates / "ENGINEERING.md"
+    if engineering.exists() and template_engineering.exists():
+        current_cfg, body = _read_frontmatter_markdown(engineering)
+        template_cfg, _ = _read_frontmatter_markdown(template_engineering)
+        merged_cfg = json.loads(json.dumps(current_cfg))
+        added_keys = _deep_merge_missing(merged_cfg, template_cfg)
+        if added_keys:
+            add_action("config", engineering, "merge", ", ".join(added_keys))
+            if write:
+                _write_frontmatter_markdown(engineering, merged_cfg, body)
+        else:
+            add_action("config", engineering, "ok")
+    elif template_engineering.exists():
+        add_action("config", engineering, "create")
+        if write:
+            copy_tree(template_engineering, engineering)
+
+    result = {
+        "source_root": str(source_root),
+        "mode": "write" if write else "dry-run",
+        "actions": actions,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"[upgrade] source={source_root}")
+        print(f"[upgrade] mode={'write' if write else 'dry-run'}")
+        for item in actions:
+            if item["action"] == "ok":
+                continue
+            detail = f" - {item['detail']}" if item.get("detail") else ""
+            print(f"[upgrade] {item['action']} {item['kind']}: {item['path']}{detail}")
+        if not any(item["action"] != "ok" for item in actions):
+            print("[upgrade] OK: no changes needed")
+        elif not write:
+            print("[upgrade] dry-run only; re-run with --write to apply safe updates")
+    try:
+        cfg = _load_cfg(repo)
+    except Exception:
+        cfg = {}
+    if cfg and write:
+        _record_evidence(repo, cfg, "upgrade", "pass", {"mode": result["mode"], "action_count": len(actions)})
+
+
 def _infer_title(taskbook: Path, task_id: str) -> str:
     if not taskbook.exists():
         return "<Title>"
@@ -471,6 +670,8 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 ## 4. 质量证据
 - 本地轻量校验：light_gate or quick_test/test/build / api docs / jenkins / diff-check — TODO
 - 结构检查：structure-check — TODO
+- 结构化证据：docs/tasks/evidence.jsonl — TODO
+- 门禁画像：.local/auto-coding-skill/gate-profile.jsonl — TODO
 - Jenkins Build：TODO
 - 目标环境验证：TODO
 - 闭环记录：TODO
@@ -554,6 +755,83 @@ def cmd_check_matrix(args: argparse.Namespace) -> None:
 def _load_cfg(repo: Path) -> dict:
     cfg_path = find_config(repo)
     return load_yaml(cfg_path)
+
+
+def _candidate_skill_roots(repo: Path) -> list[Path]:
+    return [
+        _skill_root(),
+        repo / ".agents" / "skills" / "auto-coding-skill",
+        Path.home() / ".agents" / "skills" / "auto-coding-skill",
+        repo / ".claude" / "skills" / "auto-coding-skill",
+        Path.home() / ".claude" / "skills" / "auto-coding-skill",
+    ]
+
+
+def _find_skill_asset_root(repo: Path) -> Path:
+    for root in _candidate_skill_roots(repo):
+        if (root / "data" / "templates").exists() and (root / "scripts" / "ap.py").exists():
+            return root
+    raise APError(
+        "Cannot find auto-coding-skill asset root. Run `autocoding init --ai codex --mode global --force` "
+        "or execute this command from an installed skill copy."
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _files_differ(a: Path, b: Path) -> bool:
+    return _file_sha256(a) != _file_sha256(b)
+
+
+def _read_frontmatter_markdown(path: Path) -> tuple[dict, str]:
+    if not path.exists():
+        return {}, ""
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)(.*)$", text, flags=re.DOTALL)
+    if not m:
+        raise APError(f"Markdown frontmatter not found: {path}")
+    if yaml is None:
+        raise APError("PyYAML not installed. Install dependencies with: pip install pyyaml requests")
+    data = yaml.safe_load(m.group(1)) or {}
+    return data, m.group(3)
+
+
+def _write_frontmatter_markdown(path: Path, data: dict, body: str) -> None:
+    if yaml is None:
+        raise APError("PyYAML not installed. Install dependencies with: pip install pyyaml requests")
+    dumped = yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
+    path.write_text(f"---\n{dumped}\n---\n{body}", encoding="utf-8")
+
+
+def _deep_merge_missing(target: dict, template: dict, prefix: str = "") -> list[str]:
+    added: list[str] = []
+    for key, value in template.items():
+        field = f"{prefix}.{key}" if prefix else str(key)
+        if key not in target or target.get(key) is None:
+            target[key] = value
+            added.append(field)
+            continue
+        if isinstance(target.get(key), dict) and isinstance(value, dict):
+            added.extend(_deep_merge_missing(target[key], value, field))
+    return added
+
+
+def _iter_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    out: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_file() and "__pycache__" not in path.parts and path.name != ".DS_Store" and not path.name.endswith(".pyc"):
+            out.append(path)
+    return sorted(out)
 
 
 def _workflow_mode(cfg: dict, args: Optional[argparse.Namespace] = None) -> str:
@@ -934,7 +1212,10 @@ def _run_full_gate(repo: Path, cfg: dict) -> list[str]:
 
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
     print("[diff-check] git diff --check")
+    start = time.time()
     run(["git", "diff", "--check"], cwd=repo)
+    _record_gate_profile(repo, cfg, "diff_check", "pass", time.time() - start)
+    _record_evidence(repo, cfg, "diff_check", "pass")
     print("[diff-check] OK")
 
 
@@ -1028,6 +1309,70 @@ _FUNCTION_START_RE = re.compile(
     r"|^\s*(?:public|private|protected|static|final|async|\s)+\s*[\w<>\[\], ?]+\s+[A-Za-z_]\w*\s*\([^;]*\)\s*\{"
     r"|^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_]\w*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
 )
+_IMPORT_PATTERNS = [
+    re.compile(r"^\s*import\s+(?:.+?\s+from\s+)?[\"']([^\"']+)[\"']"),
+    re.compile(r"\brequire\(\s*[\"']([^\"']+)[\"']\s*\)"),
+    re.compile(r"\bimport\(\s*[\"']([^\"']+)[\"']\s*\)"),
+    re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b"),
+    re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)(?:\s+as\s+\w+)?\s*$"),
+    re.compile(r"^\s*import\s+[\"']([^\"']+)[\"']\s*$"),
+    re.compile(r"^\s*[\"']([^\"']+/[^\"']*)[\"']\s*$"),
+]
+_DEFAULT_LAYER_RULES = {
+    "enabled": True,
+    "block": True,
+    "rules": [
+        {
+            "name": "domain",
+            "paths": ["**/domain/**", "**/domains/**", "**/model/**", "**/models/**"],
+            "forbidden_imports": [
+                "**/infrastructure/**",
+                "**/infra/**",
+                "**/adapter/**",
+                "**/repository/**",
+                "**/repositories/**",
+                "**/client/**",
+                "**/clients/**",
+                "**/controller/**",
+                "**/handler/**",
+                "**/page/**",
+                "**/pages/**",
+                "**/component/**",
+                "**/components/**",
+                "**/view/**",
+                "**/views/**",
+            ],
+        },
+        {
+            "name": "application",
+            "paths": ["**/application/**", "**/service/**", "**/services/**", "**/usecase/**", "**/usecases/**"],
+            "forbidden_imports": [
+                "**/controller/**",
+                "**/handler/**",
+                "**/page/**",
+                "**/pages/**",
+                "**/component/**",
+                "**/components/**",
+                "**/view/**",
+                "**/views/**",
+            ],
+        },
+        {
+            "name": "shared",
+            "paths": ["**/shared/**", "**/common/**", "**/utils/**", "**/lib/**"],
+            "forbidden_imports": [
+                "**/domain/**",
+                "**/application/**",
+                "**/service/**",
+                "**/services/**",
+                "**/infrastructure/**",
+                "**/controller/**",
+                "**/page/**",
+                "**/pages/**",
+            ],
+        },
+    ],
+}
 
 
 def _structure_cfg(cfg: dict) -> dict:
@@ -1164,6 +1509,85 @@ def _function_size_warnings(path: str, lines: list[str], threshold: int) -> list
     return warnings
 
 
+def _layer_rules_config(structure_cfg: dict) -> dict:
+    raw = structure_cfg.get("layer_rules")
+    if not isinstance(raw, dict):
+        return dict(_DEFAULT_LAYER_RULES)
+    merged = dict(_DEFAULT_LAYER_RULES)
+    merged.update(raw)
+    if "rules" not in raw:
+        merged["rules"] = _DEFAULT_LAYER_RULES["rules"]
+    return merged
+
+
+def _extract_import_targets(path: str, lines: list[str]) -> list[tuple[int, str]]:
+    suffix = Path(path).suffix.lower()
+    if suffix not in {".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".go", ".java", ".kt", ".kts", ".rs", ".swift"}:
+        return []
+    targets: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "*")):
+            continue
+        for pattern in _IMPORT_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                targets.append((index + 1, match.group(1).strip()))
+                break
+    return targets
+
+
+def _resolve_relative_import(source_path: str, target: str) -> str:
+    normalized = target.replace("\\", "/")
+    if not normalized.startswith("."):
+        return normalized
+    source_dir = Path(source_path).parent
+    parts = []
+    for part in (source_dir / normalized).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _import_matches_pattern(target: str, pattern: str) -> bool:
+    normalized = target.replace("\\", "/").lstrip("./")
+    dotted_as_path = normalized.replace(".", "/")
+    pat = pattern.replace("\\", "/").lstrip("./")
+    if _path_matches(normalized, [pat]) or _path_matches(dotted_as_path, [pat]):
+        return True
+    marker = pat.replace("**/", "").replace("/**", "").strip("/")
+    if marker and (f"/{marker}/" in f"/{normalized}/" or f"/{marker}/" in f"/{dotted_as_path}/"):
+        return True
+    return False
+
+
+def _structure_boundary_issues(path: str, lines: list[str], structure_cfg: dict) -> list[str]:
+    layer_cfg = _layer_rules_config(structure_cfg)
+    if not _bool_config(layer_cfg.get("enabled"), True):
+        return []
+    rules = [rule for rule in _as_list(layer_cfg.get("rules")) if isinstance(rule, dict)]
+    if not rules:
+        return []
+    matching_rules = [rule for rule in rules if _path_matches(path, _as_list(rule.get("paths")))]
+    if not matching_rules:
+        return []
+    imports = _extract_import_targets(path, lines)
+    issues: list[str] = []
+    for rule in matching_rules:
+        name = _text(rule.get("name")) or "layer"
+        forbidden = _as_list(rule.get("forbidden_imports"))
+        for line_no, target in imports:
+            resolved = _resolve_relative_import(path, target)
+            if any(_import_matches_pattern(target, pattern) or _import_matches_pattern(resolved, pattern) for pattern in forbidden):
+                issues.append(f"{path}:{line_no} layer '{name}' imports forbidden target '{target}'")
+    return issues
+
+
 def _configured_structure_docs(cfg: dict) -> dict[str, str]:
     docs_cfg = cfg.get("docs") or {}
     return {
@@ -1209,6 +1633,8 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     warn_function_lines = _int_config(structure_cfg.get("max_function_lines_warn"), 120)
     max_added_to_large = _int_config(structure_cfg.get("max_added_lines_to_large_file"), 80)
     block_large_growth = _bool_config(structure_cfg.get("block_new_responsibility_in_large_file"), True)
+    layer_cfg = _layer_rules_config(structure_cfg)
+    block_layer_violations = _bool_config(layer_cfg.get("block"), True)
 
     paths = _structure_paths_for_scope(repo, selected_scope, base_ref, structure_cfg)
     added_by_path = _added_lines_by_path(repo, base_ref=base_ref) if selected_scope != "full" else {}
@@ -1248,6 +1674,11 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
             )
 
         warnings.extend(_function_size_warnings(path, lines, warn_function_lines))
+        boundary_issues = _structure_boundary_issues(path, lines, structure_cfg)
+        if block_layer_violations:
+            blocking.extend(boundary_issues)
+        else:
+            warnings.extend(boundary_issues)
 
     missing_docs: list[str] = []
     for key, rel_path in _configured_structure_docs(cfg).items():
@@ -1272,8 +1703,10 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
         _print_limited("[structure-check] warnings", warnings)
 
     if blocking:
+        _record_evidence(repo, cfg, "structure_check", "fail", result)
         raise APError(f"structure-check failed with {len(blocking)} blocking issue(s)")
 
+    _record_evidence(repo, cfg, "structure_check", "pass", result)
     if not getattr(args, "json", False):
         print(f"[structure-check] OK scope={selected_scope} inspected={inspected} warnings={len(warnings)}")
 
@@ -1293,6 +1726,370 @@ def _run_structure_check_for_gate(repo: Path, cfg: dict, selected_scope: str, ba
         )
     )
     return ["structure_check"]
+
+
+def _current_git_ref(repo: Path) -> str:
+    value = run(["git", "rev-parse", "--short=12", "HEAD"], cwd=repo, check=False).stdout.strip()
+    return value or "uncommitted"
+
+
+def _directory_hotspots(paths: list[str]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for path in paths:
+        parts = path.split("/")
+        if len(parts) <= 1:
+            key = "."
+        elif parts[0] in {"frontend", "backend", "packages", "apps", "services"} and len(parts) >= 3:
+            key = "/".join(parts[:3])
+        else:
+            key = "/".join(parts[:2])
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:20]
+
+
+def _scan_structure_inventory(repo: Path, cfg: dict) -> dict:
+    structure_cfg = _structure_cfg(cfg)
+    warn_file_lines = _int_config(structure_cfg.get("max_file_lines_warn"), 800)
+    block_file_lines = _int_config(structure_cfg.get("max_file_lines_block"), 1500)
+    paths = [path for path in _tracked_files(repo) if _is_structure_candidate(path, structure_cfg)]
+    large_files: list[dict] = []
+    for path in paths:
+        lines = _read_text_lines(repo, path)
+        if lines is None:
+            continue
+        line_count = len(lines)
+        if line_count > warn_file_lines:
+            large_files.append({
+                "path": path,
+                "lines": line_count,
+                "priority": "P1" if block_file_lines > 0 and line_count > block_file_lines else "P2",
+            })
+    large_files.sort(key=lambda item: (-int(item["lines"]), str(item["path"])))
+    return {
+        "files_inspected": len(paths),
+        "large_files": large_files,
+        "hotspots": _directory_hotspots(paths),
+    }
+
+
+def _render_health_baseline(repo: Path, cfg: dict, inventory: dict) -> str:
+    date = _dt.date.today().isoformat()
+    commit = _current_git_ref(repo)
+    large_rows = "\n".join(
+        f"| `{item['path']}` | {item['lines']} lines | Accepted for baseline; no large new additions without extraction | {date} |"
+        for item in inventory["large_files"][:30]
+    ) or "| (none) |  |  |  |"
+    debt_rows = "\n".join(
+        f"| DEBT-{idx:03d} | {item['priority']} | `{item['path']}` | Large file baseline: {item['lines']} lines | Existing state at baseline | New large additions or touched feature work |"
+        for idx, item in enumerate(inventory["large_files"][:30], start=1)
+    ) or "| (none) |  |  |  |  |  |"
+    return f"""# Project Health Baseline
+
+> Generated by `ap.py baseline init`. Update this file when accepted structure debt changes.
+
+- Baseline date: {date}
+- Baseline commit: `{commit}`
+- Owner: TODO
+- Review scope: repo
+- Standard: `docs/architecture/structure-standard.md`
+- Files inspected: {inventory['files_inspected']}
+
+## 1. Current Accepted Structure
+
+| Area | Current state | Accepted because | Review date |
+| --- | --- | --- | --- |
+{large_rows}
+
+## 2. Closed Optimization Scope
+
+| ID | Closed date | Scope | Acceptance evidence |
+| --- | --- | --- | --- |
+| (none) |  |  |  |
+
+## 3. Accepted Debt
+
+| ID | Priority | Scope | Debt | Why accepted | Revisit trigger |
+| --- | --- | --- | --- | --- | --- |
+{debt_rows}
+
+## 4. Priority Rules
+
+- P0: blocks build, release, deploy, core user flow, data integrity, security, or compliance.
+- P1: clear architectural violation, contract drift, missing test around high-risk change, or recently introduced maintainability risk.
+- P2: planned debt such as large files, hot directories, module extraction, stronger tests, or tool consolidation.
+- P3: optional naming, style, polish, or further abstraction.
+
+## 5. Completion Standard
+
+An optimization task is complete when all are true:
+
+- The scoped P0/P1/P2 items listed for this task are closed.
+- Local gate passed, including structure check when enabled.
+- No new unclassified P0/P1 was introduced.
+- Remaining P2/P3 items are either in `docs/reviews/optimization-backlog.md` or accepted debt above.
+- Review output says explicitly whether the project meets this baseline.
+
+## 6. New Review Instructions
+
+- Read this baseline first.
+- Read `docs/reviews/optimization-backlog.md` second.
+- Report only new or worsened issues, unrecorded P0/P1, priority upgrades, or baseline drift.
+"""
+
+
+def _render_optimization_backlog(inventory: dict) -> str:
+    date = _dt.date.today().isoformat()
+    rows = "\n".join(
+        f"| OPT-{idx:03d} | {item['priority']} | accepted-debt | `{item['path']}` | Split or reduce {item['lines']}-line file | Existing large file baseline | No new responsibilities; extract during touched feature work | {date} |"
+        for idx, item in enumerate(inventory["large_files"][:30], start=1)
+    ) or "| (none) |  |  |  |  |  |  |  |"
+    hotspot_rows = "\n".join(
+        f"| HOT-{idx:03d} | P3 | open | `{path}` | Review module cohesion ({count} tracked source files) | Hotspot directory | Split only when feature work naturally touches this area | {date} |"
+        for idx, (path, count) in enumerate(inventory["hotspots"][:10], start=1)
+    )
+    if hotspot_rows:
+        rows = rows + "\n" + hotspot_rows
+    return f"""# Optimization Backlog
+
+> Generated by `ap.py baseline init`. Accepted debt is not a current-task failure unless it worsens or is touched by new feature work.
+
+## Status Values
+
+- `open`: confirmed and waiting for planning.
+- `accepted-debt`: accepted current debt with a revisit trigger.
+- `in-progress`: currently being handled.
+- `closed`: completed with evidence.
+- `superseded`: replaced by another item.
+
+## Backlog
+
+| ID | Priority | Status | Scope | Item | Reason | Acceptance | Last reviewed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+{rows}
+
+## Review Rules
+
+- P0/P1 cannot remain in backlog without immediate owner and plan.
+- P2 needs scope, reason, and acceptance.
+- P3 does not block completion.
+- New reviews update existing rows instead of duplicating equivalent findings.
+"""
+
+
+def _update_accepted_debt_paths(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
+    if not paths:
+        return []
+    engineering = find_config(repo)
+    current_cfg, body = _read_frontmatter_markdown(engineering)
+    structure_cfg = current_cfg.setdefault("structure", {})
+    existing = [str(item) for item in _as_list(structure_cfg.get("accepted_debt_paths")) if str(item).strip()]
+    added = [path for path in paths if path not in existing]
+    if added:
+        structure_cfg["accepted_debt_paths"] = existing + added
+        _write_frontmatter_markdown(engineering, current_cfg, body)
+    return added
+
+
+def cmd_baseline_init(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    docs_cfg = cfg.get("docs") or {}
+    inventory = _scan_structure_inventory(repo, cfg)
+    health_path = Path(repo, _text(docs_cfg.get("health_baseline")) or "docs/reviews/project-health-baseline.md")
+    backlog_path = Path(repo, _text(docs_cfg.get("optimization_backlog")) or "docs/reviews/optimization-backlog.md")
+    write = bool(args.write)
+    force = bool(args.force)
+    update_config = bool(args.update_config)
+
+    actions: list[dict] = []
+    for path, content, label in [
+        (health_path, _render_health_baseline(repo, cfg, inventory), "health_baseline"),
+        (backlog_path, _render_optimization_backlog(inventory), "optimization_backlog"),
+    ]:
+        if path.exists() and not force:
+            actions.append({"path": _repo_rel(repo, path), "action": "exists", "kind": label})
+            continue
+        actions.append({"path": _repo_rel(repo, path), "action": "write" if write else "would-write", "kind": label})
+        if write:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+    accepted_added: list[str] = []
+    accepted_paths = [str(item["path"]) for item in inventory["large_files"] if item["priority"] in {"P1", "P2"}]
+    if write and update_config:
+        accepted_added = _update_accepted_debt_paths(repo, cfg, accepted_paths)
+        if accepted_added:
+            actions.append({
+                "path": "docs/ENGINEERING.md",
+                "action": "merge",
+                "kind": "accepted_debt_paths",
+                "detail": ", ".join(accepted_added),
+            })
+
+    result = {
+        "files_inspected": inventory["files_inspected"],
+        "large_files": inventory["large_files"],
+        "hotspots": inventory["hotspots"],
+        "actions": actions,
+        "updated_accepted_debt_paths": accepted_added,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"[baseline] files_inspected={inventory['files_inspected']}")
+        print(f"[baseline] large_files={len(inventory['large_files'])}")
+        for item in actions:
+            detail = f" - {item.get('detail')}" if item.get("detail") else ""
+            print(f"[baseline] {item['action']} {item['kind']}: {item['path']}{detail}")
+        if not write:
+            print("[baseline] dry-run only; re-run with --write to create baseline files")
+
+    if write:
+        _record_evidence(
+            repo,
+            cfg,
+            "baseline_init",
+            "pass",
+            {"write": write, "large_file_count": len(inventory["large_files"]), "files_inspected": inventory["files_inspected"]},
+        )
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def cmd_gate_profile(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    records = _read_jsonl(_gate_profile_path(repo, cfg))
+    limit = int(args.limit or 20)
+    by_name: dict[str, dict] = {}
+    for record in records:
+        name = _text(record.get("name")) or "(unknown)"
+        bucket = by_name.setdefault(name, {"name": name, "runs": 0, "failures": 0, "total_duration_s": 0.0, "max_duration_s": 0.0})
+        duration = float(record.get("duration_s") or 0)
+        bucket["runs"] += 1
+        bucket["total_duration_s"] += duration
+        bucket["max_duration_s"] = max(float(bucket["max_duration_s"]), duration)
+        if _text(record.get("status")) != "pass":
+            bucket["failures"] += 1
+    summary = []
+    for bucket in by_name.values():
+        runs = int(bucket["runs"])
+        total = float(bucket["total_duration_s"])
+        summary.append({
+            "name": bucket["name"],
+            "runs": runs,
+            "failures": int(bucket["failures"]),
+            "failure_rate": round(int(bucket["failures"]) / runs, 3) if runs else 0,
+            "avg_duration_s": round(total / runs, 3) if runs else 0,
+            "max_duration_s": round(float(bucket["max_duration_s"]), 3),
+        })
+    summary.sort(key=lambda item: (-float(item["avg_duration_s"]), str(item["name"])))
+    result = {"profile_log": str(_gate_profile_path(repo, cfg)), "commands": summary[:limit], "record_count": len(records)}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"[gate-profile] log={result['profile_log']}")
+        print(f"[gate-profile] records={len(records)}")
+        if not summary:
+            print("[gate-profile] no profile records yet; run light-gate or configured commands first")
+        for item in summary[:limit]:
+            print(
+                f"[gate-profile] {item['name']}: runs={item['runs']} "
+                f"avg={item['avg_duration_s']}s max={item['max_duration_s']}s failures={item['failures']}"
+            )
+
+
+def _classify_paths(paths: list[str]) -> dict:
+    categories: set[str] = set()
+    for path in paths:
+        lower = path.lower()
+        if _path_matches(path, _DEFAULT_FULL_PATH_PATTERNS):
+            categories.add("release_or_tooling")
+        if any(token in lower for token in ["migration", "schema", "database", "/db/", "/sql/"]) or lower.endswith(".sql"):
+            categories.add("db")
+        if any(token in lower for token in ["api", "controller", "handler", "route", "server"]):
+            categories.add("api")
+        if any(token in lower for token in ["auth", "permission", "role", "tenant", "security"]):
+            categories.add("auth")
+        if any(token in lower for token in ["page", "component", "view", "frontend", "miniapp", ".tsx", ".jsx", ".vue", ".scss", ".css"]):
+            categories.add("ui")
+        if any(token in lower for token in ["test", "spec", "__tests__"]):
+            categories.add("test")
+        if lower.startswith("docs/") or lower.endswith(".md"):
+            categories.add("docs")
+        if any(token in lower for token in ["domain", "service", "usecase", "repository", "infrastructure", "adapter", "shared", "utils"]):
+            categories.add("structure")
+    return {
+        "categories": sorted(categories),
+        "needs_dd": bool(categories & {"api", "db", "auth", "release_or_tooling"}) or len(paths) > 12,
+        "needs_adr": bool(categories & {"structure", "release_or_tooling"}) and not categories <= {"docs"},
+        "needs_browser": "ui" in categories,
+        "needs_jenkins": bool(categories & {"release_or_tooling", "db", "auth"}),
+        "needs_target": bool(categories & {"api", "db", "auth", "ui"}),
+    }
+
+
+def cmd_classify(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    scope = str(args.scope or "").strip().lower()
+    impact = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
+    paths = list(impact.get("changed_files") or [])
+    path_classification = _classify_paths(paths)
+    selected_scope = str(impact["selected_scope"])
+    risk = "P3"
+    if path_classification["needs_jenkins"] or selected_scope == "full":
+        risk = "P1"
+    elif path_classification["needs_target"] or path_classification["needs_dd"]:
+        risk = "P2"
+    elif not paths:
+        risk = "P3"
+    commands = [
+        "python3 docs/tools/autopipeline/ap.py impact --scope auto",
+        "python3 docs/tools/autopipeline/ap.py structure-check --scope auto",
+        f"python3 docs/tools/autopipeline/ap.py light-gate --scope {selected_scope} --explain",
+    ]
+    if path_classification["needs_jenkins"]:
+        commands.append("python3 docs/tools/autopipeline/ap.py verify-jenkins")
+    result = {
+        "requested_scope": impact["requested_scope"],
+        "selected_scope": selected_scope,
+        "risk": risk,
+        "changed_files": paths,
+        "categories": path_classification["categories"],
+        "needs_dd": path_classification["needs_dd"],
+        "needs_adr": path_classification["needs_adr"],
+        "needs_browser": path_classification["needs_browser"],
+        "needs_jenkins": path_classification["needs_jenkins"],
+        "needs_target": path_classification["needs_target"],
+        "recommended_commands": commands,
+        "reasons": impact.get("reasons") or [],
+        "matched_rules": impact.get("matched_rules") or [],
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"[classify] risk={risk}")
+        print(f"[classify] selected_scope={selected_scope}")
+        print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
+        for key in ["needs_dd", "needs_adr", "needs_browser", "needs_jenkins", "needs_target"]:
+            print(f"[classify] {key}={result[key]}")
+        for command in commands:
+            print(f"[classify] command: {command}")
+    _record_evidence(repo, cfg, "classify", "pass", result)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -1320,6 +2117,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
+    light_gate_start = time.time()
     cmd_doctor(argparse.Namespace(repo=str(repo)))
     cfg = _load_cfg(repo)
     requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
@@ -1344,6 +2142,15 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
     cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
     executed.extend(["diff_check", "verify_api_docs", "verify_jenkins"])
+    duration_s = time.time() - light_gate_start
+    _record_gate_profile(repo, cfg, "light_gate", "pass", duration_s, scope=selected_scope, detail=", ".join(executed))
+    _record_evidence(
+        repo,
+        cfg,
+        "light_gate",
+        "pass",
+        {"scope": selected_scope, "executed": executed, "duration_s": round(duration_s, 3), "changed_files": paths},
+    )
     print(f"[light-gate] OK scope={selected_scope}: " + ", ".join(executed))
 
 
@@ -1353,6 +2160,7 @@ def cmd_impact(args: argparse.Namespace) -> None:
     scope = str(args.scope or "").strip().lower()
     summary = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
     _print_impact(summary, as_json=bool(args.json))
+    _record_evidence(repo, cfg, "impact", "pass", summary)
 
 
 def cmd_runtime_up(args: argparse.Namespace) -> None:
@@ -1458,6 +2266,7 @@ def cmd_verify_target(args: argparse.Namespace) -> None:
         checks.append(f"frontend:{url}->{status}")
 
     summary = ", ".join(checks) if checks else "health-only"
+    _record_evidence(repo, cfg, "verify_target", "pass", {"summary": summary, "checks": checks})
     print(f"[verify-target] OK: {summary}")
     return summary
 
@@ -1485,6 +2294,7 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     missing = [name for name, value in required if not str(value or "").strip()]
     if missing:
         raise APError("Missing Jenkins config: " + ", ".join(missing))
+    _record_evidence(repo, cfg, "verify_jenkins", "pass", {"jenkinsfile": str(jenkinsfile)})
     print(f"[verify-jenkins] OK: {jenkinsfile}")
 
 
@@ -1575,8 +2385,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     missing.extend(validation_errors)
 
     if missing:
+        _record_evidence(repo, cfg, "doctor", "fail", {"issues": missing})
         raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing))
 
+    _record_evidence(repo, cfg, "doctor", "pass", {"mode": mode})
     print("[doctor] OK")
 
 
@@ -1643,6 +2455,13 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
             args.allow_no_deploy,
         )
         build_url = str(payload.get("url") or "").strip()
+        _record_evidence(
+            repo,
+            cfg,
+            "verify_jenkins_build",
+            "pass",
+            {"job": job_label, "build": payload.get("number"), "result": result, "url": build_url},
+        )
         print(
             "[verify-jenkins-build] OK: "
             f"job={job_label} "
@@ -1683,6 +2502,13 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         args.allow_no_deploy,
     )
     build_url = str(matched.get("url") or "").strip()
+    _record_evidence(
+        repo,
+        cfg,
+        "verify_jenkins_build",
+        "pass",
+        {"commit": git_short_sha, "job": job_label, "build": matched.get("number"), "result": result, "url": build_url},
+    )
     print(
         "[verify-jenkins-build] OK: "
         f"commit={git_short_sha} "
@@ -1705,6 +2531,7 @@ def cmd_verify_api_docs(args: argparse.Namespace) -> None:
     missing = [p for p in [api_doc, change_log] if not p.exists()]
     if missing:
         raise APError("Missing API docs: " + ", ".join([str(p) for p in missing]))
+    _record_evidence(repo, cfg, "verify_api_docs", "pass", {"api_doc": str(api_doc), "api_change_log": str(change_log)})
     print(f"[verify-api-docs] OK: {api_doc} + {change_log}")
 
 
@@ -1754,6 +2581,13 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
             f.write("\n")
         f.write("\n".join(lines))
         f.write("\n")
+    _record_evidence(
+        repo,
+        cfg,
+        "record_closure",
+        "pass",
+        {"task_id": task_id, "result": args.result, "commit": commit_value, "structure_check": structure_check},
+    )
     print(f"[record-closure] OK: {closure_log}")
 
 
@@ -1909,6 +2743,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--bridges", action="store_true")
     s.set_defaults(func=cmd_install)
 
+    s = sp.add_parser("upgrade")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_upgrade)
+
+    s = sp.add_parser("baseline")
+    baseline_sp = s.add_subparsers(dest="baseline_cmd", required=True)
+    b = baseline_sp.add_parser("init")
+    b.add_argument("--write", action="store_true")
+    b.add_argument("--force", action="store_true")
+    b.add_argument("--update-config", action="store_true")
+    b.add_argument("--json", action="store_true")
+    b.set_defaults(func=cmd_baseline_init)
+
     s = sp.add_parser("gen-summary")
     s.add_argument("task_id")
     s.add_argument("--title")
@@ -1928,11 +2777,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_impact)
 
+    s = sp.add_parser("classify")
+    s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--base")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_classify)
+
     s = sp.add_parser("structure-check")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_structure_check)
+
+    s = sp.add_parser("gate-profile")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_gate_profile)
 
     s = sp.add_parser("light-gate")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")

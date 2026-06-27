@@ -62,6 +62,18 @@ function resolveTargetDir(ai, mode, destOverride){
   die(`unknown ai: ${ai}`);
 }
 
+function resolveAgentsDir(mode, destOverride, multiTarget){
+  if (destOverride) {
+    return multiTarget
+      ? path.join(destOverride, "agents")
+      : path.join(destOverride, ".agents", "agents");
+  }
+  if (mode !== "project" && mode !== "global") die(`--mode must be 'project' or 'global'`);
+  return mode === "project"
+    ? path.join(projectRoot(), ".agents", "agents")
+    : path.join(os.homedir(), ".agents", "agents");
+}
+
 function main(){
   const args = parseArgs(process.argv);
 
@@ -89,7 +101,9 @@ Examples:
 
   const here = path.dirname(fileURLToPath(import.meta.url));
   const assetSkill = path.resolve(here, "..", "assets", "skill");
+  const assetAgents = path.resolve(here, "..", "assets", "agents");
   if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
+  if (!exists(assetAgents)) die(`missing assets at ${assetAgents}`);
 
   for (const t of targets) {
     const dstOverride = args.dest
@@ -102,6 +116,16 @@ Examples:
     }
     copyDir(assetSkill, dst);
     console.log(`[autocoding] installed skill to: ${dst}`);
+
+    if (t === "codex") {
+      const agentsDst = resolveAgentsDir(args.mode, args.dest, targets.length > 1);
+      if (exists(agentsDst)) {
+        if (!args.force) die(`target exists: ${agentsDst}\nRe-run with --force to overwrite.`);
+        rmrf(agentsDst);
+      }
+      copyDir(assetAgents, agentsDst);
+      console.log(`[autocoding] installed Codex agents to: ${agentsDst}`);
+    }
   }
 
   console.log("[autocoding] done.");

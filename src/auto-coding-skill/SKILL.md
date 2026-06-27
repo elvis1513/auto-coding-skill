@@ -46,6 +46,8 @@ autocoding init --ai codex
 # or claude / all
 ```
 
+For Codex targets, this also installs the default subagent templates into `.agents/agents/`.
+
 2) Initialize docs/tooling:
 
 ```bash

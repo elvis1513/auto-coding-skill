@@ -23,9 +23,15 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.2
+
+- Added default Codex subagent templates under `.agents/agents`.
+- `autocoding init --ai codex` and `autocoding init --ai all` now install the Codex agent templates automatically.
+- Updated Codex agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
+
 ### v2.0.1
 
-- Updated the Codex installer target from `.codex/skills` to `.agents/skills`, matching current Codex global and project skill discovery.
+- Updated the Codex installer target to `.agents/skills`, matching current Codex global and project skill discovery.
 
 ### v0.3.1
 
@@ -112,6 +118,8 @@ workflow:
 autocoding init --ai all
 # or: --ai codex / --ai claude
 ```
+
+For Codex installs, the command also creates `.agents/agents/` with the default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents.
 
 2. Initialize docs and local scripts:
 

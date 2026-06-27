@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const srcSkill = path.join(repoRoot, "src", "auto-coding-skill");
 const dstSkill = path.join(repoRoot, "cli", "assets", "skill");
+const srcAgents = path.join(repoRoot, "src", "agents");
+const dstAgents = path.join(repoRoot, "cli", "assets", "agents");
 
 function rmrf(p){ fs.rmSync(p, { recursive:true, force:true }); }
 function shouldSkip(name){
@@ -23,4 +25,7 @@ function copyDir(src, dst){
 
 rmrf(dstSkill);
 copyDir(srcSkill, dstSkill);
+rmrf(dstAgents);
+copyDir(srcAgents, dstAgents);
 console.log("[sync-assets] updated cli/assets/skill from src/auto-coding-skill");
+console.log("[sync-assets] updated cli/assets/agents from src/agents");

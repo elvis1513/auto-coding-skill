@@ -381,16 +381,16 @@ Compatibility:
   if (args.ai) console.warn("[autocoding] --ai is deprecated and ignored; installing generic .agents.");
 
   const { skillDir, agentsDir } = resolveInstallDirs(args.mode, args.dest);
+  const existingTargets = [skillDir, agentsDir].filter(target => exists(target));
+  if (existingTargets.length && !args.force) {
+    die(`target exists: ${existingTargets.join(", ")}\nRe-run with --force to overwrite managed templates.`);
+  }
   if (exists(skillDir)) {
-    if (!args.force) die(`target exists: ${skillDir}\nRe-run with --force to overwrite.`);
     rmrf(skillDir);
   }
   copyDir(assetSkill, skillDir);
   console.log(`[autocoding] installed skill to: ${skillDir}`);
 
-  if (exists(agentsDir) && !args.force) {
-    die(`target exists: ${agentsDir}\nRe-run with --force to overwrite managed templates.`);
-  }
   copyDir(assetAgents, agentsDir);
   console.log(`[autocoding] installed agents to: ${agentsDir}`);
 

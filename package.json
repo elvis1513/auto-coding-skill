@@ -8,13 +8,14 @@
   },
   "files": [
     "cli/src",
+    "cli/tests",
     "cli/assets/skill",
     "cli/assets/agents",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node -c cli/src/index.js && node -c cli/src/sync-assets.js && python3 -c \"import ast, pathlib; files = ['src/auto-coding-skill/scripts/ap.py', 'src/auto-coding-skill/scripts/core.py', 'src/auto-coding-skill/scripts/http_checks.py', 'cli/assets/skill/scripts/ap.py', 'cli/assets/skill/scripts/core.py', 'cli/assets/skill/scripts/http_checks.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-grammar-ok')\" && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('src/agents').glob('*.toml')) + sorted(pathlib.Path('cli/assets/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('agent-toml-ok')\" && npm run check:assets && find src cli -type d -name '__pycache__' -prune -exec rm -rf {} +",
+    "test": "node -c cli/src/index.js && node -c cli/src/sync-assets.js && node -c cli/tests/index.test.js && npm run check:assets && node cli/tests/index.test.js && python3 -c \"import ast, pathlib; files = ['src/auto-coding-skill/scripts/ap.py', 'src/auto-coding-skill/scripts/core.py', 'src/auto-coding-skill/scripts/http_checks.py', 'cli/assets/skill/scripts/ap.py', 'cli/assets/skill/scripts/core.py', 'cli/assets/skill/scripts/http_checks.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-grammar-ok')\" && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('src/agents').glob('*.toml')) + sorted(pathlib.Path('cli/assets/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('agent-toml-ok')\" && find src cli -type d -name '__pycache__' -prune -exec rm -rf {} +",
     "check:assets": "node cli/src/sync-assets.js --check",
     "sync-assets": "node cli/src/sync-assets.js",
     "release:check": "npm run sync-assets && npm run test && npm pack --dry-run"

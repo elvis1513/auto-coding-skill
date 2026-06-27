@@ -61,7 +61,7 @@ For Codex targets, this also installs the default subagent templates into `.agen
 python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```
 
-Existing projects should use upgrade mode before replacing tracked docs:
+`install` refuses to overwrite existing generated docs/tooling unless `--force` is passed. Existing projects should use upgrade mode before replacing tracked docs:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py upgrade --dry-run

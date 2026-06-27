@@ -177,6 +177,8 @@ This creates `.agents/skills/auto-coding-skill` and `.agents/agents/` with the d
 python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```
 
+`install` refuses to overwrite existing generated docs/tooling unless `--force` is passed. For existing projects, use `upgrade` instead of rerunning initialization blindly.
+
 3. Fill only one file manually:
 
 - `docs/ENGINEERING.md` frontmatter
@@ -295,6 +297,8 @@ python3 docs/tools/autopipeline/ap.py upgrade --write
 ```
 
 `upgrade` updates autopipeline scripts, syncs project-local `.agents` skill copies when present, creates missing template docs, and merges only missing frontmatter keys into `docs/ENGINEERING.md`.
+
+Use `install --force` only when intentionally resetting generated docs/tooling.
 
 ## Baseline And Evidence
 

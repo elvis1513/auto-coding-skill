@@ -30,6 +30,14 @@ from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_confi
 
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
 _INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX"}
+_GENERATED_NOISE_PATTERNS = [
+    "__pycache__/**",
+    "**/__pycache__/**",
+    "*.pyc",
+    "**/*.pyc",
+    ".DS_Store",
+    "**/.DS_Store",
+]
 
 
 def _skill_root() -> Path:
@@ -466,24 +474,57 @@ def _assert_jenkins_build_success(build: dict, identifier: str, allow_no_deploy:
     return result, description
 
 
+def _copy_conflicts(src: Path, dst: Path) -> list[Path]:
+    if src.is_file():
+        return [dst] if dst.exists() else []
+    conflicts: list[Path] = []
+    for path in _iter_files(src):
+        target = dst / path.relative_to(src)
+        if target.exists():
+            conflicts.append(target)
+    return conflicts
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
 
-    copy_tree(templates / "docs", repo / "docs")
-    copy_tree(templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md")
+    planned_copies = [
+        (templates / "docs", repo / "docs"),
+        (templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md"),
+    ]
 
     if args.bridges:
-        copy_tree(templates / "bridges", repo)
+        planned_copies.append((templates / "bridges", repo))
 
     tools_dir = repo / "docs" / "tools" / "autopipeline"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    copy_tree(Path(__file__).resolve(), tools_dir / "ap.py")
-    copy_tree(Path(__file__).resolve().parent / "core.py", tools_dir / "core.py")
-    copy_tree(Path(__file__).resolve().parent / "http_checks.py", tools_dir / "http_checks.py")
+    planned_copies.extend([
+        (Path(__file__).resolve(), tools_dir / "ap.py"),
+        (Path(__file__).resolve().parent / "core.py", tools_dir / "core.py"),
+        (Path(__file__).resolve().parent / "http_checks.py", tools_dir / "http_checks.py"),
+    ])
+
+    conflicts: list[Path] = []
+    for src, dst in planned_copies:
+        conflicts.extend(_copy_conflicts(src, dst))
+    if conflicts and not args.force:
+        conflict_list = "\n".join(f"- {_repo_rel(repo, path)}" for path in conflicts[:20])
+        extra = "" if len(conflicts) <= 20 else f"\n- ... and {len(conflicts) - 20} more"
+        raise APError(
+            "Install would overwrite existing files:\n"
+            f"{conflict_list}{extra}\n"
+            "For existing projects, run `ap.py upgrade --dry-run` then `ap.py upgrade --write`. "
+            "Use `install --force` only when intentionally resetting generated docs/tooling."
+        )
+
+    for src, dst in planned_copies:
+        copy_tree(src, dst)
 
     print(f"[install] OK: scaffold installed into {repo}")
-    print("[install] Next: edit docs/ENGINEERING.md frontmatter, fill all platform credentials, and commit that file into Git.")
+    print(
+        "[install] Next: edit docs/ENGINEERING.md frontmatter, set verification.*_required, "
+        "fill only enabled environment fields, and commit that file into Git."
+    )
 
 
 def cmd_upgrade(args: argparse.Namespace) -> None:
@@ -1015,11 +1056,17 @@ def _path_matches(path: str, patterns: list) -> bool:
     return False
 
 
+def _is_generated_noise_path(path: str) -> bool:
+    return _path_matches(path, _GENERATED_NOISE_PATTERNS)
+
+
 def _unique_paths(paths: list[str]) -> list[str]:
     seen = set()
     out = []
     for path in paths:
         normalized = path.replace("\\", "/").strip()
+        if _is_generated_noise_path(normalized):
+            continue
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
@@ -1051,6 +1098,25 @@ def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
     paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
     paths.extend(_git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]))
     return _unique_paths(paths)
+
+
+def _cleanup_generated_noise(repo: Path) -> None:
+    candidates = [
+        rel for rel in _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"])
+        if _is_generated_noise_path(rel)
+    ]
+    for rel in candidates:
+        path = repo / rel
+        if path.is_file():
+            path.unlink(missing_ok=True)
+    for rel in sorted(candidates, key=lambda item: item.count("/"), reverse=True):
+        parent = (repo / rel).parent
+        while parent != repo and parent.name == "__pycache__":
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 def _docs_only(paths: list[str]) -> bool:
@@ -1502,7 +1568,7 @@ def _added_lines_by_path(repo: Path, base_ref: str = "") -> dict[str, int]:
             if path:
                 added[path] = added.get(path, 0) + count
 
-    for path in _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]):
+    for path in _unique_paths(_git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"])):
         lines = _read_text_lines(repo, path)
         if lines is not None:
             added[path] = added.get(path, 0) + len(lines)
@@ -3197,6 +3263,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             structure_check=args.structure_check or structure_check_status,
         )
 
+    _cleanup_generated_noise(repo)
     run(["git", "add", "-A"], cwd=repo)
     diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
     if not diff:
@@ -3262,6 +3329,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             follow_up=args.follow_up or "none",
             structure_check=args.structure_check or structure_check_status,
         )
+        _cleanup_generated_noise(repo)
         run(["git", "add", "-A"], cwd=repo)
         closure_diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
         if closure_diff:
@@ -3289,6 +3357,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("install")
     s.add_argument("--bridges", action="store_true")
+    s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_install)
 
     s = sp.add_parser("upgrade")

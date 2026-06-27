@@ -136,11 +136,55 @@ function testUpgradeCleansManagedBridgeExtrasOnly() {
   assert(exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt")), "non-managed extra should remain");
 }
 
+function testLedgerArchiveRecognizesSettledStatuses() {
+  const repo = tmpdir("ledger-status");
+  run("git", ["init", "-q"], { cwd: repo });
+  run("node", [cli, "init", "--force"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  writeFile(path.join(repo, "docs", "tasks", "taskbook.md"), [
+    "# Taskbook",
+    "",
+    "## Task T001 - superseded work",
+    "- Status: Superseded by T002",
+    "",
+    "## Task T002 - external dependency",
+    "- Status: External Dependency",
+    "",
+    "## Task T003 - deployed work",
+    "- Status: Deployed / Jenkins #123 SUCCESS",
+    "",
+    "## Task T004 - local pass",
+    "- Status: Local PASS，待生产迁移窗口",
+    "",
+  ].join("\n"));
+  writeFile(path.join(repo, "docs", "tasks", "closure-log.md"), [
+    "# Closure Log",
+    "",
+    "## T001 - superseded work",
+    "- Result: DEV-CLOSED",
+    "",
+    "## T002 - external dependency",
+    "- Result: PARTIAL",
+    "",
+    "## T003 - deployed work",
+    "- Result: PASS",
+    "",
+    "## T004 - local pass",
+    "- Result: DEV-CLOSED",
+    "",
+  ].join("\n"));
+  const result = run("python3", [assetAp, "--repo", repo, "docs-ledger-archive", "--plan", "--period", "2026-06", "--json"]);
+  const parsed = JSON.parse(result.stdout);
+  assert(parsed.counts.taskbook_sections === 4, `settled task sections should archive: ${result.stdout}`);
+  assert(parsed.active_task_conflicts.length === 0, `settled statuses should not conflict: ${result.stdout}`);
+}
+
 testPreflightAvoidsPartialInstall();
 testDestVariants();
 testSyncCreatesScaffoldAndStatusConverges();
 testForcePreservesCustomAgents();
 testBridgeIsGeneric();
 testUpgradeCleansManagedBridgeExtrasOnly();
+testLedgerArchiveRecognizesSettledStatuses();
 
 console.log("cli-installer-regression-ok");

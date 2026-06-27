@@ -22,6 +22,11 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.1.2
+
+- Fixed `docs-ledger-archive` so settled task states such as `Superseded by ...`, `External Dependency`, `Deployed`, `Completed`, `Archived`, `Local PASS`, and `Local Verified` are recognized as archivable instead of blocking physical ledger cleanup.
+- Added a package-safe regression test for those docs ledger archive states.
+
 ### v2.1.1
 
 - Removed client-specific init targets from the npm CLI; installs now target the shared `.agents` layout only.

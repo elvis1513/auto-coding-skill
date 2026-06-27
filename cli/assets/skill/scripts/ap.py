@@ -1880,18 +1880,31 @@ _TASK_RESULT_RE = re.compile(r"(?:^|\n)\s*-\s*Result\s*[:：]\s*(DEV-CLOSED|PASS
 _TASK_STATUS_RE = re.compile(r"(?:^|\n)\s*-\s*(?:状态|Status)\s*[:：]\s*([^|\n]+)", re.IGNORECASE)
 _DESIGN_TASK_FILE_RE = re.compile(r"^([Tt][A-Za-z0-9]*\d+(?:-\d+)?)")
 _CLOSED_TASK_STATUSES = {
+    "archived",
+    "completed",
+    "deployed",
     "done",
     "closed",
     "dev-closed",
+    "external",
     "pass",
     "passed",
     "fail",
     "failed",
     "partial",
+    "superseded",
     "完成",
     "已完成",
     "关闭",
     "已关闭",
+    "已部署",
+    "已归档",
+    "外部依赖",
+    "已转外部依赖",
+    "被替代",
+    "已替代",
+    "废弃",
+    "已废弃",
 }
 
 
@@ -1958,8 +1971,16 @@ def _is_closed_task_section(section: dict) -> bool:
     if not status_match:
         return False
     status = status_match.group(1).strip()
-    status = re.split(r"[\s/，,;；。]+", status, maxsplit=1)[0].strip().lower()
-    return status in _CLOSED_TASK_STATUSES
+    normalized = re.sub(r"\s+", " ", status).strip().lower()
+    first_token = re.split(r"[\s/，,;；。]+", normalized, maxsplit=1)[0].strip()
+    if first_token in _CLOSED_TASK_STATUSES or normalized in _CLOSED_TASK_STATUSES:
+        return True
+    return normalized.startswith((
+        "local pass",
+        "local verified",
+        "本地通过",
+        "本地验证通过",
+    ))
 
 
 def _append_archive_sections(path: Path, title: str, period: str, sections: list[dict]) -> bool:

@@ -25,6 +25,9 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ### Unreleased
 
+- Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
+- Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.
+- Added generic `--ci-build` / `--ci-failure` aliases for closure commands while keeping legacy Jenkins flags compatible.
 - Added `ap.py docs-ledger-check` to prevent documentation ledgers from growing without a real archive.
 - Added `ap.py docs-ledger-archive --plan|--write [--period 2026-06]` for generic physical archiving of closed taskbook entries, non-conflicting closure records, and matching top-level DD files.
 - `doctor` now runs docs ledger health checks by default: large `taskbook.md`, `closure-log.md`, or active `docs/design/T*.md` sets require physical archives.
@@ -514,7 +517,7 @@ Manual verification commands remain available:
 python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
 python3 docs/tools/autopipeline/ap.py wait-health --scope target
 python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
-python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --jenkins <build-url> --result PASS --verification "health check" --verification "key api" --verification "key page"
+python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --ci-build <build-url-or-skipped> --result PASS --verification "health check" --verification "key api" --verification "key page"
 ```
 
 Available on-demand commands:

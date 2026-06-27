@@ -191,6 +191,14 @@ docs:
   closure_log: "docs/tasks/closure-log.md"
   evidence_log: "docs/tasks/evidence.jsonl"
   design_dir: "docs/design"
+  task_archive_dir: "docs/tasks/archives"
+  design_archive_dir: "docs/archive/design"
+  archive_index: "docs/tasks/archive-index.md"
+  ledger_check_enabled: true
+  ledger_block_on_exceed: true
+  active_taskbook_max_lines: 1200
+  active_closure_log_max_lines: 800
+  active_design_max_files: 120
   review_dir: "docs/reviews"
   health_baseline: "docs/reviews/project-health-baseline.md"
   optimization_backlog: "docs/reviews/optimization-backlog.md"
@@ -239,6 +247,8 @@ docs:
 - `structure.layer_rules`：通用分层 import 边界检查；项目可按技术栈细化路径
 - `optimization.*`：健康基线感知的优化闭环口径，避免重复把已接受债务判定为当前未完成
 - `docs.evidence_log`：结构化证据 JSONL，记录 doctor / gate / verify / closure 等实际执行结果
+- `docs.task_archive_dir` / `docs.design_archive_dir` / `docs.archive_index`：文档账本物理归档目录和导航索引；索引不能替代归档
+- `docs.active_taskbook_max_lines` / `docs.active_closure_log_max_lines` / `docs.active_design_max_files`：活跃账本预算，超过后必须归档瘦身
 - `docs.health_baseline` / `docs.optimization_backlog` / `docs.structure_standard` / `docs.adr_dir`：项目结构治理文档位置
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
@@ -287,6 +297,8 @@ docs:
 - `structure.allow_large_files`：生成物、供应商代码、构建产物等允许超长或跳过结构检查的路径
 - `structure.accepted_debt_paths`：已记录为接受债务的历史大文件；只豁免历史体量，不豁免继续大幅新增
 - `optimization.completion_policy`：默认 `baseline-aware`，表示“优化完成”按本轮范围和已记录基线判断，不等于仓库没有任何可优化点
+- `docs.ledger_check_enabled`：默认启用文档账本健康检查
+- `docs.ledger_block_on_exceed`：默认阻塞超过预算的活跃账本；仅迁移期才允许临时关闭
 - `runtime.*`：仅在本地运行诊断时使用
 - `commands.build` / `commands.test` / `commands.quick_test` / `commands.lint` / `commands.typecheck` / `commands.format`：按项目实际情况保留
 
@@ -296,18 +308,22 @@ docs:
 
 1) `docs/ENGINEERING.md`
 2) `docs/tasks/taskbook.md`
-3) `docs/design/**`
-4) `docs/interfaces/api.md`
-5) `docs/interfaces/api-change-log.md`
-6) `docs/testing/regression-matrix.md`
-7) `docs/bugs/bug-list.md`
-8) `docs/tasks/closure-log.md`
-9) `docs/tasks/summaries/**`
-10) `docs/deployment/**`
-11) 代码实现
+3) `docs/tasks/archives/**`
+4) `docs/design/**`
+5) `docs/archive/design/**`
+6) `docs/interfaces/api.md`
+7) `docs/interfaces/api-change-log.md`
+8) `docs/testing/regression-matrix.md`
+9) `docs/bugs/bug-list.md`
+10) `docs/tasks/closure-log.md`
+11) `docs/tasks/summaries/**`
+12) `docs/deployment/**`
+13) 代码实现
 
 说明：
 - `closure-log.md` 是每个任务默认必须留下的轻量闭环记录。
+- `taskbook.md`、`closure-log.md` 和顶层 `docs/design/T*.md` 是活跃账本，不是永久历史仓库。超过预算时必须把已关闭历史内容物理归档到 `docs/tasks/archives/**` 和 `docs/archive/design/**`。
+- `docs/tasks/archive-index.md` 只用于导航归档位置；只有索引、没有物理归档，不算完成账本瘦身。
 - `summaries/**` 只用于跨模块、高风险、阶段性里程碑、需要完整复盘的任务。
 - `deployment/**` 只用于真实部署记录、手工发布或高风险发布场景。
 
@@ -416,7 +432,9 @@ docs:
    - 发布、跨模块重构、架构调整默认执行：`python3 docs/tools/autopipeline/ap.py structure-check --scope full`
    - 首次落基线：`python3 docs/tools/autopipeline/ap.py baseline init --write --update-config`
    - 项目升级预检：`python3 docs/tools/autopipeline/ap.py upgrade --dry-run`
+   - 文档账本健康检查：`python3 docs/tools/autopipeline/ap.py docs-ledger-check`
    - 门禁耗时画像：`python3 docs/tools/autopipeline/ap.py gate-profile`
+   - `doctor` 默认纳入文档账本健康检查；`light-gate` 会先跑 `doctor`，因此活跃账本超预算会阻塞后续任务，避免“只建索引、不归档瘦身”的状态长期存在。
    - `light-gate` 在 `structure.enabled: true` 时会自动纳入结构检查；如项目需要更强规则，可配置 `commands.structure_check` 覆盖内置实现。
 
 ---

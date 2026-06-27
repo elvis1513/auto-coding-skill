@@ -23,6 +23,13 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### Unreleased
+
+- Added `ap.py docs-ledger-check` to prevent documentation ledgers from growing without a real archive.
+- `doctor` now runs docs ledger health checks by default: large `taskbook.md`, `closure-log.md`, or active `docs/design/T*.md` sets require physical archives.
+- Added `docs.task_archive_dir`, `docs.design_archive_dir`, `docs.archive_index`, and active ledger budget settings to `docs/ENGINEERING.md`.
+- Clarified that `archive-index.md` is only navigation; it does not replace monthly or legacy physical archives.
+
 ### v2.1.0
 
 - Added project upgrade support: `ap.py upgrade --dry-run|--write` safely syncs tooling and merges missing `docs/ENGINEERING.md` keys without overwriting existing values.
@@ -252,6 +259,7 @@ Useful commands:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py classify --scope auto
+python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py structure-check --scope full
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
@@ -262,6 +270,8 @@ python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 
 `structure-check` is intentionally generic. Project-specific paths and stricter rules belong in `docs/ENGINEERING.md` under `structure.*`, `optimization.*`, and optional `commands.structure_check`.
 Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
+
+`docs-ledger-check` is intentionally separate from `structure-check`. It treats `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` as active working sets. When they exceed `docs.active_*` budgets, the fix is physical archiving under `docs.task_archive_dir` / `docs.design_archive_dir`; `docs.archive_index` is only a navigation index and does not count as archive slimming.
 
 ## Project Upgrade
 
@@ -294,6 +304,7 @@ Execution evidence is written as JSONL:
 - `.local/auto-coding-skill/gate-profile.jsonl`
 
 Use `python3 docs/tools/autopipeline/ap.py gate-profile` to summarize command duration and failure history.
+Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` to verify that active docs ledgers remain small enough for fast lookup.
 
 ## Multi-project Sync
 
@@ -342,6 +353,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 ## Default Gate Policy
 - Default local gate is lightweight only.
 - Use `python3 docs/tools/autopipeline/ap.py classify --scope auto` to classify risk, required docs, verification surfaces, and recommended commands.
+- Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` when docs/task ledgers grow; do not treat `archive-index.md` as a substitute for physical archives.
 - Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
 - Use `python3 docs/tools/autopipeline/ap.py structure-check --scope auto` to catch file growth, large-file extension, and missing structure baseline docs.
 - Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.
@@ -378,6 +390,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 - How to record:
   - Every task writes scope, risk, impact area, minimal design note, acceptance, evidence links.
   - For code changes, record structure placement, reuse check, and whether ADR is needed.
+  - Keep this file active-only. Closed history belongs under `docs/tasks/archives/**`; an index-only file is not enough.
 
 ### 3) docs/tasks/closure-log.md
 - Purpose: default lightweight closure record.
@@ -385,6 +398,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
   - Append one record per task.
   - Required fields: task, commit, Jenkins build, target env verification, structure check, result, follow-up.
   - If Jenkins failed then was fixed, also record failure reason and fix commit.
+  - Keep this file active-only. Historical closure records belong under `docs/tasks/archives/**`.
 
 ### 4) docs/architecture/
 - Files:
@@ -407,6 +421,14 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 - How to record:
   - Small changes do not need a standalone DD file.
   - Higher-risk changes create `docs/design/<TASK_ID>-<slug>.md`.
+  - Keep top-level `docs/design/T*.md` active-only. Historical DDs belong under `docs/archive/design/**`.
+
+### 6.5) docs/tasks/archives/ and docs/archive/design/
+- Purpose: physical history archives for closed taskbook entries, closure records, and old DDs.
+- Rule:
+  - Archive by period or legacy bucket when active ledgers exceed `docs.active_*` budgets.
+  - `docs/tasks/archive-index.md` may summarize and link archives, but it is not the archive itself.
+  - `doctor` blocks over-budget active ledgers when `docs.ledger_block_on_exceed: true`.
 
 ### 7) docs/interfaces/
 - Files:
@@ -483,6 +505,7 @@ Available on-demand commands:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py verify-api-docs
 python3 docs/tools/autopipeline/ap.py verify-jenkins
 python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /

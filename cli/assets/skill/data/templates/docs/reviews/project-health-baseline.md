@@ -15,6 +15,9 @@
 | Area | Current state | Accepted because | Review date |
 | --- | --- | --- | --- |
 | <module/path> |  |  |  |
+| `docs/tasks/taskbook.md` | active ledger, <= configured line budget | History is archived under `docs/tasks/archives/**` | YYYY-MM-DD |
+| `docs/tasks/closure-log.md` | active closure ledger, <= configured line budget | History is archived under `docs/tasks/archives/**` | YYYY-MM-DD |
+| `docs/design/` | active DDs only, <= configured file budget | Historical DDs are archived under `docs/archive/design/**` | YYYY-MM-DD |
 
 ## 2. Closed Optimization Scope
 
@@ -44,7 +47,7 @@
 An optimization task is complete when all are true:
 
 - The scoped P0/P1/P2 items listed for this task are closed.
-- Local gate passed, including structure check when enabled.
+- Local gate passed, including docs ledger and structure checks when enabled.
 - No new unclassified P0/P1 was introduced.
 - Remaining P2/P3 items are either in `docs/reviews/optimization-backlog.md` or accepted debt above.
 - Review output says explicitly whether the project meets this baseline.

@@ -18,7 +18,7 @@ developer_instructions = """
 8. 如果修改依赖外部 API / 版本行为，先让 docs_researcher / 文档 MCP 兜底确认。
 9. 如果修改影响 UI，交给 browser_debugger 或主代理做真实浏览器验证。
 10. 如果修改涉及鉴权、权限、支付、文件上传下载、部署、依赖或数据边界，交给 reviewer / 安全能力做只读复核。
-11. 修改后运行聚焦门禁：优先项目 light gate，其次 structure-check、相关测试、typecheck、lint、git diff --check，并确保 evidence.jsonl 记录实际执行。
+11. 修改后运行聚焦门禁：优先项目 light gate，其次 docs-ledger-check、structure-check、相关测试、typecheck、lint、git diff --check，并确保 evidence.jsonl 记录实际执行。
 12. 修改后输出：
    - 修改文件
    - 修改点

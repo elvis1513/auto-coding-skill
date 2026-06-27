@@ -15,6 +15,7 @@
 | ID | Priority | Status | Scope | Item | Reason | Acceptance | Last reviewed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OPT-000 | P2 | open | `<path/module>` |  |  |  | YYYY-MM-DD |
+| LEDGER-000 | P2 | open | `docs/tasks`, `docs/design` | Archive active ledgers when they exceed `docs.active_*` budgets | Keeps project context searchable and prevents giant task/closure/DD files | `ap.py docs-ledger-check` passes | YYYY-MM-DD |
 
 ## Review Rules
 

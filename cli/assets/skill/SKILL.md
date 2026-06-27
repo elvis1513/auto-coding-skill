@@ -163,6 +163,7 @@ Default commands:
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py impact --scope auto
+python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py light-gate --scope full
@@ -197,6 +198,8 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - For structural reviews, read `docs/reviews/project-health-baseline.md` and `docs/reviews/optimization-backlog.md` first. Do not re-report accepted debt as a fresh blocker; report only new, worsened, unrecorded P0/P1, or backlog items that now deserve priority upgrade.
 - “Optimization complete” means the scoped P0/P1/P2 work is closed, local gate passes, no new unclassified P0/P1 exists, and remaining P2/P3 work is tracked or accepted debt.
 - `baseline init` creates the first project health baseline and optimization backlog; use `--update-config` to seed `accepted_debt_paths`.
+- `docs-ledger-check` enforces active documentation ledger budgets. `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` are active working sets, not unbounded history stores.
+- When active ledger budgets are exceeded, physically archive closed history under `docs.task_archive_dir` and `docs.design_archive_dir`. `docs.archive_index` is only navigation; an index without physical archive files does not satisfy ledger health.
 - `docs/tasks/evidence.jsonl` is the machine-readable execution trail for gates, verification, and closure. Keep it aligned with closure Markdown.
 - `gate-profile` summarizes local gate duration and failure history so small-step development can keep the fast path honest.
 
@@ -210,6 +213,7 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 - `workflow.mode: dev` closes development after light gate, closure record, commit, and push.
 - `workflow.mode: verify` closes only after Jenkins and target-environment verification.
 - `doctor` should be used early to catch missing or invalid config before the first implementation loop.
+- `doctor` runs the built-in docs ledger health check by default so projects do not accumulate giant taskbooks, closure logs, or active DD directories.
 - `light-gate` now fails if no usable fast gate command is configured.
 - `doctor`, `light-gate`, and `commit-push` all fail when required environment fields are missing, placeholder-like, or syntactically invalid.
 - Do not require local Docker Compose or full local regression for every small change.

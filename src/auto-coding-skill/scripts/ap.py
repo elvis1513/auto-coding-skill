@@ -1597,6 +1597,191 @@ def _configured_structure_docs(cfg: dict) -> dict[str, str]:
     }
 
 
+def _docs_cfg(cfg: dict) -> dict:
+    value = cfg.get("docs") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _count_lines(path: Path) -> Optional[int]:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except UnicodeDecodeError:
+        return None
+    except OSError:
+        return None
+
+
+def _count_files(root: Path, pattern: str, recursive: bool = True) -> int:
+    if not root.exists() or not root.is_dir():
+        return 0
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    return sum(1 for path in iterator if path.is_file())
+
+
+def _ledger_message(blocking: list[str], warnings: list[str], block: bool, message: str) -> None:
+    if block:
+        blocking.append(message)
+    else:
+        warnings.append(message)
+
+
+def _docs_ledger_check_result(repo: Path, cfg: dict) -> dict:
+    docs_cfg = _docs_cfg(cfg)
+    enabled = _bool_config(docs_cfg.get("ledger_check_enabled"), True)
+    block_on_exceed = _bool_config(docs_cfg.get("ledger_block_on_exceed"), True)
+
+    taskbook = Path(repo, _text(docs_cfg.get("taskbook")) or "docs/tasks/taskbook.md")
+    closure_log = Path(repo, _text(docs_cfg.get("closure_log")) or "docs/tasks/closure-log.md")
+    design_dir = Path(repo, _text(docs_cfg.get("design_dir")) or "docs/design")
+    task_archive_dir = Path(repo, _text(docs_cfg.get("task_archive_dir")) or "docs/tasks/archives")
+    design_archive_dir = Path(repo, _text(docs_cfg.get("design_archive_dir")) or "docs/archive/design")
+    archive_index = Path(repo, _text(docs_cfg.get("archive_index")) or "docs/tasks/archive-index.md")
+
+    taskbook_max = _int_config(docs_cfg.get("active_taskbook_max_lines"), 1200)
+    closure_max = _int_config(docs_cfg.get("active_closure_log_max_lines"), 800)
+    design_max = _int_config(docs_cfg.get("active_design_max_files"), 120)
+
+    taskbook_lines = _count_lines(taskbook)
+    closure_lines = _count_lines(closure_log)
+    active_design_files = _count_files(design_dir, "T*.md", recursive=False)
+    task_archive_files = _count_files(task_archive_dir, "*.md", recursive=True)
+    design_archive_files = _count_files(design_archive_dir, "T*.md", recursive=True)
+    archive_index_exists = archive_index.exists()
+
+    blocking: list[str] = []
+    warnings: list[str] = []
+    exceeded: list[str] = []
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "blocking": blocking,
+            "warnings": warnings,
+        }
+
+    if taskbook_lines is not None and taskbook_max > 0 and taskbook_lines > taskbook_max:
+        exceeded.append("taskbook")
+        _ledger_message(
+            blocking,
+            warnings,
+            block_on_exceed,
+            f"docs.taskbook has {taskbook_lines} lines (max {taskbook_max}); "
+            f"physically archive closed tasks under {_repo_rel(repo, task_archive_dir)} instead of keeping an index-only ledger",
+        )
+        if task_archive_files == 0:
+            _ledger_message(
+                blocking,
+                warnings,
+                block_on_exceed,
+                f"docs.taskbook exceeds the active ledger budget but docs.task_archive_dir has no archive files: {_repo_rel(repo, task_archive_dir)}",
+            )
+
+    if closure_lines is not None and closure_max > 0 and closure_lines > closure_max:
+        exceeded.append("closure_log")
+        _ledger_message(
+            blocking,
+            warnings,
+            block_on_exceed,
+            f"docs.closure_log has {closure_lines} lines (max {closure_max}); "
+            f"physically archive historical closure entries under {_repo_rel(repo, task_archive_dir)}",
+        )
+        if task_archive_files == 0:
+            _ledger_message(
+                blocking,
+                warnings,
+                block_on_exceed,
+                f"docs.closure_log exceeds the active ledger budget but docs.task_archive_dir has no archive files: {_repo_rel(repo, task_archive_dir)}",
+            )
+
+    if design_max > 0 and active_design_files > design_max:
+        exceeded.append("design_dir")
+        _ledger_message(
+            blocking,
+            warnings,
+            block_on_exceed,
+            f"docs.design_dir has {active_design_files} top-level T*.md files (max {design_max}); "
+            f"move historical DD files under {_repo_rel(repo, design_archive_dir)}",
+        )
+        if design_archive_files == 0:
+            _ledger_message(
+                blocking,
+                warnings,
+                block_on_exceed,
+                f"docs.design_dir exceeds the active DD budget but docs.design_archive_dir has no archived T*.md files: {_repo_rel(repo, design_archive_dir)}",
+            )
+
+    if exceeded and archive_index_exists and task_archive_files == 0 and design_archive_files == 0:
+        _ledger_message(
+            blocking,
+            warnings,
+            block_on_exceed,
+            f"{_repo_rel(repo, archive_index)} exists, but no physical docs archives were found; "
+            "archive indexes are navigation aids and do not satisfy active-ledger slimming",
+        )
+
+    return {
+        "enabled": True,
+        "limits": {
+            "active_taskbook_max_lines": taskbook_max,
+            "active_closure_log_max_lines": closure_max,
+            "active_design_max_files": design_max,
+        },
+        "paths": {
+            "taskbook": _repo_rel(repo, taskbook),
+            "closure_log": _repo_rel(repo, closure_log),
+            "design_dir": _repo_rel(repo, design_dir),
+            "task_archive_dir": _repo_rel(repo, task_archive_dir),
+            "design_archive_dir": _repo_rel(repo, design_archive_dir),
+            "archive_index": _repo_rel(repo, archive_index),
+        },
+        "counts": {
+            "taskbook_lines": taskbook_lines,
+            "closure_log_lines": closure_lines,
+            "active_design_files": active_design_files,
+            "task_archive_files": task_archive_files,
+            "design_archive_files": design_archive_files,
+            "archive_index_exists": archive_index_exists,
+        },
+        "exceeded": exceeded,
+        "blocking": blocking,
+        "warnings": warnings,
+    }
+
+
+def cmd_docs_ledger_check(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    result = _docs_ledger_check_result(repo, cfg)
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        if not result.get("enabled", True):
+            print("[docs-ledger-check] disabled")
+        else:
+            counts = result.get("counts") or {}
+            print(
+                "[docs-ledger-check] "
+                f"taskbook_lines={counts.get('taskbook_lines')} "
+                f"closure_log_lines={counts.get('closure_log_lines')} "
+                f"active_design_files={counts.get('active_design_files')} "
+                f"task_archive_files={counts.get('task_archive_files')} "
+                f"design_archive_files={counts.get('design_archive_files')}"
+            )
+            _print_limited("[docs-ledger-check] blocking", result.get("blocking") or [])
+            _print_limited("[docs-ledger-check] warnings", result.get("warnings") or [])
+
+    if result.get("blocking"):
+        _record_evidence(repo, cfg, "docs_ledger_check", "fail", result)
+        raise APError(f"docs-ledger-check failed with {len(result['blocking'])} blocking issue(s)")
+
+    _record_evidence(repo, cfg, "docs_ledger_check", "pass", result)
+    if not getattr(args, "json", False) and result.get("enabled", True):
+        print("[docs-ledger-check] OK")
+
+
 def _structure_gate_enabled(cfg: dict) -> bool:
     structure_cfg = cfg.get("structure")
     if isinstance(structure_cfg, dict) and not _bool_config(structure_cfg.get("enabled"), default=True):
@@ -2375,6 +2560,12 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if runtime_enabled and not str(runtime_cfg.get("docker_compose_file") or "").strip():
         validation_errors.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
 
+    ledger_result = _docs_ledger_check_result(repo, cfg)
+    for issue in ledger_result.get("blocking") or []:
+        validation_errors.append(f"docs-ledger: {issue}")
+    for warning in ledger_result.get("warnings") or []:
+        print(f"[doctor] WARN docs-ledger: {warning}")
+
     try:
         timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)
         if timeout_s <= 0:
@@ -2793,6 +2984,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_gate_profile)
+
+    s = sp.add_parser("docs-ledger-check")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_docs_ledger_check)
 
     s = sp.add_parser("light-gate")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")

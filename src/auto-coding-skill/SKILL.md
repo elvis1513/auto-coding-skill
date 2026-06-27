@@ -53,7 +53,7 @@ The main agent always owns task framing, design decisions, integration, configur
 autocoding init --ai codex
 ```
 
-For Codex targets, this also installs the default subagent templates into `.agents/agents/`.
+For Codex targets, this also installs the managed default subagent templates into `.agents/agents/`. Existing custom agent files in `.agents/agents/` are preserved even when `--force` is used; managed template files with the same names are refreshed.
 
 2) Initialize docs/tooling:
 

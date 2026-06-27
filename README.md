@@ -25,6 +25,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ### Unreleased
 
+- `autocoding init --ai codex --force` now preserves custom files in `.agents/agents`; only managed template files are refreshed.
 - `autocoding status/sync` now treats `.agents/agents` as a shared directory: managed templates are checked and refreshed, while project-specific custom agents are preserved.
 - Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
 - Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.
@@ -173,7 +174,7 @@ workflow:
 autocoding init --ai codex
 ```
 
-This creates `.agents/skills/auto-coding-skill` and `.agents/agents/` with the default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents. Legacy `--ai claude` / `--ai all` exists only for repos that explicitly still maintain Claude copies.
+This creates `.agents/skills/auto-coding-skill` and refreshes the managed default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents in `.agents/agents/`. Existing custom files in `.agents/agents/` are preserved even with `--force`. Legacy `--ai claude` / `--ai all` exists only for repos that explicitly still maintain Claude copies.
 
 2. Initialize docs and local scripts:
 

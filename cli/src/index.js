@@ -362,7 +362,6 @@ Legacy Claude installs remain available only when a repo explicitly still mainta
       const agentsDst = resolveAgentsDir(args.mode, args.dest, targets.length > 1);
       if (exists(agentsDst)) {
         if (!args.force) die(`target exists: ${agentsDst}\nRe-run with --force to overwrite.`);
-        rmrf(agentsDst);
       }
       copyDir(assetAgents, agentsDst);
       console.log(`[autocoding] installed Codex agents to: ${agentsDst}`);

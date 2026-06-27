@@ -9,17 +9,33 @@ function die(msg){
   process.exit(1);
 }
 
+function takeValue(rest, index, flag){
+  const value = rest[index + 1];
+  if (!value || value.startsWith("--")) die(`${flag} requires a value`);
+  return value;
+}
+
 function parseArgs(argv){
   const args = { cmd: null, ai: null, mode: "project", dest: null, force: false };
   const [,, cmd, ...rest] = argv;
-  args.cmd = cmd ?? "help";
+  args.cmd = (!cmd || cmd === "-h" || cmd === "--help") ? "help" : cmd;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === "--ai") args.ai = rest[++i];
-    else if (a === "--mode") args.mode = rest[++i];
-    else if (a === "--dest") args.dest = rest[++i];
+    if (a === "--ai") {
+      args.ai = takeValue(rest, i, a);
+      i += 1;
+    }
+    else if (a === "--mode") {
+      args.mode = takeValue(rest, i, a);
+      i += 1;
+    }
+    else if (a === "--dest") {
+      args.dest = takeValue(rest, i, a);
+      i += 1;
+    }
     else if (a === "--force") args.force = true;
     else if (a === "-h" || a === "--help") args.cmd = "help";
+    else die(`unknown argument: ${a}`);
   }
   return args;
 }

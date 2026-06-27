@@ -30,6 +30,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - Updated Codex agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
 - Added concrete capability routing for MCP servers, installed skills, plugins/apps/connectors, browser tools, GitHub, Figma, security review, and artifact workflows.
 - Changed multi-agent guidance from unconditional delegation to a role model that works either as real subagents or as sequential main-agent phases.
+- Hardened CLI help/argument validation, asset sync checks, and stricter autopipeline config diagnostics.
 
 ### v2.0.1
 

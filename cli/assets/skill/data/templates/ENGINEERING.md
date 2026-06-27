@@ -122,6 +122,7 @@ docs:
 - `target_env.backend_root_password`
 - `target_env.health_base_url`
 - `target_env.health_path`
+- `jenkins.base_url`
 - `jenkins.ui_username`
 - `jenkins.ui_password`
 - `jenkins.api_user`

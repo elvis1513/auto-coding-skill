@@ -193,12 +193,12 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15, allow_404: b
                 except Exception as retry_exc:
                     raise APError(f"Jenkins API request failed after crumb retry: {url}\n{retry_exc}") from retry_exc
             else:
-                    raise APError(
-                        f"Jenkins API request failed: {url}\n"
-                        f"HTTP 403\n{body or '(empty response body)'}\n"
-                        "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
+                raise APError(
+                    f"Jenkins API request failed: {url}\n"
+                    f"HTTP 403\n{body or '(empty response body)'}\n"
+                    "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
                     "Fill jenkins.base_url in docs/ENGINEERING.md if needed."
-                    ) from exc
+                ) from exc
         else:
             raise APError(
                 f"Jenkins API request failed: {url}\n"
@@ -556,7 +556,14 @@ def _text(value: object) -> str:
 
 
 def _is_placeholder(value: object) -> bool:
-    return _text(value).upper() in _INVALID_PLACEHOLDERS
+    raw = _text(value)
+    upper = raw.upper()
+    return (
+        upper in _INVALID_PLACEHOLDERS
+        or (raw.startswith("<") and raw.endswith(">"))
+        or upper.startswith("REPLACE_")
+        or upper.startswith("YOUR_")
+    )
 
 
 def _is_explicit_fill(value: object) -> bool:
@@ -564,6 +571,8 @@ def _is_explicit_fill(value: object) -> bool:
 
 
 def _validate_url_field(errors: List[str], field: str, value: object) -> None:
+    if not _is_explicit_fill(value):
+        return
     raw = _text(value)
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -571,6 +580,8 @@ def _validate_url_field(errors: List[str], field: str, value: object) -> None:
 
 
 def _validate_path_field(errors: List[str], field: str, value: object) -> None:
+    if not _is_explicit_fill(value):
+        return
     raw = _text(value)
     if not raw.startswith("/"):
         errors.append(f"{field} must start with '/'")
@@ -603,7 +614,9 @@ def cmd_run(args: argparse.Namespace) -> None:
             "Edit docs/ENGINEERING.md frontmatter. "
             f"Available: {', '.join(commands.keys()) or '(none)'}"
         )
-    cmd = str(commands[name])
+    cmd = str(commands.get(name) or "").strip()
+    if not cmd:
+        raise APError(f"Command is blank: commands.{name}. Edit docs/ENGINEERING.md frontmatter.")
     print(f"[run] {name}: {cmd}")
     run_shell(cmd, cwd=repo)
     print(f"[run] OK: {name}")
@@ -792,7 +805,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     runtime_cfg = (cfg.get("runtime") or {})
 
     missing: List[str] = []
-    warnings: List[str] = []
+    validation_errors: List[str] = []
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
     if mode not in {"dev", "verify"}:
@@ -837,28 +850,27 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     }
     for key, path in repo_docs.items():
         if not path.exists():
-            warnings.append(f"{key} missing on disk: {path}")
+            validation_errors.append(f"{key} missing on disk: {path}")
 
-    _validate_url_field(warnings, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
-    _validate_url_field(warnings, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
-    _validate_url_field(warnings, "target_env.health_base_url", target_cfg.get("health_base_url"))
-    _validate_path_field(warnings, "target_env.health_path", target_cfg.get("health_path"))
-    _validate_url_field(warnings, "jenkins.base_url", jenkins_cfg.get("base_url"))
-    _validate_url_field(warnings, "jenkins.job_url", jenkins_cfg.get("job_url"))
+    _validate_url_field(validation_errors, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
+    _validate_url_field(validation_errors, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
+    _validate_url_field(validation_errors, "target_env.health_base_url", target_cfg.get("health_base_url"))
+    _validate_path_field(validation_errors, "target_env.health_path", target_cfg.get("health_path"))
+    _validate_url_field(validation_errors, "jenkins.base_url", jenkins_cfg.get("base_url"))
+    _validate_url_field(validation_errors, "jenkins.job_url", jenkins_cfg.get("job_url"))
 
     runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
     if runtime_enabled and not str(runtime_cfg.get("docker_compose_file") or "").strip():
-        warnings.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
+        validation_errors.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
 
     try:
         timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)
         if timeout_s <= 0:
-            warnings.append("jenkins.deploy_timeout_sec must be a positive integer")
+            validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
     except Exception:
-        warnings.append("jenkins.deploy_timeout_sec must be a positive integer")
+        validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
 
-    if warnings:
-        missing.extend([f"invalid {item}" for item in warnings])
+    missing.extend(validation_errors)
 
     if missing:
         raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing))

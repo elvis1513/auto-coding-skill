@@ -495,7 +495,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     ]
 
     if args.bridges:
-        planned_copies.append((templates / "bridges", repo))
+        planned_copies.append((templates / "bridges" / "AGENTS.md", repo / "AGENTS.md"))
 
     tools_dir = repo / "docs" / "tools" / "autopipeline"
     planned_copies.extend([
@@ -582,7 +582,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             if not (source_root / rel).exists():
                 add_action("skill", dst, "extra", "present only in project copy")
     else:
-        add_action("skill", project_skill, "missing", "run autocoding init --ai codex --mode project --force")
+        add_action("skill", project_skill, "missing", "run autocoding init --mode project --force")
 
     docs_template = templates / "docs"
     for src in _iter_files(docs_template):
@@ -803,8 +803,6 @@ def _candidate_skill_roots(repo: Path) -> list[Path]:
         _skill_root(),
         repo / ".agents" / "skills" / "auto-coding-skill",
         Path.home() / ".agents" / "skills" / "auto-coding-skill",
-        repo / ".claude" / "skills" / "auto-coding-skill",
-        Path.home() / ".claude" / "skills" / "auto-coding-skill",
     ]
 
 
@@ -813,7 +811,7 @@ def _find_skill_asset_root(repo: Path) -> Path:
         if (root / "data" / "templates").exists() and (root / "scripts" / "ap.py").exists():
             return root
     raise APError(
-        "Cannot find auto-coding-skill asset root. Run `autocoding init --ai codex --mode global --force` "
+        "Cannot find auto-coding-skill asset root. Run `autocoding init --mode global --force` "
         "or execute this command from an installed skill copy."
     )
 
@@ -965,7 +963,6 @@ _GATE_SCOPES = {"auto", "changed", "standard", "full"}
 _DOC_PATH_PATTERNS = ["*.md", "docs/**"]
 _DEFAULT_FULL_PATH_PATTERNS = [
     ".agents/**",
-    ".claude/**",
     ".github/workflows/**",
     "Jenkinsfile",
     "Jenkinsfile.*",
@@ -1288,7 +1285,6 @@ def _run_git_diff_check(repo: Path, cfg: dict) -> None:
 _DEFAULT_STRUCTURE_ALLOW_PATTERNS = [
     ".git/**",
     ".agents/skills/**",
-    ".claude/skills/**",
     ".next/**",
     ".nuxt/**",
     ".svelte-kit/**",

@@ -1,11 +1,11 @@
 ---
 name: auto-coding-skill
-description: Use for a Codex/.agents engineering workflow with dev and verify modes. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->DEV-CLOSED->push in dev mode, or full configured verification closure in verify mode.
+description: Use for a generic .agents engineering workflow with dev and verify modes. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->DEV-CLOSED->push in dev mode, or full configured verification closure in verify mode.
 ---
 
-# Auto Coding Skill (Codex + .agents)
+# Auto Coding Skill (.agents)
 
-This skill is for general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default target is Codex with `.agents/skills` and `.agents/agents`. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when configured CI/Jenkins and real target environment checks must be completed before closure.
+This skill is for general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default target is the shared `.agents/skills` and `.agents/agents` layout, independent of the client that loads it. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when configured CI/Jenkins and real target environment checks must be completed before closure.
 
 `docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory only when their verification surface is enabled. Secret fields may be represented either as direct `*_password` values for legacy projects or as `*_password_env` names that point to environment variables in the current shell. Unused environment keys should be removed from the template instead of being left as placeholders.
 
@@ -15,8 +15,7 @@ Use multi-agent roles deliberately. When the client exposes subagent tools and t
 
 ## Supported clients
 
-- Codex CLI with `.agents` paths by default.
-- Legacy Claude installs are still recognized for old repos, but do not create `.claude` project copies unless explicitly requested.
+- Any agent client or local workflow that reads the shared `.agents` layout.
 
 ## Tooling policy
 
@@ -35,7 +34,7 @@ Use the most direct authoritative capability for each task:
 
 ## Collaboration policy
 
-Use `.agents/agents` role templates as the default collaboration model for Codex installs:
+Use `.agents/agents` role templates as the default collaboration model:
 
 1) `explorer`: read-only repo discovery, call-chain tracing, config mapping, and root-cause candidates.
 2) `docs_researcher`: current external documentation, API signatures, version behavior, and compatibility checks.
@@ -50,10 +49,10 @@ The main agent always owns task framing, design decisions, integration, configur
 1) Install skill files into target repo:
 
 ```bash
-autocoding init --ai codex
+autocoding init
 ```
 
-For Codex targets, this also installs the managed default subagent templates into `.agents/agents/`. Existing custom agent files in `.agents/agents/` are preserved even when `--force` is used; managed template files with the same names are refreshed.
+This also installs the managed default subagent templates into `.agents/agents/`. Existing custom agent files in `.agents/agents/` are preserved even when `--force` is used; managed template files with the same names are refreshed.
 
 2) Initialize docs/tooling:
 
@@ -241,4 +240,4 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
 autocoding sync --projects /path/to/repo1,/path/to/repo2
 ```
 
-`status` reports drift in project-local `.agents`, managed Codex agent templates, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated skill/tooling assets and only creates missing docs; it preserves custom files in `.agents/agents` and does not overwrite project-specific `docs/ENGINEERING.md`, which should be merged through `ap.py upgrade --write`.
+`status` reports drift in project-local `.agents`, managed agent templates, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated skill/tooling assets and only creates missing docs; it preserves custom files in `.agents/agents` and does not overwrite project-specific `docs/ENGINEERING.md`, which should be merged through `ap.py upgrade --write`.

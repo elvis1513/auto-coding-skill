@@ -66,7 +66,6 @@ structure:
   block_new_responsibility_in_large_file: true
   allow_large_files:
     - ".agents/skills/**"
-    - ".claude/skills/**"
     - "docs/tools/autopipeline/**"
     - "generated/**"
     - "**/generated/**"
@@ -341,7 +340,7 @@ docs:
 
 ---
 
-## 1.5 工具使用策略（Codex / .agents 默认）
+## 1.5 工具使用策略（通用 .agents 默认）
 
 任务开始时先做能力盘点：当前可用的 MCP servers、已安装 skills、plugins / apps / connectors、浏览器控制能力、repo 脚本。能直接读取权威状态、当前文档或真实 UI 的能力，优先于手写推测。
 
@@ -384,7 +383,7 @@ docs:
 
 ---
 
-## 1.6 多 Agent 协作策略（Codex / .agents 默认）
+## 1.6 多 Agent 协作策略（通用 .agents 默认）
 
 默认使用 `.agents/agents` 中的角色模型来拆解任务；只有在当前客户端明确提供并允许子代理/多代理工具时，才实际并行派发。若运行时策略不允许子代理，则由主 agent 按同一角色顺序串行完成，不假装并行。
 

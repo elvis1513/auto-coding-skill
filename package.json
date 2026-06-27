@@ -1,7 +1,7 @@
 {
   "name": "@elvis1513/auto-coding-skill",
   "version": "2.1.0",
-  "description": "CLI installer for a Codex/.agents engineering workflow with optional CI/Jenkins and target-environment verification.",
+  "description": "CLI installer for a generic .agents engineering workflow with optional CI/Jenkins and target-environment verification.",
   "type": "module",
   "bin": {
     "autocoding": "cli/src/index.js"
@@ -24,7 +24,7 @@
     "access": "public"
   },
   "keywords": [
-    "codex",
+    "agents",
     "skill",
     "automation",
     "engineering",

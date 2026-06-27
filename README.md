@@ -2,8 +2,7 @@
 
 Engineering workflow skill for:
 
-- Codex CLI with `.agents` paths by default
-- Legacy Claude installs only when explicitly requested
+- shared `.agents` skills and role templates
 
 This skill targets general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default `dev` mode is optimized for fast development: light gate, early closure record, commit, push, then move to the next task. Switch to `verify` mode when configured CI/Jenkins and target-environment evidence must be completed before closure.
 
@@ -25,7 +24,9 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ### Unreleased
 
-- `autocoding init --ai codex --force` now preserves custom files in `.agents/agents`; only managed template files are refreshed.
+- Removed client-specific init targets from the npm CLI; installs now target the shared `.agents` layout only.
+- `ap.py install --bridges` now creates a generic `AGENTS.md` bridge instead of client-named bridge files.
+- `autocoding init --force` now preserves custom files in `.agents/agents`; only managed template files are refreshed.
 - `autocoding status/sync` now treats `.agents/agents` as a shared directory: managed templates are checked and refreshed, while project-specific custom agents are preserved.
 - Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
 - Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.
@@ -78,16 +79,16 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ### v2.0.2
 
-- Added default Codex subagent templates under `.agents/agents`.
-- `autocoding init --ai codex` and `autocoding init --ai all` now install the Codex agent templates automatically.
-- Updated Codex agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
+- Added default subagent templates under `.agents/agents`.
+- `autocoding init` installs the managed agent templates automatically.
+- Updated agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
 - Added concrete capability routing for MCP servers, installed skills, plugins/apps/connectors, browser tools, GitHub, Figma, security review, and artifact workflows.
 - Changed multi-agent guidance from unconditional delegation to a role model that works either as real subagents or as sequential main-agent phases.
 - Hardened CLI help/argument validation, asset sync checks, and stricter autopipeline config diagnostics.
 
 ### v2.0.1
 
-- Updated the Codex installer target to `.agents/skills`, matching current Codex global and project skill discovery.
+- Updated the installer target to `.agents/skills`, matching current global and project skill discovery.
 
 ### v0.3.1
 
@@ -171,10 +172,10 @@ workflow:
 1. Install skill into project:
 
 ```bash
-autocoding init --ai codex
+autocoding init
 ```
 
-This creates `.agents/skills/auto-coding-skill` and refreshes the managed default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents in `.agents/agents/`. Existing custom files in `.agents/agents/` are preserved even with `--force`. Legacy `--ai claude` / `--ai all` exists only for repos that explicitly still maintain Claude copies.
+This creates `.agents/skills/auto-coding-skill` and refreshes the managed default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents in `.agents/agents/`. Existing custom files in `.agents/agents/` are preserved even with `--force`.
 
 2. Initialize docs and local scripts:
 
@@ -335,7 +336,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
 autocoding sync --projects /path/to/repo1,/path/to/repo2
 ```
 
-`status` reports drift in `.agents`, managed Codex agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, preserves custom files in `.agents/agents`, and leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
+`status` reports drift in `.agents`, managed agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, preserves custom files in `.agents/agents`, and leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
 
 ## AGENTS.md Constraint Example
 

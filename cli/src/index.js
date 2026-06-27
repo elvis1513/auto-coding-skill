@@ -252,35 +252,30 @@ function syncProject(project, assetSkill, assetAgents, dryRun){
 
 function projectRoot(){ return process.cwd(); }
 
-function resolveTargetDir(ai, mode, destOverride){
-  if (destOverride) return destOverride;
+function resolveInstallDirs(mode, destOverride){
   if (mode !== "project" && mode !== "global") die(`--mode must be 'project' or 'global'`);
 
-  if (ai === "claude") {
-    return mode === "project"
-      ? path.join(projectRoot(), ".claude", "skills", "auto-coding-skill")
-      : path.join(os.homedir(), ".claude", "skills", "auto-coding-skill");
-  }
-
-  if (ai === "codex") {
-    return mode === "project"
-      ? path.join(projectRoot(), ".agents", "skills", "auto-coding-skill")
-      : path.join(os.homedir(), ".agents", "skills", "auto-coding-skill");
-  }
-
-  die(`unknown ai: ${ai}`);
-}
-
-function resolveAgentsDir(mode, destOverride, multiTarget){
   if (destOverride) {
-    return multiTarget
-      ? path.join(destOverride, "agents")
-      : path.join(destOverride, ".agents", "agents");
+    const dest = path.resolve(destOverride);
+    const parent = path.dirname(dest);
+    const grandparent = path.dirname(parent);
+    if (path.basename(dest) === "auto-coding-skill" && path.basename(parent) === "skills" && path.basename(grandparent) === ".agents") {
+      return {
+        skillDir: dest,
+        agentsDir: path.join(grandparent, "agents"),
+      };
+    }
+    return {
+      skillDir: path.join(dest, ".agents", "skills", "auto-coding-skill"),
+      agentsDir: path.join(dest, ".agents", "agents"),
+    };
   }
-  if (mode !== "project" && mode !== "global") die(`--mode must be 'project' or 'global'`);
-  return mode === "project"
-    ? path.join(projectRoot(), ".agents", "agents")
-    : path.join(os.homedir(), ".agents", "agents");
+
+  const root = mode === "project" ? projectRoot() : os.homedir();
+  return {
+    skillDir: path.join(root, ".agents", "skills", "auto-coding-skill"),
+    agentsDir: path.join(root, ".agents", "agents"),
+  };
 }
 
 function main(){
@@ -288,19 +283,20 @@ function main(){
 
   if (args.cmd === "help" || !args.cmd) {
     console.log(`
-autocoding - install auto-coding-skill (Codex/.agents by default)
+autocoding - install auto-coding-skill into generic .agents paths
 
 Usage:
-  autocoding init --ai claude|codex|all [--mode project|global] [--dest <path>] [--force]
+  autocoding init [--mode project|global] [--dest <repo-or-home-root>] [--force]
   autocoding status --projects <path[,path...]> [--json]
   autocoding sync --projects <path[,path...]> [--dry-run] [--json]
 
 Examples:
-  autocoding init --ai codex
+  autocoding init
   autocoding status --projects /Users/elvis/Product/xjmate,/Users/elvis/Product/geesight
   autocoding sync --projects /Users/elvis/Product/xjmate --dry-run
 
-Legacy Claude installs remain available only when a repo explicitly still maintains .claude copies.
+Compatibility:
+  --ai <value> is accepted for old scripts and ignored.
 `);
     process.exit(0);
   }
@@ -342,31 +338,21 @@ Legacy Claude installs remain available only when a repo explicitly still mainta
 
   if (args.cmd !== "init") die(`unknown command: ${args.cmd}`);
 
-  const ai = (args.ai ?? "").toLowerCase();
-  const targets = ai === "all" ? ["claude", "codex"] : [ai];
-  if (!(["claude", "codex", "all"].includes(ai))) die(`--ai must be claude|codex|all`);
+  if (args.ai) console.warn("[autocoding] --ai is deprecated and ignored; installing generic .agents.");
 
-  for (const t of targets) {
-    const dstOverride = args.dest
-      ? (targets.length > 1 ? path.join(args.dest, t) : args.dest)
-      : null;
-    const dst = resolveTargetDir(t, args.mode, dstOverride);
-    if (exists(dst)) {
-      if (!args.force) die(`target exists: ${dst}\nRe-run with --force to overwrite.`);
-      rmrf(dst);
-    }
-    copyDir(assetSkill, dst);
-    console.log(`[autocoding] installed skill to: ${dst}`);
-
-    if (t === "codex") {
-      const agentsDst = resolveAgentsDir(args.mode, args.dest, targets.length > 1);
-      if (exists(agentsDst)) {
-        if (!args.force) die(`target exists: ${agentsDst}\nRe-run with --force to overwrite.`);
-      }
-      copyDir(assetAgents, agentsDst);
-      console.log(`[autocoding] installed Codex agents to: ${agentsDst}`);
-    }
+  const { skillDir, agentsDir } = resolveInstallDirs(args.mode, args.dest);
+  if (exists(skillDir)) {
+    if (!args.force) die(`target exists: ${skillDir}\nRe-run with --force to overwrite.`);
+    rmrf(skillDir);
   }
+  copyDir(assetSkill, skillDir);
+  console.log(`[autocoding] installed skill to: ${skillDir}`);
+
+  if (exists(agentsDir) && !args.force) {
+    die(`target exists: ${agentsDir}\nRe-run with --force to overwrite managed templates.`);
+  }
+  copyDir(assetAgents, agentsDir);
+  console.log(`[autocoding] installed agents to: ${agentsDir}`);
 
   console.log("[autocoding] done.");
 }

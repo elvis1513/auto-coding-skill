@@ -1,13 +1,13 @@
 ---
 name: auto-coding-skill
-description: Use for a Claude/Codex engineering workflow with dev and verify modes. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->DEV-CLOSED->push in dev mode, or full Jenkins->target-env->PASS closure in verify mode.
+description: Use for a Codex/.agents engineering workflow with dev and verify modes. Initialize docs, fill docs/ENGINEERING.md once, then execute task->minimal-design->light-gate->DEV-CLOSED->push in dev mode, or full configured verification closure in verify mode.
 ---
 
-# Auto Coding Skill (Claude + Codex)
+# Auto Coding Skill (Codex + .agents)
 
-This skill is for Go backend + frontend monorepo projects that rely on Jenkins to build and deploy after push. It supports both Claude and Codex. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when Jenkins and the real target environment must be completed before closure.
+This skill is for general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default target is Codex with `.agents/skills` and `.agents/agents`. The default `dev` mode is optimized for fast development: lightweight local gate, early closure record, commit, push, then move to the next task. Use `verify` mode when configured CI/Jenkins and real target environment checks must be completed before closure.
 
-`docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory, must be filled with real values, and are committed as part of the project baseline. Secret fields may be represented either as direct `*_password` values for legacy projects or as `*_password_env` names that point to environment variables in the current shell. Unused environment keys should be removed from the template instead of being left as placeholders.
+`docs/ENGINEERING.md` is intentionally Git-tracked in this workflow. The remaining environment fields in that file are mandatory only when their verification surface is enabled. Secret fields may be represented either as direct `*_password` values for legacy projects or as `*_password_env` names that point to environment variables in the current shell. Unused environment keys should be removed from the template instead of being left as placeholders.
 
 At task start, inventory the current client capabilities before choosing a route: installed MCP servers, local skills, plugins/apps/connectors, browser/control tools, and repo scripts. Prefer those capabilities when they provide current, authoritative, or directly inspectable state.
 
@@ -15,8 +15,8 @@ Use multi-agent roles deliberately. When the client exposes subagent tools and t
 
 ## Supported clients
 
-- Claude Code
-- Codex CLI
+- Codex CLI with `.agents` paths by default.
+- Legacy Claude installs are still recognized for old repos, but do not create `.claude` project copies unless explicitly requested.
 
 ## Tooling policy
 
@@ -25,7 +25,7 @@ Use the most direct authoritative capability for each task:
 1) Local repo work: use shell, repo scripts, and `docs/tools/autopipeline/ap.py` for edits, tests, gates, git, and project-local verification.
 2) Current library/framework/API/CLI/cloud behavior: use a documentation MCP such as Context7 or the matching installed skill before coding migrations, config changes, or API integrations.
 3) Browser and UI verification: use Browser/in-app browser for localhost and app-owned sessions; use Chrome when the user's existing logged-in Chrome state is required; use Playwright for deterministic browser automation or terminal-first smoke tests; use Computer Use only for native apps or UI surfaces without a purpose-built connector.
-4) Product/design sources: use Figma, Build Web Apps, Product Design, or frontend skills when the task depends on design context, visual implementation, screenshots, or generated UI.
+4) Product/design sources: use Figma, Build Web Apps, Product Design, or frontend/product-design skills when the task depends on design context, visual implementation, screenshots, or generated UI.
 5) GitHub/PR/CI state: use GitHub connectors for PRs, issues, review comments, and Actions/CI metadata; use local git for local diff, staging, commits, and pushes.
 6) Security-sensitive changes: use reviewer/security skills or security scan capabilities for auth, permission, payment, file transfer, deployment, dependency, and data-boundary changes.
 7) Analytical or document artifacts: use Data Analytics, documents, PDFs, spreadsheets, presentations, or LaTeX skills/plugins for those artifact types, including render/validation steps.
@@ -43,7 +43,7 @@ Use `.agents/agents` role templates as the default collaboration model for Codex
 4) `fixer`: bounded implementation after the cause and acceptance path are clear.
 5) `reviewer`: read-only correctness, security, regression-risk, and missing-test review.
 
-The main agent always owns task framing, design decisions, integration, Jenkins / target-env verification, closure records, git state, and final delivery. Do not delegate a blocking architectural decision without keeping one agent responsible for final integration and correctness.
+The main agent always owns task framing, design decisions, integration, configured CI / target-env verification, closure records, git state, and final delivery. Do not delegate a blocking architectural decision without keeping one agent responsible for final integration and correctness.
 
 ## Entry
 
@@ -51,7 +51,6 @@ The main agent always owns task framing, design decisions, integration, Jenkins 
 
 ```bash
 autocoding init --ai codex
-# or claude / all
 ```
 
 For Codex targets, this also installs the default subagent templates into `.agents/agents/`.
@@ -60,7 +59,6 @@ For Codex targets, this also installs the default subagent templates into `.agen
 
 ```bash
 python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
-# or .claude path
 ```
 
 Existing projects should use upgrade mode before replacing tracked docs:
@@ -88,9 +86,10 @@ This contains all manual fields:
 - `gate.*`
 - `structure.*`
 - `optimization.*`
+- `verification.*`
 - `runtime.*` (only for optional local diagnostics)
-- `target_env.*`
-- `jenkins.*`
+- `target_env.*` (only required when `verification.target_env_required: true`)
+- `jenkins.*` (only required when `verification.jenkins_required: true`)
 - `docs.*`
 
 Do not duplicate config in other md/yaml files.
@@ -100,6 +99,10 @@ Minimum required config for the default flow:
 - `workflow.mode`
 - `project.name`
 - `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`, or `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
+- `verification.target_env_required`
+- `verification.jenkins_required`
+
+Required only when `verification.target_env_required: true`:
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -111,6 +114,8 @@ Minimum required config for the default flow:
 - `target_env.backend_root_password` or `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
+
+Required only when `verification.jenkins_required: true`:
 - `jenkins.base_url`
 - `jenkins.ui_username`
 - `jenkins.ui_password` or `jenkins.ui_password_env`
@@ -138,7 +143,7 @@ Read `workflow.mode` from `docs/ENGINEERING.md` before choosing the path.
 2) run or reason through `classify --scope auto` for changed work
 3) read `docs/architecture/structure-standard.md` when the change adds or relocates code
 4) read / update `docs/tasks/taskbook.md`
-5) write minimal design notes; create a DD or ADR only when the change is cross-module, API, DB, deployment, Jenkins, key-page-flow, or long-term structure related
+5) write minimal design notes; create a DD or ADR only when the change is cross-module, API, DB, deployment, CI/Jenkins, key-page-flow, or long-term structure related
 6) implement only the necessary changes
 7) run the default local lightweight gate
 8) append `docs/tasks/closure-log.md` with `Result: DEV-CLOSED`
@@ -150,8 +155,8 @@ Read `workflow.mode` from `docs/ENGINEERING.md` before choosing the path.
 1) read / update the same authoritative docs
 2) run the default local lightweight gate
 3) commit + push
-4) verify Jenkins build / deployment result
-5) verify the real target environment
+4) verify configured CI/Jenkins build / deployment result when enabled
+5) verify the real target environment when enabled
 6) append `docs/tasks/closure-log.md` with `Result: PASS / FAIL / PARTIAL`
 7) use summary / deployment record / regression matrix only when the task actually requires them
 
@@ -208,19 +213,19 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 
 ## Quality policy
 
-- Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/Jenkins checks.
+- Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/config checks.
 - For small-step development, prefer the generic impact-aware gate: `light-gate --scope auto`. The skill provides the gate engine; each project owns its commands and optional `gate.rules` path mapping in `docs/ENGINEERING.md`.
 - `light-gate` automatically runs `structure-check` when `structure.enabled: true` or `commands.structure_check` is configured.
 - Keep `standard` as the backward-compatible default when no `gate.*` policy is configured. Use `changed` only when project commands/rules make the reduced scope explicit.
 - Automatically upgrade to `full` for CI/deploy/build-tool/lockfile/autopipeline config changes, project-declared full rules, unknown impact when configured, or release/verify tasks.
 - `workflow.mode: dev` closes development after light gate, closure record, commit, and push.
-- `workflow.mode: verify` closes only after Jenkins and target-environment verification.
+- `workflow.mode: verify` closes only after the configured CI/Jenkins and target-environment verification surfaces are satisfied.
 - `doctor` should be used early to catch missing or invalid config before the first implementation loop.
 - `doctor` runs the built-in docs ledger health check by default so projects do not accumulate giant taskbooks, closure logs, or active DD directories.
 - `light-gate` now fails if no usable fast gate command is configured.
 - `doctor`, `light-gate`, and `commit-push` all fail when required environment fields are missing, placeholder-like, or syntactically invalid.
 - Do not require local Docker Compose or full local regression for every small change.
-- Jenkins and target environment verification are mandatory in `verify` mode, not in default `dev` mode.
+- CI/Jenkins and target environment verification are mandatory in `verify` mode only when `verification.jenkins_required` / `verification.target_env_required` are enabled.
 - `verify-target` should be used for real target-environment API/page checks when the task touches user-visible or deploy-sensitive behavior.
 - `commit-push` records closure automatically according to `workflow.mode`.
 - `regression-matrix.md` can mark `PASS` only after real execution with evidence.

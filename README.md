@@ -2,12 +2,12 @@
 
 Engineering workflow skill for:
 
-- Claude Code
-- Codex CLI
+- Codex CLI with `.agents` paths by default
+- Legacy Claude installs only when explicitly requested
 
-This skill targets Go backend + frontend monorepo projects that rely on Jenkins for build and deployment. The default `dev` mode is optimized for fast development: light gate, early closure record, commit, push, then move to the next task. Switch to `verify` mode when Jenkins and target-environment evidence must be completed before closure.
+This skill targets general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default `dev` mode is optimized for fast development: light gate, early closure record, commit, push, then move to the next task. Switch to `verify` mode when configured CI/Jenkins and target-environment evidence must be completed before closure.
 
-`docs/ENGINEERING.md` is intentionally Git-tracked. The environment fields kept in that file are mandatory, must be filled with real values, and are committed as part of project maintenance. Unused environment items should be removed instead of being kept as placeholders.
+`docs/ENGINEERING.md` is intentionally Git-tracked. Environment fields kept in that file are mandatory only when their verification surface is enabled. Unused environment items should be removed instead of being kept as placeholders.
 
 ## Install
 
@@ -31,6 +31,7 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 - `doctor` records a standalone `docs_ledger_check` evidence event with counts and blocking details.
 - `docs-ledger-check` now fails on missing active ledger files instead of treating them as empty ledgers.
 - `autocoding status` now parses `docs/ENGINEERING.md` frontmatter key paths instead of matching config tokens in prose.
+- Added `verification.target_env_required` and `verification.jenkins_required` so non-Jenkins or local-only projects can keep `doctor` generic.
 - Added `docs.task_archive_dir`, `docs.design_archive_dir`, `docs.archive_index`, and active ledger budget settings to `docs/ENGINEERING.md`.
 - Clarified that `archive-index.md` is only navigation; it does not replace monthly or legacy physical archives.
 
@@ -165,18 +166,15 @@ workflow:
 1. Install skill into project:
 
 ```bash
-autocoding init --ai all
-# or: --ai codex / --ai claude
+autocoding init --ai codex
 ```
 
-For Codex installs, the command also creates `.agents/agents/` with the default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents.
+This creates `.agents/skills/auto-coding-skill` and `.agents/agents/` with the default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents. Legacy `--ai claude` / `--ai all` exists only for repos that explicitly still maintain Claude copies.
 
 2. Initialize docs and local scripts:
 
 ```bash
 python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
-# or
-python3 .claude/skills/auto-coding-skill/scripts/ap.py --repo . install
 ```
 
 3. Fill only one file manually:
@@ -192,6 +190,7 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `gate.*`
 - `structure.*`
 - `optimization.*`
+- `verification.*`
 - `target_env.*`
 - `jenkins.*`
 - `docs.*`
@@ -200,6 +199,10 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `workflow.mode`
 - `project.name`
 - `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`，或 `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
+- `verification.target_env_required`
+- `verification.jenkins_required`
+
+仅当 `verification.target_env_required: true` 时必填：
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -211,6 +214,8 @@ It must be committed to Git. Do not add it to `.gitignore`.
 - `target_env.backend_root_password` 或 `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
+
+仅当 `verification.jenkins_required: true` 时必填：
 - `jenkins.base_url`
 - `jenkins.ui_username`
 - `jenkins.ui_password` 或 `jenkins.ui_password_env`
@@ -369,7 +374,7 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 - The structure gate is generic. Project-specific thresholds and accepted generated/vendor paths belong in `docs/ENGINEERING.md` under `structure.*`.
 - Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
 - In `dev` mode, push is the finish line after `DEV-CLOSED` is recorded.
-- In `verify` mode, Jenkins success, target environment verification, and closure record are mandatory.
+- In `verify` mode, configured CI/Jenkins success, target environment verification, and closure record are mandatory only when the corresponding `verification.*_required` switch is enabled.
 
 ## Structure Policy
 - Before coding, identify the right layer and reuse points.
@@ -385,10 +390,10 @@ autocoding sync --projects /path/to/repo1,/path/to/repo2
 - Purpose: single source of project config + workflow rules.
 - How to record:
   - Fill YAML frontmatter once.
-  - Keep target env front/backend usernames, Jenkins UI/API usernames, password fields or `*_password_env` references, commands, and docs paths here only.
+  - Keep target env front/backend usernames, Jenkins UI/API usernames, password fields or `*_password_env` references, commands, and docs paths here only when those verification surfaces are enabled.
   - Target environment also includes backend server root username/password.
   - This file is expected to be committed to Git; prefer `*_password_env` for secrets so actual secret values stay in the current shell.
-  - Remaining environment keys are all mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
+  - Remaining enabled environment keys are mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
   - For secret fields, `doctor` requires either a direct `*_password` value or a `*_password_env` variable name. Commands that actually authenticate require the referenced environment variable to be set at execution time.
   - Do not duplicate config elsewhere.
 

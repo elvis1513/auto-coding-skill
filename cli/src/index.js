@@ -159,6 +159,8 @@ function projectStatus(project, assetSkill, assetAgents){
   const requiredConfigPaths = [
     { label: "structure", path: ["structure"] },
     { label: "optimization", path: ["optimization"] },
+    { label: "verification.target_env_required", path: ["verification", "target_env_required"] },
+    { label: "verification.jenkins_required", path: ["verification", "jenkins_required"] },
     { label: "docs.evidence_log", path: ["docs", "evidence_log"] },
     { label: "docs.task_archive_dir", path: ["docs", "task_archive_dir"] },
     { label: "docs.design_archive_dir", path: ["docs", "design_archive_dir"] },
@@ -284,7 +286,7 @@ function main(){
 
   if (args.cmd === "help" || !args.cmd) {
     console.log(`
-autocoding - install auto-coding-skill (Claude Code + Codex CLI)
+autocoding - install auto-coding-skill (Codex/.agents by default)
 
 Usage:
   autocoding init --ai claude|codex|all [--mode project|global] [--dest <path>] [--force]
@@ -292,12 +294,11 @@ Usage:
   autocoding sync --projects <path[,path...]> [--dry-run] [--json]
 
 Examples:
-  autocoding init --ai claude
   autocoding init --ai codex
-  autocoding init --ai all --mode project
-  autocoding init --ai all --dest /tmp/skills
   autocoding status --projects /Users/elvis/Product/xjmate,/Users/elvis/Product/geesight
   autocoding sync --projects /Users/elvis/Product/xjmate --dry-run
+
+Legacy Claude installs remain available only when a repo explicitly still maintains .claude copies.
 `);
     process.exit(0);
   }

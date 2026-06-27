@@ -1,7 +1,7 @@
 {
   "name": "@elvis1513/auto-coding-skill",
   "version": "2.1.0",
-  "description": "CLI installer for auto-coding-skill (Claude Code + Codex CLI) with Go fullstack + Jenkins workflow support.",
+  "description": "CLI installer for a Codex/.agents engineering workflow with optional CI/Jenkins and target-environment verification.",
   "type": "module",
   "bin": {
     "autocoding": "cli/src/index.js"
@@ -24,7 +24,6 @@
     "access": "public"
   },
   "keywords": [
-    "claude",
     "codex",
     "skill",
     "automation",
@@ -32,7 +31,6 @@
     "workflow",
     "ci",
     "jenkins",
-    "go",
     "monorepo",
     "docker",
     "local-testing"

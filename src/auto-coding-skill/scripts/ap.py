@@ -1385,6 +1385,11 @@ def _optimization_cfg(cfg: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _verification_cfg(cfg: dict) -> dict:
+    value = cfg.get("verification") or {}
+    return value if isinstance(value, dict) else {}
+
+
 def _bool_config(value: object, default: bool = False) -> bool:
     if value is None:
         return default
@@ -1405,6 +1410,17 @@ def _int_config(value: object, default: int) -> int:
         return int(value)
     except Exception:
         return default
+
+
+def _verification_required(cfg: dict, key: str, default: bool = True) -> bool:
+    verification_cfg = _verification_cfg(cfg)
+    required_key = f"{key}_required"
+    enabled_key = f"{key}_enabled"
+    if required_key in verification_cfg:
+        return _bool_config(verification_cfg.get(required_key), default)
+    if enabled_key in verification_cfg:
+        return _bool_config(verification_cfg.get(enabled_key), default)
+    return default
 
 
 def _tracked_files(repo: Path) -> list[str]:
@@ -2537,11 +2553,15 @@ def cmd_classify(args: argparse.Namespace) -> None:
     impact = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
     paths = list(impact.get("changed_files") or [])
     path_classification = _classify_paths(paths)
+    jenkins_required = _verification_required(cfg, "jenkins", default=True)
+    target_env_required = _verification_required(cfg, "target_env", default=True)
+    needs_jenkins = bool(path_classification["needs_jenkins"] and jenkins_required)
+    needs_target = bool(path_classification["needs_target"] and target_env_required)
     selected_scope = str(impact["selected_scope"])
     risk = "P3"
-    if path_classification["needs_jenkins"] or selected_scope == "full":
+    if needs_jenkins or selected_scope == "full":
         risk = "P1"
-    elif path_classification["needs_target"] or path_classification["needs_dd"]:
+    elif needs_target or path_classification["needs_dd"]:
         risk = "P2"
     elif not paths:
         risk = "P3"
@@ -2550,7 +2570,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
         "python3 docs/tools/autopipeline/ap.py structure-check --scope auto",
         f"python3 docs/tools/autopipeline/ap.py light-gate --scope {selected_scope} --explain",
     ]
-    if path_classification["needs_jenkins"]:
+    if needs_jenkins:
         commands.append("python3 docs/tools/autopipeline/ap.py verify-jenkins")
     result = {
         "requested_scope": impact["requested_scope"],
@@ -2561,8 +2581,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
         "needs_dd": path_classification["needs_dd"],
         "needs_adr": path_classification["needs_adr"],
         "needs_browser": path_classification["needs_browser"],
-        "needs_jenkins": path_classification["needs_jenkins"],
-        "needs_target": path_classification["needs_target"],
+        "needs_jenkins": needs_jenkins,
+        "needs_target": needs_target,
         "recommended_commands": commands,
         "reasons": impact.get("reasons") or [],
         "matched_rules": impact.get("matched_rules") or [],
@@ -2628,8 +2648,12 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
 
     _run_git_diff_check(repo, cfg)
     cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
-    cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
-    executed.extend(["diff_check", "verify_api_docs", "verify_jenkins"])
+    executed.extend(["diff_check", "verify_api_docs"])
+    if _verification_required(cfg, "jenkins", default=True):
+        cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
+        executed.append("verify_jenkins")
+    else:
+        executed.append("verify_jenkins_skipped")
     duration_s = time.time() - light_gate_start
     _record_gate_profile(repo, cfg, "light_gate", "pass", duration_s, scope=selected_scope, detail=", ".join(executed))
     _record_evidence(
@@ -2801,6 +2825,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     validation_errors: List[str] = []
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
+    target_env_required = _verification_required(cfg, "target_env", default=True)
+    jenkins_required = _verification_required(cfg, "jenkins", default=True)
     if mode not in {"dev", "verify"}:
         missing.append("workflow.mode (must be dev or verify)")
     if not str(project_cfg.get("name") or "").strip():
@@ -2819,28 +2845,30 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             "commands.gate_changed/gate_standard/gate_full, commands.light_gate, "
             "commands.quick_test, commands.test, or commands.build"
         )
-    _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
-    _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
-    _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
-    _require_secret_reference(missing, "target_env", target_cfg, "frontend_password")
-    _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
-    _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
-    _require_secret_reference(missing, "target_env", target_cfg, "backend_password")
-    _require_explicit_field(missing, "target_env.backend_root_username", target_cfg.get("backend_root_username"))
-    _require_secret_reference(missing, "target_env", target_cfg, "backend_root_password")
-    _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
-    _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
+    if target_env_required:
+        _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
+        _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
+        _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
+        _require_secret_reference(missing, "target_env", target_cfg, "frontend_password")
+        _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
+        _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
+        _require_secret_reference(missing, "target_env", target_cfg, "backend_password")
+        _require_explicit_field(missing, "target_env.backend_root_username", target_cfg.get("backend_root_username"))
+        _require_secret_reference(missing, "target_env", target_cfg, "backend_root_password")
+        _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
+        _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
 
-    _require_explicit_field(missing, "jenkins.base_url", jenkins_cfg.get("base_url"))
-    _require_explicit_field(missing, "jenkins.ui_username", jenkins_cfg.get("ui_username"))
-    _require_secret_reference(missing, "jenkins", jenkins_cfg, "ui_password")
-    _require_explicit_field(missing, "jenkins.job_url", jenkins_cfg.get("job_url"))
-    _require_explicit_field(missing, "jenkins.trigger_branch", jenkins_cfg.get("trigger_branch"))
-    _require_explicit_field(missing, "jenkins.image_repository", jenkins_cfg.get("image_repository"))
-    _require_explicit_field(missing, "jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy"))
-    _require_explicit_field(missing, "jenkins.deploy_env", jenkins_cfg.get("deploy_env"))
-    _require_explicit_field(missing, "jenkins.api_user", jenkins_cfg.get("api_user"))
-    _require_secret_reference(missing, "jenkins", jenkins_cfg, "api_password")
+    if jenkins_required:
+        _require_explicit_field(missing, "jenkins.base_url", jenkins_cfg.get("base_url"))
+        _require_explicit_field(missing, "jenkins.ui_username", jenkins_cfg.get("ui_username"))
+        _require_secret_reference(missing, "jenkins", jenkins_cfg, "ui_password")
+        _require_explicit_field(missing, "jenkins.job_url", jenkins_cfg.get("job_url"))
+        _require_explicit_field(missing, "jenkins.trigger_branch", jenkins_cfg.get("trigger_branch"))
+        _require_explicit_field(missing, "jenkins.image_repository", jenkins_cfg.get("image_repository"))
+        _require_explicit_field(missing, "jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy"))
+        _require_explicit_field(missing, "jenkins.deploy_env", jenkins_cfg.get("deploy_env"))
+        _require_explicit_field(missing, "jenkins.api_user", jenkins_cfg.get("api_user"))
+        _require_secret_reference(missing, "jenkins", jenkins_cfg, "api_password")
 
     repo_docs = {
         "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
@@ -2873,10 +2901,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     try:
         timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)
-        if timeout_s <= 0:
+        if (jenkins_required or _is_explicit_fill(jenkins_cfg.get("deploy_timeout_sec"))) and timeout_s <= 0:
             validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
     except Exception:
-        validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
+        if jenkins_required or _is_explicit_fill(jenkins_cfg.get("deploy_timeout_sec")):
+            validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
 
     missing.extend(validation_errors)
 
@@ -2884,7 +2913,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         _record_evidence(repo, cfg, "doctor", "fail", {"issues": missing})
         raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing))
 
-    _record_evidence(repo, cfg, "doctor", "pass", {"mode": mode})
+    _record_evidence(
+        repo,
+        cfg,
+        "doctor",
+        "pass",
+        {"mode": mode, "target_env_required": target_env_required, "jenkins_required": jenkins_required},
+    )
     print("[doctor] OK")
 
 
@@ -3125,6 +3160,8 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     cfg = _load_cfg(repo)
     mode = _workflow_mode(cfg, args)
     target_cfg = (cfg.get("target_env") or {})
+    target_env_required = _verification_required(cfg, "target_env", default=True)
+    jenkins_required = _verification_required(cfg, "jenkins", default=True)
 
     msg = args.msg
     structure_check_status = "skipped"
@@ -3145,18 +3182,18 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     if mode == "dev":
         dev_verification = args.verification or [
             "light-gate only",
-            "Jenkins triggered by push; build not verified in dev mode",
+            "configured CI/Jenkins not verified in dev mode",
             "target environment not verified in dev mode",
         ]
         _record_commit_push_closure(
             repo,
             args,
             commit="generated by this commit-push run",
-            jenkins=args.jenkins_build or "triggered by push, not verified in dev mode",
+            jenkins=args.jenkins_build or "not verified in dev mode",
             target_env=args.target_env or "not verified in dev mode",
             verification=dev_verification,
             result=args.result or "DEV-CLOSED",
-            follow_up=args.follow_up or "Run verify mode when Jenkins and target-environment evidence is required.",
+            follow_up=args.follow_up or "Run verify mode when configured CI/Jenkins and target-environment evidence is required.",
             structure_check=args.structure_check or structure_check_status,
         )
 
@@ -3169,42 +3206,57 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     run(["git", "push"], cwd=repo)
 
     if mode == "verify":
-        jenkins_build = cmd_verify_jenkins_build(
-            argparse.Namespace(
-                repo=str(repo),
-                git_ref="HEAD",
-                job_name=args.job_name,
-                job_url=args.job_url,
-                multibranch_root_job=args.multibranch_root_job,
-                branch_name=args.branch_name,
-                build_number=args.build_number,
-                max_builds=args.max_builds,
-                timeout_sec=args.timeout_sec,
-                poll_sec=args.poll_sec,
-                allow_no_deploy=args.allow_no_deploy,
+        if jenkins_required:
+            jenkins_build = cmd_verify_jenkins_build(
+                argparse.Namespace(
+                    repo=str(repo),
+                    git_ref="HEAD",
+                    job_name=args.job_name,
+                    job_url=args.job_url,
+                    multibranch_root_job=args.multibranch_root_job,
+                    branch_name=args.branch_name,
+                    build_number=args.build_number,
+                    max_builds=args.max_builds,
+                    timeout_sec=args.timeout_sec,
+                    poll_sec=args.poll_sec,
+                    allow_no_deploy=args.allow_no_deploy,
+                )
             )
-        )
-        target_summary = cmd_verify_target(
-            argparse.Namespace(
-                repo=str(repo),
-                backend_path=args.backend_path,
-                frontend_path=args.frontend_path,
-                backend_basic_auth=args.backend_basic_auth,
-                frontend_basic_auth=args.frontend_basic_auth,
+        else:
+            jenkins_build = "skipped by verification.jenkins_required=false"
+
+        if target_env_required:
+            target_summary = cmd_verify_target(
+                argparse.Namespace(
+                    repo=str(repo),
+                    backend_path=args.backend_path,
+                    frontend_path=args.frontend_path,
+                    backend_basic_auth=args.backend_basic_auth,
+                    frontend_basic_auth=args.frontend_basic_auth,
+                )
             )
-        )
+        else:
+            target_summary = "skipped by verification.target_env_required=false"
         if args.require_matrix:
             cmd_check_matrix(argparse.Namespace(repo=str(repo)))
-        verification = args.verification or [
-            f"Jenkins build verified: {jenkins_build or 'verified by git-ref HEAD'}",
-            f"Target verification: {target_summary}",
-        ]
+        verification = args.verification
+        if not verification:
+            verification = []
+            if jenkins_required:
+                verification.append(f"CI/Jenkins build verified: {jenkins_build or 'verified by git-ref HEAD'}")
+            else:
+                verification.append("CI/Jenkins verification skipped by verification.jenkins_required=false")
+            if target_env_required:
+                verification.append(f"Target verification: {target_summary}")
+            else:
+                verification.append("Target verification skipped by verification.target_env_required=false")
         _record_commit_push_closure(
             repo,
             args,
             commit="HEAD",
             jenkins=args.jenkins_build or jenkins_build or "verified by git-ref HEAD",
-            target_env=args.target_env or str(target_cfg.get("name") or "").strip(),
+            target_env=args.target_env
+            or (str(target_cfg.get("name") or "").strip() if target_env_required else "skipped by verification.target_env_required=false"),
             verification=verification,
             result=args.result or "PASS",
             follow_up=args.follow_up or "none",

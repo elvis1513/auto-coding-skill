@@ -8,5 +8,5 @@ Use the `.agents/agents` role model when available: explorer, docs_researcher, b
 Default to the lightweight local gate first; `doctor` includes `docs-ledger-check`, and when `structure.enabled` is true the gate includes `structure-check`.
 Keep active docs ledgers small: `taskbook.md`, `closure-log.md`, and top-level `docs/design/T*.md` must be physically archived when over budget. Use `docs-ledger-archive --plan` before `--write`; `archive-index.md` is only navigation.
 Keep `docs/tasks/evidence.jsonl` and closure Markdown aligned with actual executed checks.
-Use Jenkins build verification and real target-environment verification as the primary completion gate in verify mode.
+Use configured CI/Jenkins build verification and real target-environment verification as the primary completion gate in verify mode when their `verification.*_required` switches are enabled.
 Local Docker Compose and full local regression are on-demand diagnostic tools, not the default gate for every small change.

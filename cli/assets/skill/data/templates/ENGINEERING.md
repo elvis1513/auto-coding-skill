@@ -5,7 +5,7 @@ workflow:
 project:
   name: ""
   repo_root: "."
-  stack: "go-fullstack-monorepo"
+  stack: "generic"
   backend_dir: ""
   frontend_dir: ""
   go_main: ""
@@ -160,6 +160,10 @@ runtime:
   env_file: ""
   startup_timeout_sec: 120
 
+verification:
+  target_env_required: true
+  jenkins_required: true
+
 target_env:
   name: ""
   frontend_base_url: ""
@@ -215,8 +219,8 @@ docs:
 
 目标：默认采用高效率开发闭环，并通过 `workflow.mode` 控制流程长度。
 
-- `dev`：开发模式，最快闭环。轻量门禁通过后，提前写 `DEV-CLOSED` 闭环，commit + push 触发 Jenkins 后结束。
-- `verify`：验证模式，完整闭环。轻量门禁、commit + push、Jenkins 构建验证、目标环境验证全部完成后，写 `PASS` 闭环。
+- `dev`：开发模式，最快闭环。轻量门禁通过后，提前写 `DEV-CLOSED` 闭环，commit + push 后结束。
+- `verify`：验证模式，完整闭环。轻量门禁、commit + push、已启用的 CI/Jenkins 构建验证和目标环境验证全部完成后，写 `PASS` 闭环。
 
 默认原则：
 - 默认不要求本地 Docker Compose 启动。
@@ -225,13 +229,14 @@ docs:
 - 默认不要求每个小改动生成长 summary。
 - 默认不要求 regression matrix 全 PASS。
 - 默认不要求 deployment record。
-- Jenkins 构建结果和目标环境真实验证，比本地模拟更重要。
+- 已启用的 CI/Jenkins 构建结果和目标环境真实验证，比本地模拟更重要。
 
 补充规则：
 - 每次任务闭环后，必须清理临时文件、临时目录、日志、截图、构建缓存等非必要产物；仅明确需要保留的本地诊断目录允许保留。
 - 所有手工填写信息，只维护在本文件 frontmatter 中，其他文档不得重复配置。
 - `docs/ENGINEERING.md` 必须提交到 Git 管理，不允许写入 `.gitignore`。
 - 目标环境和 Jenkins 密码默认通过 `*_password_env` 指向当前 shell 中的环境变量；确需兼容旧项目时才使用明文 `*_password` 字段。
+- 非 Jenkins 或本地-only 项目可以把 `verification.jenkins_required` / `verification.target_env_required` 设为 `false`，让 `doctor` 只检查通用门禁、文档和结构配置。
 - 未参与默认流程的环境项不要保留占位；模板中未保留的字段视为已清理，不再额外配置。
 
 ---
@@ -246,12 +251,13 @@ docs:
 - `structure.*`：通用工程结构阈值、允许的大文件模式、复用搜索目录
 - `structure.layer_rules`：通用分层 import 边界检查；项目可按技术栈细化路径
 - `optimization.*`：健康基线感知的优化闭环口径，避免重复把已接受债务判定为当前未完成
+- `verification.target_env_required` / `verification.jenkins_required`：控制 `doctor` 是否强校验目标环境和 Jenkins 配置
 - `docs.evidence_log`：结构化证据 JSONL，记录 doctor / gate / verify / closure 等实际执行结果
 - `docs.task_archive_dir` / `docs.design_archive_dir` / `docs.archive_index`：文档账本物理归档目录和导航索引；索引不能替代归档
 - `docs.active_taskbook_max_lines` / `docs.active_closure_log_max_lines` / `docs.active_design_max_files`：活跃账本预算，超过后必须归档瘦身
 - `docs.health_baseline` / `docs.optimization_backlog` / `docs.structure_standard` / `docs.adr_dir`：项目结构治理文档位置
-- `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
-- `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
+- `target_env.*`：当 `verification.target_env_required: true` 时，目标环境前端 / 后端地址、用户名、密码引用必须全部填写且真实可用
+- `jenkins.*`：当 `verification.jenkins_required: true` 时，Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境必须全部填写且真实可用
 
 字段说明：
 - `target_env.backend_username` + `target_env.backend_password_env` 或 `target_env.backend_password`：目标环境后台账号
@@ -264,6 +270,10 @@ docs:
 - `workflow.mode`
 - `project.name`
 - `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`，或 `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
+- `verification.target_env_required`
+- `verification.jenkins_required`
+
+当 `verification.target_env_required: true` 时必填：
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -275,6 +285,8 @@ docs:
 - `target_env.backend_root_password` 或 `target_env.backend_root_password_env`
 - `target_env.health_base_url`
 - `target_env.health_path`
+
+当 `verification.jenkins_required: true` 时必填：
 - `jenkins.base_url`
 - `jenkins.ui_username`
 - `jenkins.ui_password` 或 `jenkins.ui_password_env`
@@ -329,7 +341,7 @@ docs:
 
 ---
 
-## 1.5 工具使用策略（Claude / Codex 专属）
+## 1.5 工具使用策略（Codex / .agents 默认）
 
 任务开始时先做能力盘点：当前可用的 MCP servers、已安装 skills、plugins / apps / connectors、浏览器控制能力、repo 脚本。能直接读取权威状态、当前文档或真实 UI 的能力，优先于手写推测。
 
@@ -372,7 +384,7 @@ docs:
 
 ---
 
-## 1.6 多 Agent 协作策略（Claude / Codex 专属）
+## 1.6 多 Agent 协作策略（Codex / .agents 默认）
 
 默认使用 `.agents/agents` 中的角色模型来拆解任务；只有在当前客户端明确提供并允许子代理/多代理工具时，才实际并行派发。若运行时策略不允许子代理，则由主 agent 按同一角色顺序串行完成，不假装并行。
 
@@ -396,7 +408,7 @@ docs:
 主 agent 始终负责：
 - 任务定义、范围裁决、方案取舍
 - 代码集成和冲突处理
-- 轻量门禁、Jenkins/目标环境闭环
+- 轻量门禁、已启用的 CI/Jenkins/目标环境闭环
 - 文档闭环、Git 状态、最终交付
 
 任务边界不清、需要强一致裁决或涉及架构取舍时，由主 agent 保持控制，不机械拆分。
@@ -451,21 +463,21 @@ docs:
 
 规则：
 - 只跑最轻量门禁。
-- push 触发 Jenkins 后不等待、不轮询、不验证目标环境。
+- push 后不等待、不轮询、不验证目标环境。
 - `closure-log.md` 必须提前写入本次提交。
 - 闭环结果写 `DEV-CLOSED`，不要伪装成完整 `PASS`。
-- Jenkins Build 写 `triggered by push, not verified in dev mode`。
+- CI/Jenkins Build 写 `triggered by push, not verified in dev mode` 或项目等价表述。
 - Target Env 写 `not verified in dev mode`。
 
 ### 2.2 验证模式：`workflow.mode: "verify"`
 
 用于发布前、验收、高风险变更或需要完整证据的任务。默认闭环：
 
-需求确认 → 最小设计 / 必要 DD → 开发实现 → 本地轻量校验 → commit + push → Jenkins 构建验证 → 目标环境验证 → 写 `PASS` 闭环
+需求确认 → 最小设计 / 必要 DD → 开发实现 → 本地轻量校验 → commit + push → 已启用的 CI/Jenkins 构建验证 → 已启用的目标环境验证 → 写 `PASS` 闭环
 
 规则：
-- Jenkins 构建必须成功。
-- 目标环境健康检查必须通过。
+- 若 `verification.jenkins_required: true`，CI/Jenkins 构建必须成功。
+- 若 `verification.target_env_required: true`，目标环境健康检查必须通过。
 - 关键接口 / 页面路径按任务需要补充验证。
 - 只有真实验证完成后，闭环结果才允许写 `PASS`。
 - 回归矩阵只有真实执行并有证据时才允许标 `PASS`。
@@ -473,10 +485,10 @@ docs:
 ### 2.3 任务步骤
 
 1. 需求确认
-   明确任务范围、影响服务、是否涉及 API/数据库/部署/Jenkins/前端页面。
+   明确任务范围、影响服务、是否涉及 API/数据库/部署/CI/Jenkins/前端页面。
 
 2. 最小设计记录
-   普通小改动只更新 `taskbook` 或设计文档中的最小必要段落；跨模块、接口、数据库、部署、Jenkins、关键页面流程变更才补 DD。
+   普通小改动只更新 `taskbook` 或设计文档中的最小必要段落；跨模块、接口、数据库、部署、CI/Jenkins、关键页面流程变更才补 DD。
 
 3. 开发实现
    只修改本次任务必要文件，不做无关重构。
@@ -487,25 +499,25 @@ docs:
    - 若未配置，则执行 `quick_test` / `test` / `build` 中最先配置的一项
    - `git diff --check`
    - API 文档检查
-   - Jenkins 配置检查
+   - 已启用的 CI/Jenkins 配置检查
 
 5. 提交推送
-   `dev` 模式先写开发闭环再 commit + push；`verify` 模式 commit + push 后继续验证 Jenkins 和目标环境。
+   `dev` 模式先写开发闭环再 commit + push；`verify` 模式 commit + push 后继续验证已启用的 CI/Jenkins 和目标环境。
 
-6. Jenkins 验证
-   仅 `verify` 模式默认执行。查看 Jenkins 构建、镜像、部署结果；失败则根据 Jenkins 日志修复，再次提交推送。
+6. CI/Jenkins 验证
+   仅 `verify` 模式且 `verification.jenkins_required: true` 时默认执行。查看 CI/Jenkins 构建、镜像、部署结果；失败则根据日志修复，再次提交推送。
 
 7. 目标环境验证
    仅 `verify` 模式默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
 
 8. 回归与证据记录
-   只有真实执行过 Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
+   只有真实执行过已启用的 CI/Jenkins / 目标环境验证，或显式要求本地运行验证时，才允许把 `regression-matrix.md` 标为 `PASS`。
 
 9. 闭环记录
    每个任务必须留下轻量闭环记录。`dev` 模式用 `DEV-CLOSED`，`verify` 模式用 `PASS` / `FAIL` / `PARTIAL`。
 
 10. 配置入库
-   `docs/ENGINEERING.md` 中保留下来的环境信息、前端/后端账号、Jenkins 账号与密码必须 100% 填写、正确填写，并提交 Git 作为项目权威配置持续维护。
+   `docs/ENGINEERING.md` 中保留下来的已启用环境信息、前端/后端账号、Jenkins 账号与密码必须 100% 填写、正确填写，并提交 Git 作为项目权威配置持续维护。
 
 ---
 
@@ -515,7 +527,7 @@ docs:
 - 数据库迁移
 - 鉴权 / 权限
 - 支付 / 订单
-- 部署 / Jenkins
+- 部署 / CI / Jenkins
 - Nginx / 网关
 - 文件上传 / 下载
 - 生产配置
@@ -530,7 +542,7 @@ docs:
 
 ## 4. 本地 Docker 与完整回归（按需，不默认）
 
-以下能力保留，但仅用于显式要求、问题复现、Jenkins/目标环境问题前置诊断：
+以下能力保留，但仅用于显式要求、问题复现、CI/Jenkins/目标环境问题前置诊断：
 - `runtime-up`
 - `runtime-down`
 - 本地 health check

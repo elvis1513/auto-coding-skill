@@ -13,6 +13,9 @@ project:
   jenkinsfile: "Jenkinsfile"
 
 commands:
+  gate_changed: ""
+  gate_standard: ""
+  gate_full: ""
   light_gate: ""
   build: ""
   test: ""
@@ -20,6 +23,35 @@ commands:
   lint: ""
   typecheck: ""
   format: ""
+
+gate:
+  default_scope: "standard"
+  fallback_scope: "standard"
+  full_on_unknown: true
+  no_change_scope: "standard"
+  full_on:
+    paths:
+      - "Jenkinsfile"
+      - "Jenkinsfile.*"
+      - ".github/workflows/**"
+      - "Dockerfile"
+      - "**/Dockerfile"
+      - "docker-compose*.yml"
+      - "docker-compose*.yaml"
+      - "compose*.yml"
+      - "compose*.yaml"
+      - "docs/ENGINEERING.md"
+      - "docs/tools/autopipeline/**"
+      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - "yarn.lock"
+      - "go.mod"
+      - "go.sum"
+      - "Cargo.lock"
+      - "pom.xml"
+      - "build.gradle*"
+      - "settings.gradle*"
+  rules: []
 
 runtime:
   docker_compose_file: ""
@@ -96,7 +128,8 @@ docs:
 
 先填写 `docs/ENGINEERING.md` frontmatter 中的所有空值。重点包括：
 - `workflow.mode`：`dev` 或 `verify`，默认推荐 `dev`
-- `commands.light_gate`：推荐配置一个项目级快速门禁命令，作为默认本地校验入口
+- `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`：推荐配置分层门禁命令；旧项目也可以继续只配置 `commands.light_gate`
+- `gate.*`：按项目声明路径规则和高风险升级规则；未配置时保持标准门禁行为
 - `target_env.*`：目标环境前端 / 后端地址、用户名、密码引用，必须全部填写且真实可用
 - `jenkins.*`：Jenkins UI/API 用户名、密码引用、Job、分支、镜像、部署环境，必须全部填写且真实可用
 
@@ -110,7 +143,7 @@ docs:
 默认必填：
 - `workflow.mode`
 - `project.name`
-- `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
+- `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`，或 `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -134,6 +167,8 @@ docs:
 - `jenkins.job_url`
 
 按需填写：
+- `gate.default_scope`：默认 `standard`；需要小步快跑时设为 `auto` 或 `changed`
+- `gate.rules`：项目自定义路径规则。每条规则可包含 `name`、`paths`、`commands`、`scope`
 - `runtime.*`：仅在本地运行诊断时使用
 - `commands.build` / `commands.test` / `commands.quick_test` / `commands.lint` / `commands.typecheck` / `commands.format`：按项目实际情况保留
 

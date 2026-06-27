@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as _dt
+import fnmatch
 import json
 import os
 import time
@@ -638,6 +639,296 @@ def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
     )
 
 
+_GATE_SCOPES = {"auto", "changed", "standard", "full"}
+_DOC_PATH_PATTERNS = ["*.md", "docs/**"]
+_DEFAULT_FULL_PATH_PATTERNS = [
+    ".agents/**",
+    ".claude/**",
+    ".github/workflows/**",
+    "Jenkinsfile",
+    "Jenkinsfile.*",
+    "Dockerfile",
+    "**/Dockerfile",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
+    "docs/ENGINEERING.md",
+    "docs/tools/autopipeline/**",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "go.mod",
+    "go.sum",
+    "Cargo.lock",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+]
+
+
+def _gate_cfg(cfg: dict) -> dict:
+    gate_cfg = cfg.get("gate") or {}
+    return gate_cfg if isinstance(gate_cfg, dict) else {}
+
+
+def _as_list(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _command_name(ref: object) -> str:
+    raw = _text(ref)
+    if raw.startswith("commands."):
+        raw = raw.split(".", 1)[1]
+    return raw
+
+
+def _configured_command(cfg: dict, name: str) -> str:
+    commands = cfg.get("commands") or {}
+    return _text(commands.get(name))
+
+
+def _run_first_configured_command(repo: Path, cfg: dict, names: list[str]) -> str:
+    for name in names:
+        command_name = _command_name(name)
+        if command_name and _configured_command(cfg, command_name):
+            _run_configured_command(repo, cfg, command_name)
+            return command_name
+    return ""
+
+
+def _run_configured_command_list(repo: Path, cfg: dict, names: list) -> list[str]:
+    executed: list[str] = []
+    missing: list[str] = []
+    for name_ref in names:
+        name = _command_name(name_ref)
+        if not name:
+            continue
+        if _configured_command(cfg, name):
+            _run_configured_command(repo, cfg, name)
+            executed.append(name)
+        else:
+            missing.append(name)
+    if missing and not executed:
+        raise APError("Gate rule references missing commands: " + ", ".join(missing))
+    return executed
+
+
+def _path_matches(path: str, patterns: list) -> bool:
+    normalized = path.replace("\\", "/").lstrip("./")
+    for pattern_ref in patterns:
+        pattern = _text(pattern_ref).replace("\\", "/").lstrip("./")
+        if not pattern:
+            continue
+        if fnmatch.fnmatch(normalized, pattern):
+            return True
+        if "/" not in pattern and fnmatch.fnmatch(Path(normalized).name, pattern):
+            return True
+    return False
+
+
+def _unique_paths(paths: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for path in paths:
+        normalized = path.replace("\\", "/").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return sorted(out)
+
+
+def _git_lines(repo: Path, cmd: list[str]) -> list[str]:
+    try:
+        result = run(cmd, cwd=repo, check=False)
+    except APError:
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _default_base_ref(repo: Path) -> str:
+    upstream = _git_lines(repo, ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    return upstream[0] if upstream else ""
+
+
+def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
+    paths: list[str] = []
+    effective_base = base_ref or _default_base_ref(repo)
+    if effective_base:
+        paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", f"{effective_base}...HEAD"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
+    paths.extend(_git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]))
+    return _unique_paths(paths)
+
+
+def _docs_only(paths: list[str]) -> bool:
+    return bool(paths) and all(_path_matches(path, _DOC_PATH_PATTERNS) for path in paths)
+
+
+def _gate_rules(gate_cfg: dict) -> list[dict]:
+    rules = gate_cfg.get("rules") or []
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def _matching_gate_rules(paths: list[str], gate_cfg: dict) -> list[dict]:
+    matches = []
+    for rule in _gate_rules(gate_cfg):
+        patterns = _as_list(rule.get("paths"))
+        if patterns and any(_path_matches(path, patterns) for path in paths):
+            matches.append(rule)
+    return matches
+
+
+def _gate_full_patterns(gate_cfg: dict) -> list:
+    full_on = gate_cfg.get("full_on") or {}
+    patterns = list(_DEFAULT_FULL_PATH_PATTERNS)
+    if isinstance(full_on, dict):
+        patterns.extend(_as_list(full_on.get("paths")))
+    else:
+        patterns.extend(_as_list(full_on))
+    return patterns
+
+
+def _has_changed_gate(cfg: dict, gate_cfg: dict, paths: list[str]) -> bool:
+    if _configured_command(cfg, "gate_changed"):
+        return True
+    for rule in _matching_gate_rules(paths, gate_cfg):
+        if _as_list(rule.get("commands")):
+            return True
+    return False
+
+
+def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tuple[str, list[str], list[dict]]:
+    gate_cfg = _gate_cfg(cfg)
+    scope = (requested_scope or _text(gate_cfg.get("default_scope")) or "standard").lower()
+    if scope not in _GATE_SCOPES:
+        raise APError("gate scope must be one of: " + ", ".join(sorted(_GATE_SCOPES)))
+
+    matching_rules = _matching_gate_rules(paths, gate_cfg)
+    reasons: list[str] = []
+
+    if scope != "auto":
+        return scope, [f"requested scope: {scope}"], matching_rules
+
+    if not paths:
+        fallback = _text(gate_cfg.get("no_change_scope")) or "standard"
+        if fallback not in {"changed", "standard", "full"}:
+            fallback = "standard"
+        return fallback, ["no changed files detected"], matching_rules
+
+    rule_scopes = {_text(rule.get("scope")).lower() for rule in matching_rules if _text(rule.get("scope"))}
+    if "full" in rule_scopes:
+        return "full", ["matched gate rule with scope=full"], matching_rules
+    if "standard" in rule_scopes:
+        return "standard", ["matched gate rule with scope=standard"], matching_rules
+
+    if any(_path_matches(path, _gate_full_patterns(gate_cfg)) for path in paths):
+        return "full", ["changed files match full-gate patterns"], matching_rules
+
+    if _docs_only(paths):
+        return "changed", ["docs-only change"], matching_rules
+
+    if _has_changed_gate(cfg, gate_cfg, paths):
+        return "changed", ["matched changed-gate command or rule"], matching_rules
+
+    fallback = _text(gate_cfg.get("fallback_scope")) or "standard"
+    if fallback not in {"changed", "standard", "full"}:
+        fallback = "standard"
+    if fallback == "changed" and _text(gate_cfg.get("full_on_unknown")).lower() in {"1", "true", "yes", "on"}:
+        fallback = "full"
+    reasons.append("no changed-gate command/rule matched")
+    return fallback, reasons, matching_rules
+
+
+def _impact_summary(cfg: dict, repo: Path, requested_scope: str, base_ref: str = "") -> dict:
+    paths = _changed_files(repo, base_ref=base_ref)
+    scope, reasons, matching_rules = _select_gate_scope(cfg, requested_scope, paths)
+    return {
+        "requested_scope": requested_scope or _text(_gate_cfg(cfg).get("default_scope")) or "standard",
+        "selected_scope": scope,
+        "reasons": reasons,
+        "changed_files": paths,
+        "matched_rules": [_text(rule.get("name")) or "(unnamed)" for rule in matching_rules],
+    }
+
+
+def _print_impact(summary: dict, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+    print(f"[impact] requested_scope={summary['requested_scope']}")
+    print(f"[impact] selected_scope={summary['selected_scope']}")
+    for reason in summary.get("reasons") or []:
+        print(f"[impact] reason: {reason}")
+    for rule in summary.get("matched_rules") or []:
+        print(f"[impact] matched_rule: {rule}")
+    files = summary.get("changed_files") or []
+    if files:
+        for path in files:
+            print(f"[impact] changed: {path}")
+    else:
+        print("[impact] changed: (none)")
+
+
+def _run_changed_gate(repo: Path, cfg: dict, paths: list[str], matching_rules: list[dict]) -> list[str]:
+    executed: list[str] = []
+    for rule in matching_rules:
+        executed.extend(_run_configured_command_list(repo, cfg, _as_list(rule.get("commands"))))
+    if executed:
+        return executed
+
+    fallback_commands = ["gate_changed"]
+    if _docs_only(paths):
+        fallback_commands.append("docs_check")
+    command = _run_first_configured_command(repo, cfg, fallback_commands)
+    if command:
+        return [command]
+
+    if _docs_only(paths):
+        print("[gate] docs-only change with no changed-gate command configured; running built-in post checks only.")
+        return ["docs_only_builtin"]
+
+    fallback = _run_first_configured_command(repo, cfg, ["quick_test", "test", "build"])
+    if fallback:
+        return [fallback]
+
+    raise APError(
+        "Changed gate has no configured command. Add commands.gate_changed or matching gate.rules commands, "
+        "or run light-gate --scope standard/full."
+    )
+
+
+def _run_standard_gate(repo: Path, cfg: dict) -> list[str]:
+    command = _run_first_configured_command(repo, cfg, ["gate_standard", "light_gate", "quick_test", "test", "build"])
+    if not command:
+        raise APError(
+            "Standard gate is under-configured. Add commands.gate_standard, commands.light_gate, "
+            "commands.quick_test, commands.test, or commands.build."
+        )
+    return [command]
+
+
+def _run_full_gate(repo: Path, cfg: dict) -> list[str]:
+    command = _run_first_configured_command(repo, cfg, ["gate_full", "full_gate", "gate_standard", "light_gate", "test", "build"])
+    if not command:
+        raise APError(
+            "Full gate is under-configured. Add commands.gate_full, commands.full_gate, commands.test, "
+            "commands.build, or commands.light_gate."
+        )
+    return [command]
+
+
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
     print("[diff-check] git diff --check")
     run(["git", "diff", "--check"], cwd=repo)
@@ -671,38 +962,35 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cmd_doctor(argparse.Namespace(repo=str(repo)))
     cfg = _load_cfg(repo)
-    commands = (cfg.get("commands") or {})
+    requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
+    impact = _impact_summary(cfg, repo, requested_scope=requested_scope, base_ref=str(getattr(args, "base", "") or ""))
+    if getattr(args, "explain", False):
+        _print_impact(impact)
 
-    executed: List[str] = []
-    missing: List[str] = []
+    selected_scope = str(impact["selected_scope"])
+    paths = list(impact.get("changed_files") or [])
+    matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
 
-    if str(commands.get("light_gate") or "").strip():
-        _run_configured_command(repo, cfg, "light_gate")
-        executed.append("light_gate")
-    elif str(commands.get("quick_test") or "").strip():
-        _run_configured_command(repo, cfg, "quick_test")
-        executed.append("quick_test")
-    elif str(commands.get("test") or "").strip():
-        _run_configured_command(repo, cfg, "test")
-        executed.append("test")
-    elif str(commands.get("build") or "").strip():
-        _run_configured_command(repo, cfg, "build")
-        executed.append("build")
+    if selected_scope == "changed":
+        executed = _run_changed_gate(repo, cfg, paths, matching_rules)
+    elif selected_scope == "full":
+        executed = _run_full_gate(repo, cfg)
     else:
-        missing.append("commands.light_gate or commands.quick_test or commands.test or commands.build")
-
-    if missing:
-        raise APError(
-            "Light gate is under-configured. Missing required commands: "
-            + ", ".join(missing)
-            + ". Edit docs/ENGINEERING.md frontmatter."
-        )
+        executed = _run_standard_gate(repo, cfg)
 
     _run_git_diff_check(repo, cfg)
     cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
     cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
     executed.extend(["diff_check", "verify_api_docs", "verify_jenkins"])
-    print("[light-gate] OK: " + ", ".join(executed))
+    print(f"[light-gate] OK scope={selected_scope}: " + ", ".join(executed))
+
+
+def cmd_impact(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    scope = str(args.scope or "").strip().lower()
+    summary = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
+    _print_impact(summary, as_json=bool(args.json))
 
 
 def cmd_runtime_up(args: argparse.Namespace) -> None:
@@ -858,12 +1146,19 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
     if not (
-        str(commands.get("light_gate") or "").strip()
+        str(commands.get("gate_changed") or "").strip()
+        or str(commands.get("gate_standard") or "").strip()
+        or str(commands.get("gate_full") or "").strip()
+        or str(commands.get("full_gate") or "").strip()
+        or str(commands.get("light_gate") or "").strip()
         or str(commands.get("quick_test") or "").strip()
         or str(commands.get("test") or "").strip()
         or str(commands.get("build") or "").strip()
     ):
-        missing.append("commands.light_gate or commands.quick_test or commands.test or commands.build")
+        missing.append(
+            "commands.gate_changed/gate_standard/gate_full, commands.light_gate, "
+            "commands.quick_test, commands.test, or commands.build"
+        )
     _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
     _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
     _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
@@ -1256,7 +1551,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("name")
     s.set_defaults(func=cmd_run)
 
+    s = sp.add_parser("impact")
+    s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--base")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_impact)
+
     s = sp.add_parser("light-gate")
+    s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--base")
+    s.add_argument("--explain", action="store_true")
     s.set_defaults(func=cmd_light_gate)
 
     s = sp.add_parser("doctor")

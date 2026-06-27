@@ -23,6 +23,13 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.0.4
+
+- Added a generic impact-aware gate engine: `ap.py impact`, `light-gate --scope auto|changed|standard|full`, and `--explain`.
+- Added project-owned `gate.*` policy support in `docs/ENGINEERING.md`; the skill chooses scope, while each project declares its own commands and optional path rules.
+- Kept backward compatibility: projects without `gate.*` continue to use the existing standard `commands.light_gate` / quick-test fallback.
+- Added conservative full-gate upgrades for CI, deploy, Docker, lockfile, build-tool, and autopipeline config changes.
+
 ### v2.0.3
 
 - Fixed `doctor`, `light-gate`, `verify-target`, and Jenkins API verification to accept secret references via `*_password_env`.
@@ -148,6 +155,7 @@ It must be committed to Git. Do not add it to `.gitignore`.
 重点字段：
 - `workflow.mode`
 - `commands.*`
+- `gate.*`
 - `target_env.*`
 - `jenkins.*`
 - `docs.*`
@@ -155,7 +163,7 @@ It must be committed to Git. Do not add it to `.gitignore`.
 默认必填：
 - `workflow.mode`
 - `project.name`
-- `commands.light_gate` 或 `commands.quick_test` 或 `commands.test` 或 `commands.build`
+- `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`，或 `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -235,6 +243,10 @@ It must be committed to Git. Do not add it to `.gitignore`.
 
 ## Default Gate Policy
 - Default local gate is lightweight only.
+- Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
+- Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.
+- Use `light-gate --scope standard` for the backward-compatible configured gate, and `light-gate --scope full` before release/deploy-sensitive closure.
+- The gate engine is generic. Project-specific path mapping belongs in `docs/ENGINEERING.md` under `gate.rules`; unknown or high-risk impact should upgrade to standard/full rather than silently skipping checks.
 - Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
 - In `dev` mode, push is the finish line after `DEV-CLOSED` is recorded.
 - In `verify` mode, Jenkins success, target environment verification, and closure record are mandatory.

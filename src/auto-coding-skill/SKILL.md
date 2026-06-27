@@ -78,6 +78,7 @@ Fill only:
 This contains all manual fields:
 - `workflow.mode`
 - `commands.*`
+- `gate.*`
 - `runtime.*` (only for optional local diagnostics)
 - `target_env.*`
 - `jenkins.*`
@@ -89,7 +90,7 @@ Do not hide `docs/ENGINEERING.md` in `.gitignore`.
 Minimum required config for the default flow:
 - `workflow.mode`
 - `project.name`
-- `commands.light_gate` or `commands.quick_test` or `commands.test` or `commands.build`
+- `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`, or `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
 - `target_env.name`
 - `target_env.frontend_base_url`
 - `target_env.frontend_username`
@@ -149,6 +150,9 @@ Default commands:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py impact --scope auto
+python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
+python3 docs/tools/autopipeline/ap.py light-gate --scope full
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode dev --msg "<TASK_ID>: <summary>"
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode verify --msg "<TASK_ID>: <summary>" --backend-path /health --frontend-path /
@@ -167,6 +171,9 @@ python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
 ## Quality policy
 
 - Default local gate is lightweight and time-bounded: prefer one curated project command via `commands.light_gate`, then run only diff/API/Jenkins checks.
+- For small-step development, prefer the generic impact-aware gate: `light-gate --scope auto`. The skill provides the gate engine; each project owns its commands and optional `gate.rules` path mapping in `docs/ENGINEERING.md`.
+- Keep `standard` as the backward-compatible default when no `gate.*` policy is configured. Use `changed` only when project commands/rules make the reduced scope explicit.
+- Automatically upgrade to `full` for CI/deploy/build-tool/lockfile/autopipeline config changes, project-declared full rules, unknown impact when configured, or release/verify tasks.
 - `workflow.mode: dev` closes development after light gate, closure record, commit, and push.
 - `workflow.mode: verify` closes only after Jenkins and target-environment verification.
 - `doctor` should be used early to catch missing or invalid config before the first implementation loop.

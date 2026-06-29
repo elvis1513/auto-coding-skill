@@ -46,6 +46,7 @@
 
 - 文件超过 `structure.max_file_lines_warn`：只允许小修、缺陷修复、类型补充；新增职责应先抽取模块。
 - 文件超过 `structure.max_file_lines_block`：不得继续承载新职责，除非是生成物、外部产物或已在 `structure.allow_large_files` 中声明。
+- 禁止仅为了降低行数而拆文件。拆分必须服务于清晰的业务边界、技术边界、变更安全和阅读连续性；如果事务、状态机、用例流程或测试场景需要放在一起维护，应保留内聚结构并记录为接受债务。
 - 历史大文件如果已进入健康基线 / backlog，可在 `structure.accepted_debt_paths` 中登记；登记只豁免历史体量，不豁免继续大幅新增。
 - 函数 / 方法 / 组件超过 `structure.max_function_lines_warn`：应拆分为命名清晰的子函数、hook、service、query、mapper 或 view component。
 - 对大文件新增超过 `structure.max_added_lines_to_large_file` 行：默认阻塞，必须拆分或记录例外理由。

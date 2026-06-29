@@ -300,6 +300,7 @@ python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 
 `structure-check` is intentionally generic. Project-specific paths and stricter rules belong in `docs/ENGINEERING.md` under `structure.*`, `optimization.*`, and optional `commands.structure_check`.
 Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
+Do not split files only to reduce line count. Split only when a clear business or technical boundary improves cohesion and change safety; keep cohesive transaction, state-machine, workflow, or test-scenario code together and track it as accepted debt when appropriate.
 
 `docs-ledger-check` is intentionally separate from `structure-check`. It treats `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` as active working sets. When they exceed `docs.active_*` budgets, the fix is physical archiving under `docs.task_archive_dir` / `docs.design_archive_dir`; `docs.archive_index` is only a navigation index and does not count as archive slimming.
 

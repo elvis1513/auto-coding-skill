@@ -429,6 +429,7 @@ docs:
 3) 单文件容量控制
    - 超过 `structure.max_file_lines_warn` 的文件只允许小修和缺陷修复，新增职责应优先抽取模块。
    - 超过 `structure.max_file_lines_block` 的文件不得继续承载新职责，除非该文件在 `structure.allow_large_files` 中声明为生成物或外部产物。
+   - 禁止仅为了降低行数而拆文件。拆分必须服务于清晰的业务边界、技术边界、变更安全和阅读连续性；如果事务、状态机、用例流程或测试场景需要放在一起维护，应保留内聚结构并记录为接受债务。
    - 已记录为接受债务的历史大文件可放入 `structure.accepted_debt_paths`，但继续大幅新增仍会被阻塞。
    - 对已偏大的文件一次性增加超过 `structure.max_added_lines_to_large_file` 行时，`structure-check` 会阻塞，要求拆分或写明例外理由。
 

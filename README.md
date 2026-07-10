@@ -22,6 +22,12 @@ npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
 
 ## Release Notes
 
+### v2.1.4
+
+- Updated the default reviewer and browser debugger agents to `gpt-5.6-sol`, retaining `xhigh` reasoning for deep review and UI diagnosis.
+- Updated the read-only explorer and documentation researcher agents to `gpt-5.6-terra` with `medium` reasoning, while keeping the targeted fixer on `gpt-5.3-codex-spark`.
+- Added regression coverage for installed model profiles, managed profile refreshes, and byte-for-byte preservation of custom agent files.
+
 ### v2.1.2
 
 - Fixed `docs-ledger-archive` so settled task states such as `Superseded by ...`, `External Dependency`, `Deployed`, `Completed`, `Archived`, `Local PASS`, and `Local Verified` are recognized as archivable instead of blocking physical ledger cleanup.

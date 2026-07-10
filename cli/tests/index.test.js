@@ -7,6 +7,13 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = path.join(repoRoot, "cli", "src", "index.js");
 const assetAp = path.join(repoRoot, "cli", "assets", "skill", "scripts", "ap.py");
+const managedAgentProfiles = {
+  "browser-debugger.toml": { model: "gpt-5.6-sol", effort: "xhigh" },
+  "docs-researcher.toml": { model: "gpt-5.6-terra", effort: "medium" },
+  "explorer.toml": { model: "gpt-5.6-terra", effort: "medium" },
+  "fixer.toml": { model: "gpt-5.3-codex-spark", effort: "medium" },
+  "reviewer.toml": { model: "gpt-5.6-sol", effort: "xhigh" },
+};
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -41,6 +48,22 @@ function run(command, args, options = {}) {
 function writeFile(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
+}
+
+function readTomlString(text, key, file) {
+  const match = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"\\s*$`, "m"));
+  assert(match, `${file}: missing ${key}`);
+  return match[1];
+}
+
+function assertManagedAgentProfiles(agentsDir) {
+  for (const [filename, expected] of Object.entries(managedAgentProfiles)) {
+    const file = path.join(agentsDir, filename);
+    assert(exists(file), `missing managed agent: ${filename}`);
+    const text = fs.readFileSync(file, "utf8");
+    assert(readTomlString(text, "model", file) === expected.model, `${filename}: unexpected model`);
+    assert(readTomlString(text, "model_reasoning_effort", file) === expected.effort, `${filename}: unexpected reasoning effort`);
+  }
 }
 
 function assertStatusOk(repo) {
@@ -104,13 +127,41 @@ function testSyncCreatesScaffoldAndStatusConverges() {
   assertStatusOk(repo);
 }
 
+function testSyncRefreshesManagedAgentProfiles() {
+  const repo = tmpdir("sync-agent-profiles");
+  run("node", [cli, "init"], { cwd: repo });
+  const agentsDir = path.join(repo, ".agents", "agents");
+  assertManagedAgentProfiles(agentsDir);
+  run("node", [cli, "sync", "--projects", repo]);
+
+  for (const filename of Object.keys(managedAgentProfiles)) {
+    const file = path.join(agentsDir, filename);
+    const stale = fs.readFileSync(file, "utf8")
+      .replace(/^model\s*=.*$/m, 'model = "gpt-5.5"')
+      .replace(/^model_reasoning_effort\s*=.*$/m, 'model_reasoning_effort = "low"');
+    writeFile(file, stale);
+  }
+  const custom = path.join(agentsDir, "custom-local.toml");
+  const customText = 'name = "custom-local"\ndescription = "custom"\nmodel = "gpt-5.5"\n';
+  writeFile(custom, customText);
+
+  const before = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(before.status !== 0, "status should detect stale managed agent profiles");
+  run("node", [cli, "sync", "--projects", repo]);
+
+  assertManagedAgentProfiles(agentsDir);
+  assert(fs.readFileSync(custom, "utf8") === customText, "sync should preserve custom agent contents");
+  assertStatusOk(repo);
+}
+
 function testForcePreservesCustomAgents() {
   const repo = tmpdir("custom-agent");
   run("node", [cli, "init", "--force"], { cwd: repo });
   const custom = path.join(repo, ".agents", "agents", "custom-local.toml");
-  writeFile(custom, 'name = "custom-local"\ndescription = "custom"\nmodel = "gpt-5.5"\n');
+  const customText = 'name = "custom-local"\ndescription = "custom"\nmodel = "gpt-5.5"\n';
+  writeFile(custom, customText);
   run("node", [cli, "init", "--force"], { cwd: repo });
-  assert(exists(custom), "custom agent should be preserved");
+  assert(fs.readFileSync(custom, "utf8") === customText, "init --force should preserve custom agent contents");
 }
 
 function testBridgeIsGeneric() {
@@ -182,6 +233,7 @@ function testLedgerArchiveRecognizesSettledStatuses() {
 testPreflightAvoidsPartialInstall();
 testDestVariants();
 testSyncCreatesScaffoldAndStatusConverges();
+testSyncRefreshesManagedAgentProfiles();
 testForcePreservesCustomAgents();
 testBridgeIsGeneric();
 testUpgradeCleansManagedBridgeExtrasOnly();

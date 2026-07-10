@@ -26,6 +26,7 @@ except Exception:
     yaml = None
 
 from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status
+from scaffold_templates import scaffold_groups, templates_for
 
 
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
@@ -489,25 +490,105 @@ _MANAGED_EXTRA_CLEANUP_DIRS = {
     Path("data/templates/bridges"),
 }
 
+_CORE_DOC_TEMPLATES = [
+    Path("tasks/taskbook.md"),
+    Path("tasks/closure-log.md"),
+]
+
+
+def _inferred_gate_commands(repo: Path) -> dict[str, str]:
+    package_json = repo / "package.json"
+    if not package_json.exists():
+        return {}
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    scripts = payload.get("scripts") or {}
+    if not isinstance(scripts, dict):
+        return {}
+    inferred: dict[str, str] = {}
+    if isinstance(scripts.get("test"), str) and scripts["test"].strip():
+        inferred["gate_changed"] = (
+            "npm run test:changed"
+            if isinstance(scripts.get("test:changed"), str) and scripts["test:changed"].strip()
+            else "npm test"
+        )
+        inferred["gate_standard"] = (
+            "npm run test:standard"
+            if isinstance(scripts.get("test:standard"), str) and scripts["test:standard"].strip()
+            else "npm test"
+        )
+    if isinstance(scripts.get("test:full"), str) and scripts["test:full"].strip():
+        inferred["gate_full"] = "npm run test:full"
+    return inferred
+
+
+def _initialize_engineering_defaults(path: Path, repo: Path) -> None:
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    updated = text.replace(
+        'project:\n  name: ""',
+        f"project:\n  name: {json.dumps(repo.name, ensure_ascii=False)}",
+        1,
+    )
+    for key, gate_command in _inferred_gate_commands(repo).items():
+        updated = updated.replace(
+            f'  {key}: ""',
+            f"  {key}: {json.dumps(gate_command)}",
+            1,
+        )
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+
+
+def cmd_scaffold(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    group = str(args.group or "").strip().lower()
+    try:
+        selected = templates_for(group)
+    except KeyError as exc:
+        choices = ", ".join(scaffold_groups() + ["all"])
+        raise APError(f"Unknown scaffold group '{group}'. Choose one of: {choices}") from exc
+
+    write = bool(args.write)
+    force = bool(args.force)
+    actions: list[dict] = []
+    for rel, content in sorted(selected.items()):
+        path = repo / rel
+        if path.exists() and not force:
+            actions.append({"path": rel, "action": "exists"})
+            continue
+        action = "write" if write else "would-write"
+        actions.append({"path": rel, "action": action})
+        if write:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+    result = {"group": group, "mode": "write" if write else "plan", "actions": actions}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in actions:
+        print(f"[scaffold] {item['action']}: {item['path']}")
+    if not write:
+        print("[scaffold] plan only; re-run with --write to create missing files")
+
 
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
 
-    planned_copies = [
-        (templates / "docs", repo / "docs"),
-        (templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md"),
-    ]
+    planned_copies = [(templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md")]
+    for rel in _CORE_DOC_TEMPLATES:
+        planned_copies.append((templates / "docs" / rel, repo / "docs" / rel))
 
     if args.bridges:
         planned_copies.append((templates / "bridges" / "AGENTS.md", repo / "AGENTS.md"))
 
     tools_dir = repo / "docs" / "tools" / "autopipeline"
-    planned_copies.extend([
-        (Path(__file__).resolve(), tools_dir / "ap.py"),
-        (Path(__file__).resolve().parent / "core.py", tools_dir / "core.py"),
-        (Path(__file__).resolve().parent / "http_checks.py", tools_dir / "http_checks.py"),
-    ])
+    planned_copies.append((templates / "tools" / "ap.py", tools_dir / "ap.py"))
 
     conflicts: list[Path] = []
     for src, dst in planned_copies:
@@ -525,7 +606,14 @@ def cmd_install(args: argparse.Namespace) -> None:
     for src, dst in planned_copies:
         copy_tree(src, dst)
 
-    print(f"[install] OK: scaffold installed into {repo}")
+    _initialize_engineering_defaults(repo / "docs" / "ENGINEERING.md", repo)
+    if args.full:
+        cmd_scaffold(
+            argparse.Namespace(repo=str(repo), group="all", write=True, force=args.force, json=False)
+        )
+
+    layout = "full" if args.full else "minimal"
+    print(f"[install] OK: {layout} scaffold installed into {repo}")
     print(
         "[install] Next: edit docs/ENGINEERING.md frontmatter, set verification.*_required, "
         "fill only enabled environment fields, and commit that file into Git."
@@ -549,9 +637,10 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         })
 
     tool_files = [
-        (source_root / "scripts" / "ap.py", repo / "docs" / "tools" / "autopipeline" / "ap.py"),
-        (source_root / "scripts" / "core.py", repo / "docs" / "tools" / "autopipeline" / "core.py"),
-        (source_root / "scripts" / "http_checks.py", repo / "docs" / "tools" / "autopipeline" / "http_checks.py"),
+        (
+            source_root / "data" / "templates" / "tools" / "ap.py",
+            repo / "docs" / "tools" / "autopipeline" / "ap.py",
+        ),
     ]
     for src, dst in tool_files:
         if not src.exists():
@@ -585,6 +674,8 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         for dst in _iter_files(project_skill):
             rel = dst.relative_to(project_skill)
             if not (source_root / rel).exists():
+                if rel.parts[:3] == ("data", "templates", "docs"):
+                    continue
                 if rel.parent in _MANAGED_EXTRA_CLEANUP_DIRS:
                     add_action("skill", dst, "delete", "stale managed template")
                     if write:
@@ -592,11 +683,15 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
                 else:
                     add_action("skill", dst, "extra", "present only in project copy")
     else:
-        add_action("skill", project_skill, "missing", "run autocoding init --mode project --force")
+        add_action("skill", project_skill, "create", "install runtime required by the project launcher")
+        if write:
+            copy_tree(source_root, project_skill)
 
     docs_template = templates / "docs"
-    for src in _iter_files(docs_template):
-        rel = src.relative_to(docs_template)
+    for rel in _CORE_DOC_TEMPLATES:
+        src = docs_template / rel
+        if not src.exists():
+            continue
         dst = repo / "docs" / rel
         if not dst.exists():
             add_action("doc", dst, "create")
@@ -624,6 +719,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         add_action("config", engineering, "create")
         if write:
             copy_tree(template_engineering, engineering)
+            _initialize_engineering_defaults(engineering, repo)
 
     result = {
         "source_root": str(source_root),
@@ -746,7 +842,9 @@ def cmd_check_matrix(args: argparse.Namespace) -> None:
     docs_cfg = (cfg.get("docs") or {})
     matrix = Path(repo, str(docs_cfg.get("regression_matrix", "docs/testing/regression-matrix.md")))
     if not matrix.exists():
-        raise APError(f"Matrix not found: {matrix}")
+        raise APError(
+            f"Matrix not found: {matrix}. Create it with `ap.py scaffold testing --write`."
+        )
 
     rows = 0
     fail = []
@@ -813,15 +911,9 @@ def _candidate_skill_roots(repo: Path) -> list[Path]:
     project_root = repo / ".agents" / "skills" / "auto-coding-skill"
     global_root = Path.home() / ".agents" / "skills" / "auto-coding-skill"
 
-    # When upgrade is launched from a project-local skill copy, that copy may be
-    # stale. Prefer an external source or the global installation, and use the
-    # project-local copy only as a last resort.
-    candidates = []
-    if local_root != project_root:
-        candidates.append(local_root)
-    candidates.extend([global_root, project_root])
-    if local_root == project_root:
-        candidates.append(local_root)
+    # The runtime executing this command is authoritative. In particular, a
+    # modern project copy must not be overwritten by an older global copy.
+    candidates = [local_root, project_root, global_root]
 
     unique: list[Path] = []
     seen: set[Path] = set()
@@ -834,8 +926,23 @@ def _candidate_skill_roots(repo: Path) -> list[Path]:
 
 
 def _find_skill_asset_root(repo: Path) -> Path:
-    for root in _candidate_skill_roots(repo):
-        if (root / "data" / "templates").exists() and (root / "scripts" / "ap.py").exists():
+    candidates = _candidate_skill_roots(repo)
+
+    def is_asset_root(root: Path) -> bool:
+        return (root / "data" / "templates").exists() and (root / "scripts" / "ap.py").exists()
+
+    def has_modern_layout(root: Path) -> bool:
+        return (
+            is_asset_root(root)
+            and (root / "data" / "templates" / "tools" / "ap.py").exists()
+            and (root / "scripts" / "scaffold_templates.py").exists()
+        )
+
+    for root in candidates:
+        if has_modern_layout(root):
+            return root
+    for root in candidates:
+        if is_asset_root(root):
             return root
     raise APError(
         "Cannot find auto-coding-skill asset root. Run `autocoding init --mode global --force` "
@@ -987,6 +1094,10 @@ def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
 
 
 _GATE_SCOPES = {"auto", "changed", "standard", "full"}
+_WORKFLOW_PROFILES = {"auto", "micro", "standard", "high-risk"}
+_PROFILE_GATE_SCOPE = {"micro": "changed", "standard": "standard", "high-risk": "full"}
+_PROFILE_RANK = {"micro": 0, "standard": 1, "high-risk": 2}
+_SCOPE_RANK = {"changed": 0, "standard": 1, "full": 2}
 _DOC_PATH_PATTERNS = ["*.md", "docs/**"]
 _DEFAULT_FULL_PATH_PATTERNS = [
     ".agents/**",
@@ -1124,6 +1235,27 @@ def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
     return _unique_paths(paths)
 
 
+def _commit_changed_files(repo: Path, ref: str) -> list[str]:
+    commit_ref = _text(ref) or "HEAD"
+    result = run(
+        [
+            "git",
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--diff-filter=ACMRTUXB",
+            commit_ref,
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return _unique_paths([line.strip() for line in result.stdout.splitlines() if line.strip()])
+
+
 def _cleanup_generated_noise(repo: Path) -> None:
     candidates = [
         rel for rel in _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"])
@@ -1145,6 +1277,16 @@ def _cleanup_generated_noise(repo: Path) -> None:
 
 def _docs_only(paths: list[str]) -> bool:
     return bool(paths) and all(_path_matches(path, _DOC_PATH_PATTERNS) for path in paths)
+
+
+def _tests_only(paths: list[str]) -> bool:
+    non_docs = [path for path in paths if not _path_matches(path, _DOC_PATH_PATTERNS)]
+    if not non_docs:
+        return False
+    return all(
+        re.search(r"(^|[/_.-])(test|tests|spec|specs)([/_.-]|$)", path.lower())
+        for path in non_docs
+    )
 
 
 def _gate_rules(gate_cfg: dict) -> list[dict]:
@@ -1189,6 +1331,12 @@ def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tup
     matching_rules = _matching_gate_rules(paths, gate_cfg)
     reasons: list[str] = []
 
+    rule_scopes = {_text(rule.get("scope")).lower() for rule in matching_rules if _text(rule.get("scope"))}
+    if "full" in rule_scopes:
+        return "full", ["matched gate rule with scope=full"], matching_rules
+    if any(_path_matches(path, _gate_full_patterns(gate_cfg)) for path in paths):
+        return "full", ["changed files match full-gate patterns"], matching_rules
+
     if scope != "auto":
         return scope, [f"requested scope: {scope}"], matching_rules
 
@@ -1198,14 +1346,8 @@ def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tup
             fallback = "standard"
         return fallback, ["no changed files detected"], matching_rules
 
-    rule_scopes = {_text(rule.get("scope")).lower() for rule in matching_rules if _text(rule.get("scope"))}
-    if "full" in rule_scopes:
-        return "full", ["matched gate rule with scope=full"], matching_rules
     if "standard" in rule_scopes:
         return "standard", ["matched gate rule with scope=standard"], matching_rules
-
-    if any(_path_matches(path, _gate_full_patterns(gate_cfg)) for path in paths):
-        return "full", ["changed files match full-gate patterns"], matching_rules
 
     if _docs_only(paths):
         return "changed", ["docs-only change"], matching_rules
@@ -1222,8 +1364,25 @@ def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tup
     return fallback, reasons, matching_rules
 
 
-def _impact_summary(cfg: dict, repo: Path, requested_scope: str, base_ref: str = "") -> dict:
-    paths = _changed_files(repo, base_ref=base_ref)
+def _impact_summary(
+    cfg: dict,
+    repo: Path,
+    requested_scope: str,
+    base_ref: str = "",
+    changed_paths: Optional[list[str]] = None,
+) -> dict:
+    paths = _changed_files(repo, base_ref=base_ref) if changed_paths is None else _unique_paths(changed_paths)
+    docs_cfg = cfg.get("docs") or {}
+    ignored_runtime_paths = {
+        _text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl",
+        _text(docs_cfg.get("closure_log")) or "docs/tasks/closure-log.md",
+        _text(_gate_cfg(cfg).get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl",
+    }
+    ignored_runtime_paths = {
+        path[2:] if path.startswith("./") else path
+        for path in ignored_runtime_paths
+    }
+    paths = [path for path in paths if path not in ignored_runtime_paths]
     scope, reasons, matching_rules = _select_gate_scope(cfg, requested_scope, paths)
     return {
         "requested_scope": requested_scope or _text(_gate_cfg(cfg).get("default_scope")) or "standard",
@@ -1240,6 +1399,10 @@ def _print_impact(summary: dict, as_json: bool = False) -> None:
         return
     print(f"[impact] requested_scope={summary['requested_scope']}")
     print(f"[impact] selected_scope={summary['selected_scope']}")
+    if summary.get("profile"):
+        print(f"[impact] profile={summary['profile']}")
+    if summary.get("effective_mode"):
+        print(f"[impact] effective_mode={summary['effective_mode']}")
     for reason in summary.get("reasons") or []:
         print(f"[impact] reason: {reason}")
     for rule in summary.get("matched_rules") or []:
@@ -1291,11 +1454,11 @@ def _run_standard_gate(repo: Path, cfg: dict) -> list[str]:
 
 
 def _run_full_gate(repo: Path, cfg: dict) -> list[str]:
-    command = _run_first_configured_command(repo, cfg, ["gate_full", "full_gate", "gate_standard", "light_gate", "test", "build"])
+    command = _run_first_configured_command(repo, cfg, ["gate_full", "full_gate"])
     if not command:
         raise APError(
-            "Full gate is under-configured. Add commands.gate_full, commands.full_gate, commands.test, "
-            "commands.build, or commands.light_gate."
+            "Full gate is under-configured. High-risk and verify work requires "
+            "commands.gate_full or commands.full_gate; light/standard fallbacks do not count."
         )
     return [command]
 
@@ -1782,9 +1945,6 @@ def _docs_ledger_check_result(repo: Path, cfg: dict) -> dict:
         blocking.append(f"docs.taskbook missing or unreadable: {_repo_rel(repo, taskbook)}")
     if closure_lines is None:
         blocking.append(f"docs.closure_log missing or unreadable: {_repo_rel(repo, closure_log)}")
-    if not design_dir.exists() or not design_dir.is_dir():
-        blocking.append(f"docs.design_dir missing on disk: {_repo_rel(repo, design_dir)}")
-
     if taskbook_lines is not None and taskbook_max > 0 and taskbook_lines > taskbook_max:
         exceeded.append("taskbook")
         _ledger_message(
@@ -2242,6 +2402,9 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
 
     structure_cfg = _structure_cfg(cfg)
     optimization_cfg = _optimization_cfg(cfg)
+    enforcement = _text(structure_cfg.get("enforcement")).lower() or "advisory"
+    if enforcement not in {"advisory", "blocking"}:
+        raise APError("structure.enforcement must be 'advisory' or 'blocking'")
     warn_file_lines = _int_config(structure_cfg.get("max_file_lines_warn"), 800)
     block_file_lines = _int_config(structure_cfg.get("max_file_lines_block"), 1500)
     warn_function_lines = _int_config(structure_cfg.get("max_function_lines_warn"), 120)
@@ -2294,18 +2457,25 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
         else:
             warnings.extend(boundary_issues)
 
-    missing_docs: list[str] = []
-    for key, rel_path in _configured_structure_docs(cfg).items():
-        if rel_path and not Path(repo, rel_path).exists():
-            missing_docs.append(f"{key} missing on disk: {rel_path}")
     require_baseline = _bool_config(optimization_cfg.get("require_baseline_for_global_review"), True)
-    if missing_docs and selected_scope == "full" and require_baseline:
-        blocking.extend(missing_docs)
-    else:
-        warnings.extend(missing_docs)
+    if require_baseline:
+        missing_docs = [
+            f"{key} missing on disk: {rel_path}"
+            for key, rel_path in _configured_structure_docs(cfg).items()
+            if rel_path and not Path(repo, rel_path).exists()
+        ]
+        if selected_scope == "full":
+            blocking.extend(missing_docs)
+        else:
+            warnings.extend(missing_docs)
+
+    if enforcement == "advisory" and blocking:
+        warnings.extend(f"{message} [advisory]" for message in blocking)
+        blocking = []
 
     result = {
         "scope": selected_scope,
+        "enforcement": enforcement,
         "inspected_files": inspected,
         "blocking": blocking,
         "warnings": warnings,
@@ -2630,14 +2800,23 @@ def _classify_paths(paths: list[str]) -> dict:
     categories: set[str] = set()
     for path in paths:
         lower = path.lower()
+        words = {word for word in re.split(r"[^a-z0-9]+", lower) if word}
         if _path_matches(path, _DEFAULT_FULL_PATH_PATTERNS):
             categories.add("release_or_tooling")
-        if any(token in lower for token in ["migration", "schema", "database", "/db/", "/sql/"]) or lower.endswith(".sql"):
+        if words & {"migration", "migrations", "schema", "database", "db", "sql"} or lower.endswith(".sql"):
             categories.add("db")
         if any(token in lower for token in ["api", "controller", "handler", "route", "server"]):
             categories.add("api")
-        if any(token in lower for token in ["auth", "permission", "role", "tenant", "security"]):
+        if words & {"auth", "authentication", "authorization", "permission", "permissions", "role", "roles", "tenant", "security"}:
             categories.add("auth")
+        if words & {"payment", "payments", "billing", "invoice", "invoices", "checkout", "order", "orders"}:
+            categories.add("payment")
+        if words & {"upload", "uploads", "download", "downloads", "attachment", "attachments"}:
+            categories.add("file_transfer")
+        if words & {"nginx", "gateway", "ingress"} or {"reverse", "proxy"} <= words:
+            categories.add("gateway")
+        if "production" in words or "prod" in words and "config" in words or ".env.prod" in lower:
+            categories.add("prod_config")
         if any(token in lower for token in ["page", "component", "view", "frontend", "miniapp", ".tsx", ".jsx", ".vue", ".scss", ".css"]):
             categories.add("ui")
         if any(token in lower for token in ["test", "spec", "__tests__"]):
@@ -2648,61 +2827,222 @@ def _classify_paths(paths: list[str]) -> dict:
             categories.add("structure")
     return {
         "categories": sorted(categories),
-        "needs_dd": bool(categories & {"api", "db", "auth", "release_or_tooling"}) or len(paths) > 12,
+        "needs_dd": bool(
+            categories
+            & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config", "release_or_tooling"}
+        )
+        or len(paths) > 12,
         "needs_adr": bool(categories & {"structure", "release_or_tooling"}) and not categories <= {"docs"},
         "needs_browser": "ui" in categories,
-        "needs_jenkins": bool(categories & {"release_or_tooling", "db", "auth"}),
-        "needs_target": bool(categories & {"api", "db", "auth", "ui"}),
+        "needs_jenkins": bool(
+            categories & {"release_or_tooling", "db", "auth", "payment", "gateway", "prod_config"}
+        ),
+        "needs_target": bool(
+            categories & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config", "ui"}
+        ),
+    }
+
+
+def _normalize_workflow_profile(value: object, default: str = "auto") -> str:
+    profile = _text(value).lower() or default
+    if profile not in _WORKFLOW_PROFILES:
+        raise APError("workflow.profile must be one of: " + ", ".join(sorted(_WORKFLOW_PROFILES)))
+    return profile
+
+
+def _configured_workflow_profile(cfg: dict) -> str:
+    return _normalize_workflow_profile((cfg.get("workflow") or {}).get("profile"))
+
+
+def _recommended_agents(profile: str, categories: set[str], classification: dict) -> list[str]:
+    if profile == "micro":
+        return []
+    roles = ["explorer"]
+    if categories & {"api", "release_or_tooling"}:
+        roles.append("docs_researcher")
+    roles.append("fixer")
+    if classification.get("needs_browser"):
+        roles.append("browser_debugger")
+    if profile == "high-risk":
+        roles.append("reviewer")
+    return roles
+
+
+def _resolve_execution_plan(
+    cfg: dict,
+    repo: Path,
+    *,
+    requested_scope: str = "",
+    requested_profile: str = "",
+    requested_mode: str = "",
+    base_ref: str = "",
+    changed_paths: Optional[list[str]] = None,
+) -> dict:
+    impact = _impact_summary(
+        cfg,
+        repo,
+        requested_scope=requested_scope,
+        base_ref=base_ref,
+        changed_paths=changed_paths,
+    )
+    paths = list(impact.get("changed_files") or [])
+    classification = _classify_paths(paths)
+    categories = set(classification["categories"])
+    matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
+    configured_profile = _configured_workflow_profile(cfg)
+    requested_profile_value = _normalize_workflow_profile(requested_profile) if requested_profile else ""
+    configured_mode = _workflow_mode(cfg)
+    requested_mode_value = _text(requested_mode).lower()
+    if requested_mode_value and requested_mode_value not in {"dev", "verify"}:
+        raise APError("workflow.mode must be 'dev' or 'verify'.")
+
+    detected_profile = "standard"
+    profile_reasons: list[str] = []
+    docs_only_paths = _docs_only(paths)
+    docs_or_tests_only = bool(paths) and (
+        (docs_only_paths and str(impact["selected_scope"]) != "full") or _tests_only(paths)
+    )
+    if docs_or_tests_only and str(impact["selected_scope"]) != "full":
+        detected_profile = "micro"
+        profile_reasons.append("only docs/test files changed")
+
+    raw_rule_profiles = {_text(rule.get("profile")).lower() for rule in matching_rules if _text(rule.get("profile"))}
+    invalid_rule_profiles = raw_rule_profiles - (_WORKFLOW_PROFILES - {"auto"})
+    if invalid_rule_profiles:
+        raise APError(
+            "matched gate rule has invalid profile: " + ", ".join(sorted(invalid_rule_profiles))
+        )
+    rule_profiles = raw_rule_profiles
+    if "micro" in rule_profiles and detected_profile == "standard":
+        detected_profile = "micro"
+        profile_reasons.append("matched gate rule with profile=micro")
+    if "standard" in rule_profiles and detected_profile == "micro":
+        detected_profile = "standard"
+        profile_reasons.append("matched gate rule with profile=standard")
+
+    high_categories = {
+        "db",
+        "auth",
+        "payment",
+        "file_transfer",
+        "gateway",
+        "prod_config",
+        "release_or_tooling",
+    }
+    high_signals: list[str] = []
+    if categories & high_categories and not docs_or_tests_only:
+        high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
+    if str(impact["selected_scope"]) == "full":
+        high_signals.append("impact requires full gate")
+    if "high-risk" in rule_profiles:
+        high_signals.append("matched gate rule with profile=high-risk")
+    if len(paths) > 12 and not docs_or_tests_only:
+        high_signals.append("change spans more than 12 files")
+    if requested_scope == "full":
+        high_signals.append("full scope explicitly requested")
+
+    if high_signals:
+        detected_profile = "high-risk"
+        profile_reasons.extend(high_signals)
+
+    effective_profile = detected_profile if configured_profile == "auto" else configured_profile
+    if configured_profile != "auto":
+        profile_reasons.append(f"configured profile baseline: {configured_profile}")
+    if requested_profile_value:
+        requested_effective = detected_profile if requested_profile_value == "auto" else requested_profile_value
+        configured_floor = None if configured_profile == "auto" else configured_profile
+        if configured_floor and _PROFILE_RANK[requested_effective] < _PROFILE_RANK[configured_floor]:
+            effective_profile = configured_floor
+            profile_reasons.append(
+                f"configured profile={configured_floor} cannot be downgraded to {requested_effective}"
+            )
+        else:
+            effective_profile = requested_effective
+    if detected_profile == "high-risk" and effective_profile != "high-risk":
+        effective_profile = "high-risk"
+        profile_reasons.append("high-risk signals cannot be downgraded")
+    effective_mode = requested_mode_value or configured_mode
+    if configured_mode == "verify":
+        effective_mode = "verify"
+    if effective_mode == "verify" and effective_profile != "high-risk":
+        effective_profile = "high-risk"
+        profile_reasons.append("verify mode requires high-risk execution")
+    if not profile_reasons:
+        profile_reasons.append(f"configured profile={configured_profile}")
+
+    selected_scope = _PROFILE_GATE_SCOPE[effective_profile]
+    explicit_scope = _text(requested_scope).lower()
+    if explicit_scope in _SCOPE_RANK and _SCOPE_RANK[explicit_scope] > _SCOPE_RANK[selected_scope]:
+        selected_scope = explicit_scope
+    if str(impact["selected_scope"]) == "full":
+        selected_scope = "full"
+    effective_mode = "verify" if effective_profile == "high-risk" else effective_mode
+    execution_reasons = list(impact.get("reasons") or [])
+    if selected_scope != str(impact["selected_scope"]):
+        execution_reasons.append(f"profile={effective_profile} requires scope={selected_scope}")
+
+    jenkins_required = _verification_required(cfg, "jenkins", default=True)
+    target_env_required = _verification_required(cfg, "target_env", default=True)
+    needs_jenkins = bool(classification["needs_jenkins"] and jenkins_required)
+    needs_target = bool(classification["needs_target"] and target_env_required)
+    needs_dd = bool(classification["needs_dd"] or effective_profile == "high-risk")
+
+    return {
+        **impact,
+        "reasons": execution_reasons,
+        "configured_profile": configured_profile,
+        "requested_profile": requested_profile_value or None,
+        "profile": effective_profile,
+        "profile_reasons": profile_reasons,
+        "configured_mode": configured_mode,
+        "requested_mode": requested_mode_value or None,
+        "effective_mode": effective_mode,
+        "selected_scope": selected_scope,
+        "categories": sorted(categories),
+        "needs_dd": needs_dd,
+        "needs_adr": classification["needs_adr"],
+        "needs_browser": classification["needs_browser"],
+        "needs_jenkins": needs_jenkins,
+        "needs_target": needs_target,
+        "recommended_agents": _recommended_agents(effective_profile, categories, classification),
     }
 
 
 def cmd_classify(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
-    scope = str(args.scope or "").strip().lower()
-    impact = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
-    paths = list(impact.get("changed_files") or [])
-    path_classification = _classify_paths(paths)
-    jenkins_required = _verification_required(cfg, "jenkins", default=True)
-    target_env_required = _verification_required(cfg, "target_env", default=True)
-    needs_jenkins = bool(path_classification["needs_jenkins"] and jenkins_required)
-    needs_target = bool(path_classification["needs_target"] and target_env_required)
-    selected_scope = str(impact["selected_scope"])
-    risk = "P3"
-    if needs_jenkins or selected_scope == "full":
-        risk = "P1"
-    elif needs_target or path_classification["needs_dd"]:
-        risk = "P2"
-    elif not paths:
-        risk = "P3"
+    plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        requested_scope=_text(getattr(args, "scope", "")).lower(),
+        requested_profile=_text(getattr(args, "profile", "")).lower(),
+        requested_mode=_text(getattr(args, "mode", "")).lower(),
+        base_ref=_text(getattr(args, "base", "")),
+    )
+    risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands = [
         "python3 docs/tools/autopipeline/ap.py impact --scope auto",
         "python3 docs/tools/autopipeline/ap.py structure-check --scope auto",
-        f"python3 docs/tools/autopipeline/ap.py light-gate --scope {selected_scope} --explain",
+        f"python3 docs/tools/autopipeline/ap.py light-gate --profile {plan['profile']} --explain",
     ]
-    if needs_jenkins:
+    if plan["needs_dd"]:
+        commands.append("python3 docs/tools/autopipeline/ap.py scaffold design --write")
+    if plan["needs_jenkins"]:
         commands.append("python3 docs/tools/autopipeline/ap.py verify-jenkins")
     result = {
-        "requested_scope": impact["requested_scope"],
-        "selected_scope": selected_scope,
+        **plan,
         "risk": risk,
-        "changed_files": paths,
-        "categories": path_classification["categories"],
-        "needs_dd": path_classification["needs_dd"],
-        "needs_adr": path_classification["needs_adr"],
-        "needs_browser": path_classification["needs_browser"],
-        "needs_jenkins": needs_jenkins,
-        "needs_target": needs_target,
         "recommended_commands": commands,
-        "reasons": impact.get("reasons") or [],
-        "matched_rules": impact.get("matched_rules") or [],
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"[classify] risk={risk}")
-        print(f"[classify] selected_scope={selected_scope}")
+        print(f"[classify] profile={result['profile']}")
+        print(f"[classify] effective_mode={result['effective_mode']}")
+        print(f"[classify] selected_scope={result['selected_scope']}")
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
+        print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
         for key in ["needs_dd", "needs_adr", "needs_browser", "needs_jenkins", "needs_target"]:
             print(f"[classify] {key}={result[key]}")
         for command in commands:
@@ -2736,15 +3076,29 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     light_gate_start = time.time()
-    cmd_doctor(argparse.Namespace(repo=str(repo)))
+    cmd_doctor(
+        argparse.Namespace(
+            repo=str(repo),
+            profile=_text(getattr(args, "profile", "")).lower(),
+            mode=_text(getattr(args, "mode", "")).lower(),
+        )
+    )
     cfg = _load_cfg(repo)
-    requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
-    impact = _impact_summary(cfg, repo, requested_scope=requested_scope, base_ref=str(getattr(args, "base", "") or ""))
+    plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        requested_scope=_text(getattr(args, "scope", "")).lower(),
+        requested_profile=_text(getattr(args, "profile", "")).lower(),
+        requested_mode=_text(getattr(args, "mode", "")).lower(),
+        base_ref=_text(getattr(args, "base", "")),
+    )
     if getattr(args, "explain", False):
-        _print_impact(impact)
+        _print_impact(plan)
+        for reason in plan["profile_reasons"]:
+            print(f"[impact] profile_reason: {reason}")
 
-    selected_scope = str(impact["selected_scope"])
-    paths = list(impact.get("changed_files") or [])
+    selected_scope = str(plan["selected_scope"])
+    paths = list(plan.get("changed_files") or [])
     matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
     executed: list[str] = []
     executed.extend(_run_structure_check_for_gate(repo, cfg, selected_scope, str(getattr(args, "base", "") or "")))
@@ -2771,16 +3125,32 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
         cfg,
         "light_gate",
         "pass",
-        {"scope": selected_scope, "executed": executed, "duration_s": round(duration_s, 3), "changed_files": paths},
+        {
+            "profile": plan["profile"],
+            "effective_mode": plan["effective_mode"],
+            "scope": selected_scope,
+            "executed": executed,
+            "duration_s": round(duration_s, 3),
+            "changed_files": paths,
+        },
     )
-    print(f"[light-gate] OK scope={selected_scope}: " + ", ".join(executed))
+    print(
+        f"[light-gate] OK profile={plan['profile']} mode={plan['effective_mode']} "
+        f"scope={selected_scope}: " + ", ".join(executed)
+    )
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
-    scope = str(args.scope or "").strip().lower()
-    summary = _impact_summary(cfg, repo, requested_scope=scope, base_ref=str(args.base or ""))
+    summary = _resolve_execution_plan(
+        cfg,
+        repo,
+        requested_scope=_text(getattr(args, "scope", "")).lower(),
+        requested_profile=_text(getattr(args, "profile", "")).lower(),
+        requested_mode=_text(getattr(args, "mode", "")).lower(),
+        base_ref=_text(getattr(args, "base", "")),
+    )
     _print_impact(summary, as_json=bool(args.json))
     _record_evidence(repo, cfg, "impact", "pass", summary)
 
@@ -2930,41 +3300,100 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     jenkins_cfg = (cfg.get("jenkins") or {})
     docs_cfg = (cfg.get("docs") or {})
     runtime_cfg = (cfg.get("runtime") or {})
+    structure_cfg = _structure_cfg(cfg)
 
     missing: List[str] = []
     validation_errors: List[str] = []
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
+    profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
     target_env_required = _verification_required(cfg, "target_env", default=True)
     jenkins_required = _verification_required(cfg, "jenkins", default=True)
     if mode not in {"dev", "verify"}:
         missing.append("workflow.mode (must be dev or verify)")
+    if profile not in _WORKFLOW_PROFILES:
+        missing.append("workflow.profile (must be auto, micro, standard, or high-risk)")
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
-    if not (
-        str(commands.get("gate_changed") or "").strip()
-        or str(commands.get("gate_standard") or "").strip()
-        or str(commands.get("gate_full") or "").strip()
-        or str(commands.get("full_gate") or "").strip()
-        or str(commands.get("light_gate") or "").strip()
-        or str(commands.get("quick_test") or "").strip()
-        or str(commands.get("test") or "").strip()
-        or str(commands.get("build") or "").strip()
-    ):
-        missing.append(
-            "commands.gate_changed/gate_standard/gate_full, commands.light_gate, "
-            "commands.quick_test, commands.test, or commands.build"
-        )
+    enforcement = _text(structure_cfg.get("enforcement")).lower()
+    if enforcement and enforcement not in {"advisory", "blocking"}:
+        validation_errors.append("structure.enforcement must be advisory or blocking")
+    gate_cfg = _gate_cfg(cfg)
+    raw_rules = gate_cfg.get("rules") or []
+    rules_valid = isinstance(raw_rules, list)
+    if not rules_valid:
+        validation_errors.append("gate.rules must be a list")
+        raw_rules = []
+    for index, rule in enumerate(raw_rules):
+        if not isinstance(rule, dict):
+            rules_valid = False
+            validation_errors.append(f"gate.rules[{index}] must be a mapping")
+            continue
+        rule_profile = _text(rule.get("profile")).lower()
+        if rule_profile and rule_profile not in _WORKFLOW_PROFILES - {"auto"}:
+            rules_valid = False
+            validation_errors.append(
+                f"gate.rules[{index}].profile must be micro, standard, or high-risk"
+            )
+        rule_scope = _text(rule.get("scope")).lower()
+        if rule_scope and rule_scope not in {"changed", "standard", "full"}:
+            rules_valid = False
+            validation_errors.append(
+                f"gate.rules[{index}].scope must be changed, standard, or full"
+            )
+
+    if mode in {"dev", "verify"} and profile in _WORKFLOW_PROFILES and rules_valid:
+        try:
+            plan = _resolve_execution_plan(
+                cfg,
+                repo,
+                requested_profile=_text(getattr(args, "profile", "")).lower(),
+                requested_mode=_text(getattr(args, "mode", "")).lower(),
+            )
+        except APError as exc:
+            validation_errors.append(str(exc))
+        else:
+            effective_profile = str(plan["profile"])
+            changed_files = list(plan.get("changed_files") or [])
+            matching_rules = _matching_gate_rules(changed_files, gate_cfg)
+            rule_changed_gate = any(
+                any(_configured_command(cfg, _command_name(ref)) for ref in _as_list(rule.get("commands")))
+                for rule in matching_rules
+            )
+            changed_gate = bool(
+                _configured_command(cfg, "gate_changed")
+                or _configured_command(cfg, "quick_test")
+                or _configured_command(cfg, "test")
+                or _configured_command(cfg, "build")
+                or rule_changed_gate
+                or _docs_only(changed_files)
+            )
+            standard_gate = bool(
+                _configured_command(cfg, "gate_standard")
+                or _configured_command(cfg, "light_gate")
+                or _configured_command(cfg, "quick_test")
+                or _configured_command(cfg, "test")
+                or _configured_command(cfg, "build")
+            )
+            full_gate = bool(
+                _configured_command(cfg, "gate_full")
+                or _configured_command(cfg, "full_gate")
+            )
+            if effective_profile == "micro" and not changed_gate:
+                missing.append(
+                    "micro gate command: commands.gate_changed, quick_test, test, build, "
+                    "or a matching gate rule command"
+                )
+            elif effective_profile == "standard" and not standard_gate:
+                missing.append(
+                    "standard gate command: commands.gate_standard, light_gate, quick_test, test, or build"
+                )
+            elif effective_profile == "high-risk" and not full_gate:
+                missing.append(
+                    "full gate command: commands.gate_full or commands.full_gate "
+                    "(required for high-risk/verify execution)"
+                )
     if target_env_required:
-        _require_explicit_field(missing, "target_env.name", target_cfg.get("name"))
-        _require_explicit_field(missing, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
-        _require_explicit_field(missing, "target_env.frontend_username", target_cfg.get("frontend_username"))
-        _require_secret_reference(missing, "target_env", target_cfg, "frontend_password")
-        _require_explicit_field(missing, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
-        _require_explicit_field(missing, "target_env.backend_username", target_cfg.get("backend_username"))
-        _require_secret_reference(missing, "target_env", target_cfg, "backend_password")
-        _require_explicit_field(missing, "target_env.backend_root_username", target_cfg.get("backend_root_username"))
-        _require_secret_reference(missing, "target_env", target_cfg, "backend_root_password")
         _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
         _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
 
@@ -2983,9 +3412,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     repo_docs = {
         "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
         "docs.closure_log": Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md"))),
-        "docs.api_doc": Path(repo, str(docs_cfg.get("api_doc", "docs/interfaces/api.md"))),
-        "docs.api_change_log": Path(repo, str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md"))),
     }
+    api_doc = Path(repo, str(docs_cfg.get("api_doc", "docs/interfaces/api.md")))
+    api_change_log = Path(repo, str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md")))
+    api_docs_enabled = (
+        _bool_config(docs_cfg.get("api_docs_required"), False)
+        if "api_docs_required" in docs_cfg
+        else api_doc.exists() or api_change_log.exists()
+    )
+    if api_docs_enabled:
+        repo_docs["docs.api_doc"] = api_doc
+        repo_docs["docs.api_change_log"] = api_change_log
     for key, path in repo_docs.items():
         if not path.exists():
             validation_errors.append(f"{key} missing on disk: {path}")
@@ -3163,23 +3600,76 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
 
 
 def cmd_verify_api_docs(args: argparse.Namespace) -> None:
-    """Ensure API markdown doc and change-log exist."""
+    """Ensure enabled or already materialized API docs are complete."""
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     docs = (cfg.get("docs") or {})
     api_doc = Path(repo, str(docs.get("api_doc", "docs/interfaces/api.md")))
     change_log = Path(repo, str(docs.get("api_change_log", "docs/interfaces/api-change-log.md")))
+    if "api_docs_required" in docs:
+        required = _bool_config(docs.get("api_docs_required"), False)
+    else:
+        required = api_doc.exists() or change_log.exists()
+    if not required:
+        _record_evidence(repo, cfg, "verify_api_docs", "skipped", {"reason": "api_docs_required=false"})
+        print("[verify-api-docs] skipped: optional API docs are not enabled")
+        return
     missing = [p for p in [api_doc, change_log] if not p.exists()]
     if missing:
-        raise APError("Missing API docs: " + ", ".join([str(p) for p in missing]))
+        raise APError(
+            "Missing API docs: "
+            + ", ".join([str(p) for p in missing])
+            + ". Create them with `ap.py scaffold api --write`."
+        )
     _record_evidence(repo, cfg, "verify_api_docs", "pass", {"api_doc": str(api_doc), "api_change_log": str(change_log)})
     print(f"[verify-api-docs] OK: {api_doc} + {change_log}")
+
+
+def _validate_closure_result(effective_mode: str, result: str) -> None:
+    mode = _text(effective_mode).lower()
+    normalized_result = _text(result).upper()
+    if mode == "dev" and normalized_result == "PASS":
+        raise APError("PASS requires verify mode; use DEV-CLOSED, PARTIAL, or FAIL for dev execution.")
+    if mode == "verify" and normalized_result == "DEV-CLOSED":
+        raise APError("DEV-CLOSED is only valid for dev mode; use PASS, PARTIAL, or FAIL for verify execution.")
+
+
+def _validate_closure_evidence(result: str, verification_items: list[str]) -> None:
+    if _text(result).upper() != "PASS":
+        return
+    meaningful = [
+        _text(item)
+        for item in verification_items
+        if _text(item) and not _is_placeholder(item) and _text(item).lower() not in {"none", "n/a", "not run"}
+    ]
+    if not meaningful:
+        raise APError("PASS requires at least one concrete --verification evidence item.")
 
 
 def cmd_record_closure(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        requested_profile=_text(getattr(args, "profile", "")).lower(),
+        requested_mode=_text(getattr(args, "mode", "")).lower(),
+    )
+    if not plan.get("changed_files"):
+        commit_paths = _commit_changed_files(repo, _text(getattr(args, "commit", "")) or "HEAD")
+        if commit_paths:
+            plan = _resolve_execution_plan(
+                cfg,
+                repo,
+                requested_profile=_text(getattr(args, "profile", "")).lower(),
+                requested_mode=_text(getattr(args, "mode", "")).lower(),
+                changed_paths=commit_paths,
+            )
+    profile = str(plan["profile"])
+    _validate_closure_result(str(plan["effective_mode"]), str(args.result))
+    verification_items = list(args.verification or [])
+    _validate_closure_evidence(str(args.result), verification_items)
     docs_cfg = (cfg.get("docs") or {})
     target_cfg = (cfg.get("target_env") or {})
     taskbook = Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md")))
@@ -3193,12 +3683,10 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     commit_value = _resolve_git_short_sha(repo, args.commit)
     target_env = str(args.target_env or target_cfg.get("name") or "").strip() or "(not set)"
-    verification_items = args.verification or []
     verification_text = "; ".join(verification_items) if verification_items else "TODO"
     follow_up = str(args.follow_up or "").strip() or "none"
     jenkins_build = str(args.jenkins or "").strip() or "TODO"
     structure_check = str(getattr(args, "structure_check", "") or "").strip() or "TODO"
-
     lines = [
         f"## {task_id} — {title} — {timestamp}",
         f"- Task: {task_id}",
@@ -3206,6 +3694,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
         f"- CI/Jenkins Build: {jenkins_build}",
         f"- Target Env: {target_env}",
         f"- Verification: {verification_text}",
+        f"- Effective Profile: {profile}",
         f"- Structure Check: {structure_check}",
         f"- Result: {args.result}",
         f"- Follow-up: {follow_up}",
@@ -3227,7 +3716,13 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
         cfg,
         "record_closure",
         "pass",
-        {"task_id": task_id, "result": args.result, "commit": commit_value, "structure_check": structure_check},
+        {
+            "task_id": task_id,
+            "result": args.result,
+            "commit": commit_value,
+            "profile": profile,
+            "structure_check": structure_check,
+        },
     )
     print(f"[record-closure] OK: {closure_log}")
 
@@ -3255,6 +3750,7 @@ def _record_commit_push_closure(
             verification=verification,
             result=result,
             follow_up=follow_up,
+            profile=str(getattr(args, "effective_profile", "") or getattr(args, "profile", "") or ""),
             structure_check=structure_check,
             initial_commit=args.initial_commit,
             jenkins_failure=args.jenkins_failure,
@@ -3266,9 +3762,25 @@ def _record_commit_push_closure(
 def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
-    cmd_doctor(argparse.Namespace(repo=str(repo)))
+    cmd_doctor(
+        argparse.Namespace(
+            repo=str(repo),
+            profile=_text(getattr(args, "profile", "")).lower(),
+            mode=_text(getattr(args, "mode", "")).lower(),
+        )
+    )
     cfg = _load_cfg(repo)
-    mode = _workflow_mode(cfg, args)
+    plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        requested_scope="",
+        requested_profile=_text(getattr(args, "profile", "")).lower(),
+        requested_mode=_text(getattr(args, "mode", "")).lower(),
+    )
+    mode = str(plan["effective_mode"])
+    args.effective_profile = str(plan["profile"])
+    if args.result:
+        _validate_closure_result(mode, str(args.result))
     target_cfg = (cfg.get("target_env") or {})
     target_env_required = _verification_required(cfg, "target_env", default=True)
     jenkins_required = _verification_required(cfg, "jenkins", default=True)
@@ -3280,7 +3792,16 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
         cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
 
     if mode in {"dev", "verify"} or args.require_light_gate:
-        cmd_light_gate(argparse.Namespace(repo=str(repo)))
+        cmd_light_gate(
+            argparse.Namespace(
+                repo=str(repo),
+                scope=plan["selected_scope"],
+                profile=plan["profile"],
+                mode=mode,
+                base="",
+                explain=False,
+            )
+        )
         structure_check_status = "passed via light-gate" if _structure_gate_enabled(cfg) else "skipped (structure disabled)"
 
     if args.require_jenkins:
@@ -3391,7 +3912,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             follow_up=args.follow_up or "none",
             structure_check=args.structure_check or structure_check_status,
         )
-    print(f"[commit-push] OK - mode={mode}")
+    print(f"[commit-push] OK - profile={plan['profile']} mode={mode} scope={plan['selected_scope']}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -3402,7 +3923,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sp.add_parser("install")
     s.add_argument("--bridges", action="store_true")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--full", action="store_true", help="Also materialize all optional document templates")
     s.set_defaults(func=cmd_install)
+
+    s = sp.add_parser("scaffold")
+    s.add_argument("group", choices=scaffold_groups() + ["all"])
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--force", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_scaffold)
 
     s = sp.add_parser("upgrade")
     s.add_argument("--dry-run", action="store_true")
@@ -3434,12 +3963,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("impact")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
+    s.add_argument("--mode", choices=["dev", "verify"], default="")
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_impact)
 
     s = sp.add_parser("classify")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
+    s.add_argument("--mode", choices=["dev", "verify"], default="")
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
@@ -3469,6 +4002,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("light-gate")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
+    s.add_argument("--mode", choices=["dev", "verify"], default="")
     s.add_argument("--base")
     s.add_argument("--explain", action="store_true")
     s.set_defaults(func=cmd_light_gate)
@@ -3519,6 +4054,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--ci-build", "--jenkins", dest="jenkins", metavar="CI_BUILD")
     s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
+    s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES - {"auto"}))
     s.add_argument("--structure-check")
     s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"], required=True)
     s.add_argument("--follow-up")
@@ -3532,6 +4068,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--title")
     s.add_argument("--msg", required=True)
     s.add_argument("--mode", choices=["dev", "verify"])
+    s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES))
     s.add_argument("--require-light-gate", action="store_true")
     s.add_argument("--require-runtime-health", action="store_true")
     s.add_argument("--require-jenkins", action="store_true")

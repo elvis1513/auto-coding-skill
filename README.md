@@ -1,629 +1,229 @@
 # auto-coding-skill
 
-Engineering workflow skill for:
+A generic `.agents` engineering workflow with adaptive execution profiles,
+minimal project scaffolding, evidence-backed closure, and optional CI/Jenkins and
+target-environment verification.
 
-- shared `.agents` skills and role templates
+## What changed in v2.2.0
 
-This skill targets general software projects that need a disciplined task -> design -> implementation -> verification -> closure workflow. The default `dev` mode is optimized for fast development: light gate, early closure record, commit, push, then move to the next task. Switch to `verify` mode when configured CI/Jenkins and target-environment evidence must be completed before closure.
-
-`docs/ENGINEERING.md` is intentionally Git-tracked. Environment fields kept in that file are mandatory only when their verification surface is enabled. Unused environment items should be removed instead of being kept as placeholders.
+- Added `micro`, `standard`, and `high-risk` execution profiles.
+- `workflow.profile: auto` classifies changed work and cannot downgrade detected
+  high-risk changes.
+- High-risk and explicit verify work now require a real `gate_full`/`full_gate`;
+  light and standard commands are no longer accepted as full-gate fallbacks.
+- Generic structure checks are advisory by default. Projects can opt into
+  blocking enforcement.
+- Reduced a new project scaffold from 46 files / about 10,120 lines to 20 files /
+  about 5,300 lines.
+- Replaced duplicated repository-side Python tools with a small launcher that
+  delegates to the single project-local skill runtime.
+- Kept only ENGINEERING, taskbook, and closure log in the default documentation
+  scaffold; all specialized documents are materialized on demand.
+- Removed hard-coded model names from managed Agent templates. New installs
+  inherit the active client model; existing project model overrides survive sync.
+- Added behavioral regression tests for profile resolution, strict full gates,
+  advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
+  model inheritance.
 
 ## Install
 
 ```bash
 npm install -g @elvis1513/auto-coding-skill
+autocoding init
+autocoding sync --projects .
+pip install pyyaml requests
 ```
 
-Fallback:
+`autocoding init` installs the project-local skill and five managed roles under
+`.agents`. `autocoding sync` installs the minimal project scaffold:
 
-```bash
-npm install -g git+https://github.com/elvis1513/auto-coding-skill.git
+```text
+.agents/skills/auto-coding-skill/
+.agents/agents/
+docs/ENGINEERING.md
+docs/tasks/taskbook.md
+docs/tasks/closure-log.md
+docs/tools/autopipeline/ap.py
 ```
 
-## Release Notes
+The `docs/tools` entry point is a compatibility launcher. Runtime code lives only
+under `.agents/skills/auto-coding-skill/scripts`.
 
-### v2.1.4
+## Execution profiles
 
-- Updated the default reviewer and browser debugger agents to `gpt-5.6-sol`, retaining `xhigh` reasoning for deep review and UI diagnosis.
-- Updated the read-only explorer and documentation researcher agents to `gpt-5.6-terra` with `medium` reasoning, while keeping the targeted fixer on `gpt-5.3-codex-spark`.
-- Added regression coverage for installed model profiles, managed profile refreshes, and byte-for-byte preservation of custom agent files.
-
-### v2.1.2
-
-- Fixed `docs-ledger-archive` so settled task states such as `Superseded by ...`, `External Dependency`, `Deployed`, `Completed`, `Archived`, `Local PASS`, and `Local Verified` are recognized as archivable instead of blocking physical ledger cleanup.
-- Added a package-safe regression test for those docs ledger archive states.
-
-### v2.1.1
-
-- Removed client-specific init targets from the npm CLI; installs now target the shared `.agents` layout only.
-- `ap.py install --bridges` now creates a generic `AGENTS.md` bridge instead of client-named bridge files.
-- `autocoding init --force` now preserves custom files in `.agents/agents`; only managed template files are refreshed.
-- `autocoding init --dest` now accepts a repo root, `.agents` directory, `.agents/skills`, or the direct `.agents/skills/auto-coding-skill` directory without nesting `.agents/.agents`.
-- `autocoding sync` now creates a missing `docs/ENGINEERING.md` from the template, while still preserving existing project-specific config.
-- `autocoding init` now preflights both skill and agent targets before writing files, preventing partial installs when one target already exists.
-- Added CLI installer regression tests for dest variants, partial-init failure, sync convergence, bridge generation, custom-agent preservation, and managed bridge cleanup.
-- Made `npm test` runnable from the published package by testing packaged assets separately from source-tree asset synchronization checks.
-- `autocoding status/sync` now treats `.agents/agents` as a shared directory: managed templates are checked and refreshed, while project-specific custom agents are preserved.
-- Added `install --force` protection: plain `ap.py install` now refuses to overwrite existing generated docs/tooling and directs existing projects to `upgrade`.
-- Added generated-noise filtering for `__pycache__`, `.pyc`, and `.DS_Store` so `impact`, structure checks, and `commit-push` do not treat local Python cache files as real project changes.
-- Added generic `--ci-build` / `--ci-failure` aliases for closure commands while keeping legacy Jenkins flags compatible.
-- Added `ap.py docs-ledger-check` to prevent documentation ledgers from growing without a real archive.
-- Added `ap.py docs-ledger-archive --plan|--write [--period 2026-06]` for generic physical archiving of closed taskbook entries, non-conflicting closure records, and matching top-level DD files.
-- `doctor` now runs docs ledger health checks by default: large `taskbook.md`, `closure-log.md`, or active `docs/design/T*.md` sets require physical archives.
-- `doctor` records a standalone `docs_ledger_check` evidence event with counts and blocking details.
-- `docs-ledger-check` now fails on missing active ledger files instead of treating them as empty ledgers.
-- `autocoding status` now parses `docs/ENGINEERING.md` frontmatter key paths instead of matching config tokens in prose.
-- Added `verification.target_env_required` and `verification.jenkins_required` so non-Jenkins or local-only projects can keep `doctor` generic.
-- Added `docs.task_archive_dir`, `docs.design_archive_dir`, `docs.archive_index`, and active ledger budget settings to `docs/ENGINEERING.md`.
-- Clarified that `archive-index.md` is only navigation; it does not replace monthly or legacy physical archives.
-
-### v2.1.0
-
-- Added project upgrade support: `ap.py upgrade --dry-run|--write` safely syncs tooling and merges missing `docs/ENGINEERING.md` keys without overwriting existing values.
-- Added baseline initialization: `ap.py baseline init --write --update-config` scans large files/hotspots, creates health baseline + optimization backlog, and can seed `structure.accepted_debt_paths`.
-- Added configurable structure import-boundary checks through `structure.layer_rules`.
-- Added local gate profiling: configured gate commands write `.local/auto-coding-skill/gate-profile.jsonl`, summarized by `ap.py gate-profile`.
-- Added multi-project npm CLI operations: `autocoding status --projects ...` and `autocoding sync --projects ...`.
-- Added structured evidence logging to `docs/tasks/evidence.jsonl` for classify, doctor, structure-check, gates, verification, and closure.
-- Added task classification: `ap.py classify --scope auto` reports risk, categories, required DD/ADR/browser/Jenkins/target checks, and recommended commands.
-
-### v2.0.6
-
-- Fixed `structure-check --json` so successful output stays machine-readable JSON without a trailing OK line.
-- Moved CLI error messages to stderr, preserving JSON stdout for failing machine-readable commands.
-- Made `structure.enabled: false` disable structure gate integration even when `commands.structure_check` is still present.
-
-### v2.0.5
-
-- Added generic engineering-structure governance: `docs/architecture/structure-standard.md`, ADR template, project health baseline, and optimization backlog templates.
-- Added `ap.py structure-check --scope auto|changed|standard|full` for large-file thresholds, large-file growth blocking, function-size warnings, and baseline-doc checks.
-- Integrated `structure-check` into `light-gate` when `structure.enabled: true` or `commands.structure_check` is configured.
-- Added baseline-aware optimization policy so “optimization complete” means scoped P0/P1/P2 closure plus tracked/accepted remaining debt, not “no future optimizations exist.”
-
-### v2.0.4
-
-- Added a generic impact-aware gate engine: `ap.py impact`, `light-gate --scope auto|changed|standard|full`, and `--explain`.
-- Added project-owned `gate.*` policy support in `docs/ENGINEERING.md`; the skill chooses scope, while each project declares its own commands and optional path rules.
-- Kept backward compatibility: projects without `gate.*` continue to use the existing standard `commands.light_gate` / quick-test fallback.
-- Added conservative full-gate upgrades for CI, deploy, Docker, lockfile, build-tool, and autopipeline config changes.
-
-### v2.0.3
-
-- Fixed `doctor`, `light-gate`, `verify-target`, and Jenkins API verification to accept secret references via `*_password_env`.
-- Kept direct `*_password` fields compatible for legacy projects while making the default template use environment-variable secret references.
-- Updated docs so `docs/ENGINEERING.md` can stay Git-tracked without requiring committed secrets.
-
-### v2.0.2
-
-- Added default subagent templates under `.agents/agents`.
-- `autocoding init` installs the managed agent templates automatically.
-- Updated agent defaults to current model names: `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; highest reasoning uses `xhigh`.
-- Added concrete capability routing for MCP servers, installed skills, plugins/apps/connectors, browser tools, GitHub, Figma, security review, and artifact workflows.
-- Changed multi-agent guidance from unconditional delegation to a role model that works either as real subagents or as sequential main-agent phases.
-- Hardened CLI help/argument validation, asset sync checks, and stricter autopipeline config diagnostics.
-
-### v2.0.1
-
-- Updated the installer target to `.agents/skills`, matching current global and project skill discovery.
-
-### v0.3.1
-
-- Added Jenkins crumb / CSRF retry support for API verification requests.
-- Added finer-grained Jenkins folder / multibranch pipeline resolution.
-- Added multibranch root job + branch child job support, with current Git branch inference when needed.
-- Kept existing `verify-jenkins-build --git-ref` and direct `--job-url` / `--build-number` flows compatible.
-
-### v0.3.0
-
-- Synced reusable workflow improvements from a production project back into this skill.
-- Moved repo-side helper entrypoint to `docs/tools/autopipeline`.
-- Tightened regression matrix rules: rows start as `TODO`, and `PASS` requires real execution evidence.
-- Added Jenkins API verification flow with credentials sourced from `docs/ENGINEERING.md`.
-
-## Optimized Standard Flow
-
-模式由 `docs/ENGINEERING.md` 顶部控制：
+Configure the selector in `docs/ENGINEERING.md`:
 
 ```yaml
 workflow:
-  mode: "dev" # dev | verify
+  mode: dev
+  profile: auto
 ```
 
-`dev` 默认闭环：
+| Effective profile | Intended work | Gate scope | Mode |
+| --- | --- | --- | --- |
+| `micro` | docs/tests-only or explicitly isolated work | changed | dev |
+| `standard` | normal feature and defect work | standard | dev |
+| `high-risk` | DB/auth/payment/file transfer/gateway/prod/deploy/build changes | full | verify |
 
-`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> 写 DEV-CLOSED 闭环 -> commit/push -> 结束`
+`auto` is a selector, not a fourth effective profile. Full-path patterns,
+high-risk categories, `gate.rules[].profile: high-risk`, and explicit verify work
+raise the plan to `high-risk`. A CLI `--profile micro` or `--mode dev` cannot
+lower it.
 
-`verify` 完整闭环：
+An explicit configured `micro`, `standard`, or `high-risk` profile replaces
+auto's low/normal baseline and acts as a floor for CLI overrides. Independently
+detected high-risk signals still force `high-risk`.
 
-`需求/任务记录 -> 最小设计 -> 开发 -> 本地轻量校验 -> commit/push -> 已启用的 CI/Jenkins 验证 -> 已启用的目标环境验证 -> 写 PASS 闭环`
-
-具体执行顺序：
-
-1. 需求确认
-   - 明确任务范围、影响服务、是否涉及 API / 数据库 / 部署 / CI/Jenkins / 前端页面。
-2. 最小设计记录
-   - 普通小改动只更新 `taskbook` 或相关设计文档的一小段。
-   - 跨模块、接口、数据库、部署、CI/Jenkins、关键页面流程变更才补 DD。
-3. 开发实现
-   - 只修改本次任务必要文件，不做无关重构。
-4. 本地轻量校验
-   - 优先执行一个项目自定义快速门禁命令
-   - 若未配置，再执行 quick test / test / build 中最先配置的一项
-   - `git diff --check`
-   - API 文档检查
-   - 已启用的 CI/Jenkins 配置检查
-5. 提交推送
-   - `dev` 模式：轻量校验通过后，先写 `DEV-CLOSED` 闭环，再 commit + push 后结束。
-   - `verify` 模式：commit + push 后继续等待已启用的 CI/Jenkins 和目标环境验证。
-6. CI/Jenkins 验证
-   - 仅 `verify` 模式且 `verification.jenkins_required: true` 时默认执行。看 CI/Jenkins 构建、镜像、部署结果；失败则基于日志修复并再次提交。
-7. 目标环境验证
-   - 仅 `verify` 模式且 `verification.target_env_required: true` 时默认执行。在真实目标环境做健康检查、关键接口、关键页面或业务路径验证。
-8. 回归与证据记录
-   - 只有真实执行过已启用的 CI/Jenkins / 目标环境验证，或明确要求本地运行验证时，才把 regression matrix 写成 `PASS`。
-9. 闭环记录
-   - `dev` 模式记录 `DEV-CLOSED`，表示开发闭环完成但 CI/Jenkins/目标环境未验证。
-   - `verify` 模式记录 `PASS` / `FAIL` / `PARTIAL`，必须基于真实验证结果。
-
-## Default vs On-demand
-
-默认不做：
-- 本地 Docker Compose 启动
-- 本地 Docker build
-- 本地完整 regression
-- 每个小改动强制 `check-matrix`
-- 每个小改动强制生成 summary
-- 未真实执行就要求 regression matrix 全 `PASS`
-- 未真实部署目标环境就生成 deployment record
-
-按需保留：
-- `runtime-up` / `runtime-down`
-- 本地 health
-- `check-matrix`
-- `gen-summary`
-- deployment runbook / deployment record
-
-## Standard Workflow
-
-1. Install skill into project:
-
-```bash
-autocoding init
-```
-
-This creates `.agents/skills/auto-coding-skill` and refreshes the managed default `explorer`, `fixer`, `reviewer`, `docs_researcher`, and `browser_debugger` subagents in `.agents/agents/`. Existing custom files in `.agents/agents/` are preserved even with `--force`.
-
-For non-current-directory installs, `--dest` accepts a repo root, a `.agents` directory, `.agents/skills`, or the direct `.agents/skills/auto-coding-skill` directory.
-
-2. Initialize docs and local scripts:
-
-```bash
-python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install
-```
-
-`install` refuses to overwrite existing generated docs/tooling unless `--force` is passed. For existing projects, use `upgrade` instead of rerunning initialization blindly.
-
-3. Fill only one file manually:
-
-- `docs/ENGINEERING.md` frontmatter
-
-This frontmatter is the only manual config source.
-It must be committed to Git. Do not add it to `.gitignore`.
-
-重点字段：
-- `workflow.mode`
-- `commands.*`
-- `gate.*`
-- `structure.*`
-- `optimization.*`
-- `verification.*`
-- `target_env.*`
-- `jenkins.*`
-- `docs.*`
-
-默认必填：
-- `workflow.mode`
-- `project.name`
-- `commands.gate_changed` / `commands.gate_standard` / `commands.gate_full`，或 `commands.light_gate` / `commands.quick_test` / `commands.test` / `commands.build`
-- `verification.target_env_required`
-- `verification.jenkins_required`
-
-仅当 `verification.target_env_required: true` 时必填：
-- `target_env.name`
-- `target_env.frontend_base_url`
-- `target_env.frontend_username`
-- `target_env.frontend_password` 或 `target_env.frontend_password_env`
-- `target_env.backend_base_url`
-- `target_env.backend_username`
-- `target_env.backend_password` 或 `target_env.backend_password_env`
-- `target_env.backend_root_username`
-- `target_env.backend_root_password` 或 `target_env.backend_root_password_env`
-- `target_env.health_base_url`
-- `target_env.health_path`
-
-仅当 `verification.jenkins_required: true` 时必填：
-- `jenkins.base_url`
-- `jenkins.ui_username`
-- `jenkins.ui_password` 或 `jenkins.ui_password_env`
-- `jenkins.api_user`
-- `jenkins.api_password` 或 `jenkins.api_password_env`
-- `jenkins.trigger_branch`
-- `jenkins.image_repository`
-- `jenkins.image_tag_strategy`
-- `jenkins.deploy_env`
-- `jenkins.job_url`
-
-4. Start AI development by constraints:
-
-- `docs/ENGINEERING.md`
-- `docs/architecture/structure-standard.md`
-- `docs/reviews/project-health-baseline.md`
-- `docs/reviews/optimization-backlog.md`
-- `docs/tasks/taskbook.md`
-- `docs/tasks/closure-log.md`
-- `docs/interfaces/**`
-- `docs/testing/regression-matrix.md`
-- `docs/bugs/bug-list.md`
-
-5. Tool selection rule during execution:
-
-- Local code, tests, git, and project gates: use shell, repo scripts, and `docs/tools/autopipeline/ap.py`.
-- Current library/framework/API/CLI/cloud docs: use Context7 or the matching installed skill before coding against uncertain behavior.
-- UI verification: use Browser/in-app browser for local pages, Chrome for the user's logged-in Chrome state, Playwright for deterministic automation, and Computer Use only for native or unsupported UI surfaces.
-- GitHub/PR/CI: use GitHub connectors for remote PR, issue, review, and CI state; use local git for local diff, commit, and push.
-- Figma/frontend/design, security review, data/reporting, and document artifacts: use the matching installed plugin or skill before manual recreation.
-- Fall back to shell/manual work only when those capabilities are unavailable, insufficient, unreliable, or slower than direct execution.
-
-6. Collaboration rule during execution:
-
-- Use `.agents/agents` as the default role model: `explorer`, `docs_researcher`, `browser_debugger`, `fixer`, `reviewer`.
-- If the client permits subagents, split independent work across those roles.
-- If the client cannot run subagents, execute the same role sequence in the main agent.
-- Keep one main agent responsible for scope, integration, quality gates, docs closure, git state, and final delivery.
-
-## Structure Governance
-
-The default project scaffold includes a generic professional structure standard:
-
-- `docs/architecture/structure-standard.md`: layer boundaries, reuse-first rules, file/function size rules, and review priority definitions.
-- `docs/architecture/adr/_TEMPLATE-ADR.md`: architectural decision record template.
-- `docs/reviews/project-health-baseline.md`: accepted current structure, closed optimizations, accepted debt, and completion standard.
-- `docs/reviews/optimization-backlog.md`: ongoing P0/P1/P2/P3 optimization backlog.
-
-Useful commands:
+Inspect the plan:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py classify --scope auto
-python3 docs/tools/autopipeline/ap.py docs-ledger-check
-python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan
-python3 docs/tools/autopipeline/ap.py structure-check --scope auto
-python3 docs/tools/autopipeline/ap.py structure-check --scope full
-python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
-python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
-python3 docs/tools/autopipeline/ap.py gate-profile
-python3 docs/tools/autopipeline/ap.py upgrade --dry-run
+python3 docs/tools/autopipeline/ap.py impact --scope auto --json
 ```
 
-`structure-check` is intentionally generic. Project-specific paths and stricter rules belong in `docs/ENGINEERING.md` under `structure.*`, `optimization.*`, and optional `commands.structure_check`.
-Historical large-file debt can be listed in `structure.accepted_debt_paths` after it is recorded in the health baseline or optimization backlog; continued large additions to those files still fail.
-Do not split files only to reduce line count. Split only when a clear business or technical boundary improves cohesion and change safety; keep cohesive transaction, state-machine, workflow, or test-scenario code together and track it as accepted debt when appropriate.
+Each result includes the effective profile, mode, gate scope, reasons, required
+verification surfaces, and recommended Agent roles.
 
-`docs-ledger-check` is intentionally separate from `structure-check`. It treats `docs/tasks/taskbook.md`, `docs/tasks/closure-log.md`, and top-level `docs/design/T*.md` as active working sets. When they exceed `docs.active_*` budgets, the fix is physical archiving under `docs.task_archive_dir` / `docs.design_archive_dir`; `docs.archive_index` is only a navigation index and does not count as archive slimming.
+## Gate configuration
 
-Use `docs-ledger-archive --plan` first. If the plan only contains closed task sections, non-conflicting closure records, and matching top-level `T*.md` DD files, apply it with `docs-ledger-archive --write`, then rerun `docs-ledger-check`. Add `--period 2026-06` only when backfilling a specific archive month.
+```yaml
+commands:
+  gate_changed: "npm run test:changed"
+  gate_standard: "npm test"
+  gate_full: "npm run test:full"
 
-## Project Upgrade
+gate:
+  default_scope: auto
+  rules:
+    - name: payments
+      paths: ["src/payments/**"]
+      profile: high-risk
+```
 
-For existing projects, do not rerun initialization blindly. Use:
+For Node projects, a new scaffold can infer changed/standard commands from
+`test`, `test:changed`, and `test:standard`. It only infers a full command from a
+dedicated `test:full` script; ordinary `npm test` is never promoted to full.
+A high-risk or verify run fails clearly when no real full command is configured.
+
+## Structure policy
+
+The generic checker remains useful for surfacing large files, large additions,
+function-size signals, and import-direction heuristics, but it is not universally
+authoritative:
+
+```yaml
+structure:
+  enabled: true
+  enforcement: advisory # advisory | blocking
+  architecture_standard: project-defined
+```
+
+`advisory` reports findings without blocking. Projects with reliable, tailored
+rules can opt into `blocking`. Repository-native architecture, compiler output,
+tests, and real dependency graphs take precedence over generic path heuristics.
+
+## Optional documentation
+
+Specialized templates are created only when required:
 
 ```bash
+python3 docs/tools/autopipeline/ap.py scaffold api --write
+python3 docs/tools/autopipeline/ap.py scaffold design --write
+python3 docs/tools/autopipeline/ap.py scaffold architecture --write
+python3 docs/tools/autopipeline/ap.py scaffold review --write
+python3 docs/tools/autopipeline/ap.py scaffold testing --write
+python3 docs/tools/autopipeline/ap.py scaffold deployment --write
+python3 docs/tools/autopipeline/ap.py scaffold bugs --write
+python3 docs/tools/autopipeline/ap.py scaffold all --write
+```
+
+The command is idempotent and does not overwrite existing project documents
+unless `--force` is supplied. `baseline init` and `gen-summary` generate their
+outputs directly without static templates.
+
+For a one-step legacy-style full scaffold:
+
+```bash
+python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install --full
+```
+
+## Dynamic Agents and models
+
+Managed role templates define role instructions, permissions, and reasoning
+effort but do not pin a model. The current client therefore supplies a supported
+model automatically.
+
+Existing project-local `model = "..."` lines are treated as explicit overrides:
+
+- `status` reports them but does not mark the project stale for model-only drift.
+- `sync` updates managed instructions while preserving the override.
+- `sync --reset-agent-models` removes managed-role overrides and returns to
+  client inheritance.
+- Custom Agent files are always preserved byte-for-byte.
+
+The effective profile recommends roles dynamically:
+
+- micro: main Agent only by default
+- standard: explorer → fixer, plus browser/docs roles when indicated
+- high-risk: explorer/docs as indicated → fixer → browser as indicated → reviewer
+
+## Verification configuration
+
+Generic projects start with both optional external surfaces disabled:
+
+```yaml
+verification:
+  target_env_required: false
+  jenkins_required: false
+```
+
+When target verification is enabled, `doctor` requires only the health URL/path
+needed by the default health check. Frontend/backend URLs and credentials are
+validated when the corresponding path or basic-auth options are actually used.
+Jenkins keeps its explicit configuration checks. Unused sections should stay
+absent rather than containing placeholders.
+
+## Core commands
+
+```bash
+python3 docs/tools/autopipeline/ap.py doctor
+python3 docs/tools/autopipeline/ap.py classify --scope auto
+python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
+python3 docs/tools/autopipeline/ap.py structure-check --scope auto
+python3 docs/tools/autopipeline/ap.py docs-ledger-check
+python3 docs/tools/autopipeline/ap.py gate-profile
+python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
+```
+
+## Upgrade and multi-project sync
+
+```bash
+autocoding sync --projects /path/a,/path/b
+
 python3 docs/tools/autopipeline/ap.py upgrade --dry-run
 python3 docs/tools/autopipeline/ap.py upgrade --write
+
+autocoding status --projects /path/a,/path/b
+autocoding sync --projects /path/a,/path/b --dry-run
 ```
 
-`upgrade` updates autopipeline scripts, syncs project-local `.agents` skill copies when present, creates missing template docs, and merges only missing frontmatter keys into `docs/ENGINEERING.md`.
+For a v2.1 project, run the new CLI sync first; invoking its old project-local
+`upgrade` command would still execute v2.1 logic. Upgrade and sync preserve
+existing optional docs, legacy `core.py` /
+`http_checks.py` tool copies, custom Agents, and project-specific configuration.
+Retired template files do not count as drift.
 
-Use `install --force` only when intentionally resetting generated docs/tooling.
-
-## Baseline And Evidence
-
-Initialize a project health baseline:
-
-```bash
-python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
-```
-
-This creates:
-
-- `docs/reviews/project-health-baseline.md`
-- `docs/reviews/optimization-backlog.md`
-- optional `structure.accepted_debt_paths` entries for existing large files
-
-Execution evidence is written as JSONL:
-
-- `docs/tasks/evidence.jsonl`
-- `.local/auto-coding-skill/gate-profile.jsonl`
-
-Use `python3 docs/tools/autopipeline/ap.py gate-profile` to summarize command duration and failure history.
-Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` to verify that active docs ledgers remain small enough for fast lookup. Use `python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan` before applying physical archives.
-
-## Multi-project Sync
-
-```bash
-autocoding status --projects /path/to/repo1,/path/to/repo2
-autocoding sync --projects /path/to/repo1,/path/to/repo2 --dry-run
-autocoding sync --projects /path/to/repo1,/path/to/repo2
-```
-
-`status` reports drift in `.agents`, managed agents, autopipeline scripts, missing template docs, and missing config keys. `sync` updates generated assets and creates missing docs, preserves custom files in `.agents/agents`, and leaves `docs/ENGINEERING.md` to `ap.py upgrade --write`.
-
-## AGENTS.md Constraint Example
-
-```md
-## Mandatory Skill
-- Always use `auto-coding-skill` for implementation tasks.
-- Before any code change, read and obey:
-  1) docs/ENGINEERING.md
-  2) docs/architecture/structure-standard.md
-  3) docs/tasks/taskbook.md
-- Before any optimization review, also read:
-  1) docs/reviews/project-health-baseline.md
-  2) docs/reviews/optimization-backlog.md
-- Execute workflow commands using `python3 docs/tools/autopipeline/ap.py`.
-- If required docs are missing, create/update docs first, then code.
-
-## Tooling Policy
-- Route by source of truth:
-  1) local code/tests/git -> shell + repo scripts
-  2) current docs/API behavior -> Context7 or matching docs skill
-  3) UI/browser proof -> Browser, Chrome, Playwright, or Computer Use by scenario
-  4) PR/Issue/CI -> GitHub connector
-  5) design/frontend/security/artifacts -> matching installed skill/plugin
-- When a connector or MCP can read or write the authoritative source directly, use it instead of retyping or duplicating state.
-
-## Multi-Agent Policy
-- Use `.agents/agents` roles:
-  1) explorer
-  2) docs_researcher
-  3) browser_debugger
-  4) fixer
-  5) reviewer
-- Spawn subagents only when the client supports and allows it; otherwise run the same role phases in the main agent.
-- Keep one main agent responsible for task framing, integration, quality gates, docs closure, git state, and final delivery.
-
-## Default Gate Policy
-- Default local gate is lightweight only.
-- Use `python3 docs/tools/autopipeline/ap.py classify --scope auto` to classify risk, required docs, verification surfaces, and recommended commands.
-- Use `python3 docs/tools/autopipeline/ap.py docs-ledger-check` when docs/task ledgers grow; use `docs-ledger-archive --plan` before `--write`; do not treat `archive-index.md` as a substitute for physical archives.
-- Use `python3 docs/tools/autopipeline/ap.py impact --scope auto` to inspect changed files, matched project rules, and selected gate scope.
-- Use `python3 docs/tools/autopipeline/ap.py structure-check --scope auto` to catch file growth, large-file extension, and missing structure baseline docs.
-- Use `python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain` for small-step development after a project declares `gate.default_scope: auto`, `commands.gate_changed`, or matching `gate.rules`.
-- Use `light-gate --scope standard` for the backward-compatible configured gate, and `light-gate --scope full` before release/deploy-sensitive closure.
-- The gate engine is generic. Project-specific path mapping belongs in `docs/ENGINEERING.md` under `gate.rules`; unknown or high-risk impact should upgrade to standard/full rather than silently skipping checks.
-- The structure gate is generic. Project-specific thresholds and accepted generated/vendor paths belong in `docs/ENGINEERING.md` under `structure.*`.
-- Do not require local Docker Compose or full local regression unless the task explicitly needs local runtime diagnosis.
-- In `dev` mode, push is the finish line after `DEV-CLOSED` is recorded.
-- In `verify` mode, configured CI/Jenkins success, target environment verification, and closure record are mandatory only when the corresponding `verification.*_required` switch is enabled.
-
-## Structure Policy
-- Before coding, identify the right layer and reuse points.
-- Do not add new responsibilities to already-large files.
-- Prefer existing libraries, helpers, components, and scripts over new local frameworks.
-- Self-built concurrency/performance/tooling primitives require a reason plus tests or runtime evidence.
-- For optimization review, read the health baseline and backlog first; accepted debt is not a fresh blocker.
-```
-
-## Docs Structure and Recording Rules
-
-### 1) docs/ENGINEERING.md
-- Purpose: single source of project config + workflow rules.
-- How to record:
-  - Fill YAML frontmatter once.
-  - Keep target env front/backend usernames, Jenkins UI/API usernames, password fields or `*_password_env` references, commands, and docs paths here only when those verification surfaces are enabled.
-  - Target environment also includes backend server root username/password.
-  - This file is expected to be committed to Git; prefer `*_password_env` for secrets so actual secret values stay in the current shell.
-  - Remaining enabled environment keys are mandatory; blank values, TODO-like placeholders, and incorrect URL/path formats are treated as blocking errors by `doctor`.
-  - For secret fields, `doctor` requires either a direct `*_password` value or a `*_password_env` variable name. Commands that actually authenticate require the referenced environment variable to be set at execution time.
-  - Do not duplicate config elsewhere.
-
-### 2) docs/tasks/taskbook.md
-- Purpose: master task ledger.
-- How to record:
-  - Every task writes scope, risk, impact area, minimal design note, acceptance, evidence links.
-  - For code changes, record structure placement, reuse check, and whether ADR is needed.
-  - Keep this file active-only. Closed history belongs under `docs/tasks/archives/**`; an index-only file is not enough.
-
-### 3) docs/tasks/closure-log.md
-- Purpose: default lightweight closure record.
-- How to record:
-  - Append one record per task.
-  - Required fields: task, commit, configured CI/Jenkins status, target env status, structure check, result, follow-up.
-  - If CI/Jenkins failed then was fixed, also record failure reason and fix commit.
-  - Keep this file active-only. Historical closure records belong under `docs/tasks/archives/**`.
-
-### 4) docs/architecture/
-- Files:
-  - `docs/architecture/structure-standard.md`
-  - `docs/architecture/adr/_TEMPLATE-ADR.md`
-- Rule:
-  - Read the structure standard before adding or relocating code.
-  - Create an ADR for decisions that affect long-term structure, module boundaries, framework-like helpers, or major tradeoffs.
-
-### 5) docs/reviews/
-- Files:
-  - `docs/reviews/project-health-baseline.md`
-  - `docs/reviews/optimization-backlog.md`
-- Rule:
-  - Structure and optimization reviews must read these before listing findings.
-  - Accepted debt is not a fresh blocker unless it worsened or needs priority upgrade.
-
-### 6) docs/design/
-- Purpose: DD for cross-module / API / DB / deployment / CI/Jenkins / key-page-flow changes.
-- How to record:
-  - Small changes do not need a standalone DD file.
-  - Higher-risk changes create `docs/design/<TASK_ID>-<slug>.md`.
-  - Keep top-level `docs/design/T*.md` active-only. Historical DDs belong under `docs/archive/design/**`.
-
-### 6.5) docs/tasks/archives/ and docs/archive/design/
-- Purpose: physical history archives for closed taskbook entries, closure records, and old DDs.
-- Rule:
-  - Archive by period or legacy bucket when active ledgers exceed `docs.active_*` budgets.
-  - `docs/tasks/archive-index.md` may summarize and link archives, but it is not the archive itself.
-  - `doctor` blocks over-budget active ledgers when `docs.ledger_block_on_exceed: true`.
-
-### 7) docs/interfaces/
-- Files:
-  - `docs/interfaces/api.md`
-  - `docs/interfaces/api-change-log.md`
-- Rule:
-  - Any API change updates both files in the same task.
-
-### 8) docs/testing/regression-matrix.md
-- Purpose: on-demand regression evidence, not default gate for every small change.
-- Rule:
-  - Only real executed items can be marked `PASS`.
-  - `check-matrix` is used only when full regression is explicitly required.
-
-### 9) docs/tasks/summaries/
-- Purpose: optional long-form summary.
-- Rule:
-  - Only for high-risk changes, milestones, or tasks that need full retrospective.
-
-### 8) docs/deployment/
-- Purpose: optional heavy deployment audit docs.
-- Rule:
-  - Only for manual deploys, high-risk releases, or explicit audit requirements.
-
-## High-risk Changes
-
-These categories require stronger verification and usually a DD:
-- Database migration
-- Authentication / authorization
-- Payment / order
-- Deployment / CI / Jenkins
-- Nginx / gateway
-- File upload / download
-- Production configuration
-
-For these tasks, use `workflow.mode: "verify"` or run an explicit verification pass after the fast `dev` closure.
-
-## Commands
-
-Recommended default flow:
-
-```bash
-pip install pyyaml requests
-python3 docs/tools/autopipeline/ap.py doctor
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
-```
-
-Development mode can also be forced per run:
-
-```bash
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --mode dev --msg "<TASK_ID>: <summary>"
-```
-
-Verification mode runs the configured CI/Jenkins + target-environment loop. Disabled surfaces are recorded as skipped:
-
-```bash
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
-  --mode verify \
-  --msg "<TASK_ID>: <summary>" \
-  --backend-path /health \
-  --frontend-path /
-```
-
-Manual verification commands remain available:
-
-```bash
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --git-ref HEAD
-python3 docs/tools/autopipeline/ap.py wait-health --scope target
-python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
-python3 docs/tools/autopipeline/ap.py record-closure <TASK_ID> --commit HEAD --ci-build <build-url-or-skipped> --result PASS --verification "health check" --verification "key api" --verification "key page"
-```
-
-Available on-demand commands:
-
-```bash
-python3 docs/tools/autopipeline/ap.py doctor
-python3 docs/tools/autopipeline/ap.py docs-ledger-check
-python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan
-python3 docs/tools/autopipeline/ap.py verify-api-docs
-python3 docs/tools/autopipeline/ap.py verify-jenkins
-python3 docs/tools/autopipeline/ap.py verify-target --backend-path /health --frontend-path /
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-name <job-name> --build-number <number>
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --job-url <job-url> --build-number <number>
-python3 docs/tools/autopipeline/ap.py verify-jenkins-build --multibranch-root-job <root-job> --branch-name <branch> --build-number <number>
-python3 docs/tools/autopipeline/ap.py runtime-up
-python3 docs/tools/autopipeline/ap.py wait-health --scope runtime
-python3 docs/tools/autopipeline/ap.py runtime-down
-python3 docs/tools/autopipeline/ap.py check-matrix
-python3 docs/tools/autopipeline/ap.py gen-summary <TASK_ID>
-```
-
-## Optional Jenkins Build Tracking
-
-- `verify-jenkins-build --git-ref HEAD`
-  - Use when Jenkins build descriptions include commit SHA and you want to find the latest build automatically.
-- `verify-jenkins-build --job-name <folder/job> --build-number <N>`
-  - Use when you already know the Jenkins job and build number.
-- `verify-jenkins-build --job-url <full-job-url> --build-number <N>`
-  - Use when you want to bypass configured job resolution.
-- `verify-jenkins-build --multibranch-root-job <folder/repo> --branch-name <branch> --build-number <N>`
-  - Use for multibranch or organization-folder jobs where the branch is a child job.
-- `verify-jenkins-build --multibranch-root-job <folder/repo> --git-ref HEAD`
-  - Use when the current Git branch should be inferred automatically.
-- If Jenkins returns `403`, the script retries with crumb / CSRF handling automatically.
-
-## New Safeguards
-
-- `doctor`
-  - Checks whether the default lightweight workflow is actually configured instead of silently skipping gates.
-- `light-gate`
-  - Now prefers one curated fast gate command instead of serially running every expensive check.
-- `verify-target`
-  - Performs real target-environment verification beyond health checks when you provide key backend/frontend paths.
-- `commit-push --record-closure`
-  - Kept for compatibility; normal `commit-push` now records closure automatically based on `workflow.mode`.
-
-## Publish (NPM)
-
-1. Sync assets and basic check:
+## Development
 
 ```bash
 npm run sync-assets
+npm run check:assets
+npm run test:src
 npm test
-```
-
-2. Bump version:
-
-```bash
-npm version patch
-# or: npm version minor / major
-```
-
-3. Release check:
-
-```bash
-npm whoami
 npm run release:check
 ```
 
-4. Publish:
+`release:check` synchronizes source assets, validates Python 3.11 grammar and
+TOML, runs installer and profile regressions, and performs `npm pack --dry-run`.
 
-```bash
-npm publish --access public
-# or
-npm publish --access public --otp <6-digit-otp>
-```
-
-5. Verify and update:
-
-```bash
-npm view @elvis1513/auto-coding-skill version
-npm install -g @elvis1513/auto-coding-skill@latest
-```
-
-## License
-
-MIT
+License: MIT.

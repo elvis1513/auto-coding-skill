@@ -1,6 +1,5 @@
 name = "browser_debugger"
 description = "浏览器调试代理，用于复现 UI 问题、收集控制台和网络证据。"
-model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 

@@ -464,17 +464,46 @@ function testLedgerArchiveRecognizesSettledStatuses() {
     "## Task T002 - external dependency", "- Status: External Dependency", "",
     "## Task T003 - deployed work", "- Status: Deployed / Jenkins #123 SUCCESS", "",
     "## Task T004 - local pass", "- Status: Local PASS，待生产迁移窗口", "",
+    "## Task T005 - markdown done", "- Status: `Done / PASS`", "",
+    "## Task T006 - localized done", "- 状态：Done（PASS）", "",
   ].join("\n"));
   writeFile(path.join(repo, "docs", "tasks", "closure-log.md"), [
     "# Closure Log", "", "## T001 - superseded work", "- Result: DEV-CLOSED", "",
     "## T002 - external dependency", "- Result: PARTIAL", "",
     "## T003 - deployed work", "- Result: PASS", "",
     "## T004 - local pass", "- Result: DEV-CLOSED", "",
+    "## T005 - markdown done", "- Result: PASS", "",
+    "## T006 - localized done", "- Result: PASS", "",
   ].join("\n"));
   const result = run("python3", [assetAp, "--repo", repo, "docs-ledger-archive", "--plan", "--period", "2026-06", "--json"]);
   const parsed = JSON.parse(result.stdout);
-  assert(parsed.counts.taskbook_sections === 4, `settled task sections should archive: ${result.stdout}`);
+  assert(parsed.counts.taskbook_sections === 6, `settled task sections should archive: ${result.stdout}`);
   assert(parsed.active_task_conflicts.length === 0, `settled statuses should not conflict: ${result.stdout}`);
+}
+
+function testLedgerArchiveUpdatesExistingPeriodIndex() {
+  const repo = tmpdir("ledger-index-update");
+  run("git", ["init", "-q"], { cwd: repo });
+  run("node", [cli, "init", "--force"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+
+  const taskbook = path.join(repo, "docs", "tasks", "taskbook.md");
+  const closure = path.join(repo, "docs", "tasks", "closure-log.md");
+  const designDir = path.join(repo, "docs", "design");
+  writeFile(taskbook, "# Taskbook\n\n## Task T001 - first\n- Status: Done\n");
+  writeFile(closure, "# Closure Log\n\n## T001 - first\n- Result: PASS\n");
+  writeFile(path.join(designDir, "T001-first.md"), "# T001\n");
+  run("python3", [assetAp, "--repo", repo, "docs-ledger-archive", "--write", "--period", "2026-06", "--json"]);
+
+  fs.appendFileSync(taskbook, "\n## Task T002 - second\n- Status: `Done / PASS`\n");
+  fs.appendFileSync(closure, "\n## T002 - second\n- Result: PASS\n");
+  writeFile(path.join(designDir, "T002-second.md"), "# T002\n");
+  run("python3", [assetAp, "--repo", repo, "docs-ledger-archive", "--write", "--period", "2026-06", "--json"]);
+
+  const index = fs.readFileSync(path.join(repo, "docs", "tasks", "archive-index.md"), "utf8");
+  assert((index.match(/^## 2026-06$/gm) || []).length === 1, `archive period should be unique: ${index}`);
+  assert(index.includes("(2 sections)"), `archive index should report cumulative task/closure counts: ${index}`);
+  assert(index.includes("(2 files)"), `archive index should report cumulative design count: ${index}`);
 }
 
 testPreflightAvoidsPartialInstall();
@@ -497,5 +526,6 @@ testUpgradePrefersModernProjectAssetsAndIgnoresRetiredTemplates();
 testUpgradeInitializesNewEngineeringDefaults();
 testUpgradeInstallsRuntimeRequiredByLauncher();
 testLedgerArchiveRecognizesSettledStatuses();
+testLedgerArchiveUpdatesExistingPeriodIndex();
 
 console.log("cli-installer-regression-ok");

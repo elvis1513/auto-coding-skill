@@ -4,6 +4,15 @@ A generic `.agents` engineering workflow with adaptive execution profiles,
 minimal project scaffolding, evidence-backed closure, and optional CI/Jenkins and
 target-environment verification.
 
+## What changed in v2.2.1
+
+- Made same-period ledger archiving update one cumulative archive-index entry
+  instead of appending duplicate month headings.
+- Recognized Markdown-wrapped and localized settled statuses such as
+  `` `Done / PASS` `` and `Done（PASS）` during physical history archiving.
+- Added regression coverage for repeated same-month archives and these status
+  formats.
+
 ## What changed in v2.2.0
 
 - Added `micro`, `standard`, and `high-risk` execution profiles.

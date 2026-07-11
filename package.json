@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "CLI installer for a generic .agents engineering workflow with optional CI/Jenkins and target-environment verification.",
   "type": "module",
   "bin": {

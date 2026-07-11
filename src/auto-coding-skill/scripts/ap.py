@@ -2131,8 +2131,8 @@ def _is_closed_task_section(section: dict) -> bool:
     if not status_match:
         return False
     status = status_match.group(1).strip()
-    normalized = re.sub(r"\s+", " ", status).strip().lower()
-    first_token = re.split(r"[\s/，,;；。]+", normalized, maxsplit=1)[0].strip()
+    normalized = re.sub(r"\s+", " ", status).strip().lower().strip("`*_")
+    first_token = re.split(r"[\s/，,;；。()（）]+", normalized, maxsplit=1)[0].strip("`*_")
     if first_token in _CLOSED_TASK_STATUSES or normalized in _CLOSED_TASK_STATUSES:
         return True
     return normalized.startswith((
@@ -2163,19 +2163,47 @@ def _append_archive_index(repo: Path, archive_index: Path, period: str, result: 
         return False
 
     paths = result.get("paths") or {}
+    taskbook_archive = Path(repo, str(paths.get("taskbook_archive") or ""))
+    closure_archive = Path(repo, str(paths.get("closure_archive") or ""))
+    design_archive_dir = Path(repo, str(paths.get("design_archive_dir") or ""))
+
+    taskbook_sections = 0
+    if taskbook_archive.is_file():
+        _preamble, sections = _split_markdown_sections(
+            taskbook_archive.read_text(encoding="utf-8"),
+            _TASKBOOK_ARCHIVE_HEADING_RE,
+        )
+        taskbook_sections = len(sections)
+
+    closure_sections = 0
+    if closure_archive.is_file():
+        _preamble, sections = _split_markdown_sections(
+            closure_archive.read_text(encoding="utf-8"),
+            _CLOSURE_ARCHIVE_HEADING_RE,
+        )
+        closure_sections = len(sections)
+
+    design_files = 0
+    if design_archive_dir.is_dir():
+        design_files = sum(1 for path in design_archive_dir.rglob("*") if path.is_file())
+
     entry = (
         f"## {period}\n"
         f"- Generated: {_now_iso()}\n"
-        f"- Taskbook archive: `{paths.get('taskbook_archive', '')}` ({counts.get('taskbook_sections', 0)} sections)\n"
-        f"- Closure archive: `{paths.get('closure_archive', '')}` ({counts.get('closure_sections', 0)} sections)\n"
-        f"- Design archive: `{paths.get('design_archive_dir', '')}` ({counts.get('design_files', 0)} files)\n"
+        f"- Taskbook archive: `{paths.get('taskbook_archive', '')}` ({taskbook_sections} sections)\n"
+        f"- Closure archive: `{paths.get('closure_archive', '')}` ({closure_sections} sections)\n"
+        f"- Design archive: `{paths.get('design_archive_dir', '')}` ({design_files} files)\n"
     )
     archive_index.parent.mkdir(parents=True, exist_ok=True)
     existing = archive_index.read_text(encoding="utf-8") if archive_index.exists() else ""
-    if existing.strip():
-        archive_index.write_text(existing.rstrip() + "\n\n" + entry, encoding="utf-8")
-    else:
-        archive_index.write_text("# Docs Archive Index\n\n" + entry, encoding="utf-8")
+    period_section = re.compile(
+        rf"^##\s+{re.escape(period)}\s*$.*?(?=^##\s+|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    retained = period_section.sub("", existing).rstrip()
+    if not retained:
+        retained = "# Docs Archive Index"
+    archive_index.write_text(retained + "\n\n" + entry, encoding="utf-8")
     return True
 
 

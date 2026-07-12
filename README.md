@@ -4,6 +4,22 @@ A generic `.agents` engineering workflow with adaptive execution profiles,
 minimal project scaffolding, evidence-backed closure, and optional CI/Jenkins and
 target-environment verification.
 
+## What changed in v3.0.0
+
+- Isolated every write task in a registered Git worktree and task branch.
+- Added `task-start`, `task-status`, `task-submodule-sync`, `task-integrate`,
+  `task-finish`, and `task-prune` lifecycle commands.
+- Made `commit-push` validate the task manifest before any gate or ledger write,
+  stage only the task worktree's exact paths, and detect gate-time mutations.
+- Added task-scoped active, closure, and evidence records to avoid shared append
+  conflicts.
+- Serialized target-branch integration and re-ran the resolved gate after
+  updating to the latest remote target.
+- Automatically removed integrated worktrees and local task branches, with safe
+  lease-based remote task-branch cleanup and merged-branch pruning.
+- Kept `concurrency.isolation: legacy` only as an explicit compatibility escape
+  hatch; missing configuration now defaults to worktree isolation.
+
 ## What changed in v2.2.1
 
 - Made same-period ledger archiving update one cumulative archive-index entry
@@ -92,6 +108,59 @@ python3 docs/tools/autopipeline/ap.py impact --scope auto --json
 
 Each result includes the effective profile, mode, gate scope, reasons, required
 verification surfaces, and recommended Agent roles.
+
+## Parallel write isolation
+
+Each task that may write files runs in its own registered Git worktree and
+`codex/` task branch. Read-only discovery may remain in the primary worktree.
+
+```yaml
+concurrency:
+  isolation: worktree
+  base_ref: origin/dev
+  target_branch: dev
+  branch_prefix: codex/
+  worktree_root: ../.worktrees
+  cleanup_merged: true
+  delete_remote_branch: true
+  disposable_ignored: []
+```
+
+```bash
+python3 docs/tools/autopipeline/ap.py task-start T0001
+# Continue in the worktree path printed by task-start.
+python3 docs/tools/autopipeline/ap.py task-status T0001
+python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
+python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
+python3 docs/tools/autopipeline/ap.py task-integrate T0001
+```
+
+`commit-push` runs only inside the task worktree recorded in the repository
+manifest and stages only that task's changes. Unknown changes stop the command;
+the workflow never restores, resets, stashes, or cleans them.
+
+Successful integration removes the clean worktree and merged local branch, and
+deletes the merged remote task branch by default. `task-finish T0001` retries
+cleanup for one integrated task; `task-prune` removes registered merged tasks
+left behind. Dirty worktrees and unmerged branches are never removed. Integration
+does not update the primary checkout; pull it explicitly when its local state is
+ready. Cleanup also refuses unknown ignored files such as local secrets; list
+only disposable project cache/build paths under `concurrency.disposable_ignored`.
+Initialized submodules are recursively checked before forced task-worktree
+removal: they must be clean and contain no unknown ignored data, local-only
+commits, unmirrored local branches, or additional linked worktrees. Their
+remotes are refreshed before that decision. A durable snapshot
+of refs and reflog commits is stored under Git's
+`auto-coding-skill/submodule-recovery` state before forced worktree removal, so
+a remote deletion race cannot destroy the last copy of a commit. Cleanup never
+deinitializes the primary checkout's shared submodule configuration.
+`task-start` enables Git worktree-scoped config and seeds each task's submodule
+URLs. After changing `.gitmodules`, run `task-submodule-sync` before initializing
+or syncing modules. Relative URLs follow Git's current-worktree default-remote
+rules, including task bases whose `.gitmodules` differs from the control checkout.
+Shared/common submodule config changes are reported and never overwritten.
+Residual Git directories from modules manually deinitialized inside a task block
+forced cleanup until they are reinitialized or recovered.
 
 ## Gate configuration
 
@@ -199,9 +268,15 @@ python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
+python3 docs/tools/autopipeline/ap.py task-start T0001
+python3 docs/tools/autopipeline/ap.py task-status T0001
+python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py gate-profile
 python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
+python3 docs/tools/autopipeline/ap.py task-integrate T0001
+python3 docs/tools/autopipeline/ap.py task-finish T0001
+python3 docs/tools/autopipeline/ap.py task-prune
 ```
 
 ## Upgrade and multi-project sync

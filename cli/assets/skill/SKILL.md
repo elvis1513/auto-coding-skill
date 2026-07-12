@@ -1,6 +1,6 @@
 ---
 name: auto-coding-skill
-description: Generic .agents engineering workflow with adaptive micro, standard, and high-risk execution profiles; minimal project scaffold; dev and verified closure modes.
+description: Generic .agents engineering workflow with isolated Git worktrees for parallel write tasks, adaptive micro/standard/high-risk profiles, minimal project scaffolding, safe integration and branch cleanup, and evidence-backed dev or verified closure.
 ---
 
 # Auto Coding Skill
@@ -61,16 +61,62 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 ```
 
+## Parallel write isolation
+
+Every task that may write files must use its own registered Git worktree and
+task branch. Read-only discovery may stay in the primary worktree.
+
+```bash
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+# Continue in the worktree path printed by task-start.
+python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+```
+
+`task-start` records the base revision, target branch, task branch, and worktree
+in the repository manifest. `commit-push` is valid only inside that task's
+registered worktree and may stage only changes owned by that task. If unknown
+changes appear, stop and report them. Never restore, reset, stash, clean, or
+otherwise modify another task's or the user's changes.
+
+After a successful integration, remove the clean worktree and merged local task
+branch. Delete the merged remote task branch by default. Use `task-finish` to
+retry cleanup for one integrated task and `task-prune` to clean registered merged
+tasks in bulk. Refuse cleanup when a worktree is dirty or a branch is unmerged.
+Do not update the primary checkout during integration; pull it explicitly when
+its user-owned state is ready. Treat unknown ignored files as user data and
+block cleanup; allow only explicitly disposable cache/build paths. Before a
+forced task-worktree removal, recursively require every initialized submodule
+to be clean and contain no unknown ignored data, local-only history, or
+unmirrored local branch. Block cleanup when the submodule has another linked
+worktree or its remotes cannot be refreshed. Before the validated forced removal,
+persist its refs and reflog commits in the Git common directory's managed
+submodule-recovery store so a remote race cannot erase the final copy. Never run
+submodule deinit from a linked task worktree because its shared config can alter
+the primary checkout.
+
+`task-start` enables Git worktree-scoped config and seeds task-local submodule
+URLs. After editing `.gitmodules`, run `task-submodule-sync` before submodule
+initialization or sync. Resolve relative URLs with Git's current-worktree
+default-remote semantics, not the integration remote. If shared/common submodule
+config differs from the task-start snapshot, stop and report it without restoring
+or overwriting the value. Treat residual module Git directories from a manual
+deinit/removal as user data: block forced cleanup until they are reinitialized or
+explicitly recovered.
+
 ## Development closure
 
-1. Locate the real entry point, call chain, existing owner module, tests, and
+1. Start the write task with `task-start` and enter its registered worktree.
+2. Locate the real entry point, call chain, existing owner module, tests, and
    reusable helpers.
-2. Update the active task with the smallest useful design note.
-3. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
+3. Update the active task with the smallest useful design note.
+4. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
    flow, or lasting structural decisions.
-4. Implement only necessary changes.
-5. Run the resolved gate.
-6. Record `DEV-CLOSED`, commit, push, and stop.
+5. Implement only necessary changes.
+6. Run the resolved gate.
+7. Record `DEV-CLOSED`, commit, push, integrate, and clean the task worktree.
 
 ## Verified closure
 
@@ -80,6 +126,7 @@ High-risk or explicitly verified work uses the strongest path:
 2. Commit and push.
 3. Verify enabled CI/Jenkins and target-environment surfaces.
 4. Record `PASS`, `FAIL`, or `PARTIAL` only from executed evidence.
+5. Integrate successful work and clean its temporary worktree and branches.
 
 ## Structure policy
 
@@ -130,7 +177,13 @@ python3 docs/tools/autopipeline/ap.py scaffold all --write
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan
 python3 docs/tools/autopipeline/ap.py gate-profile
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-finish <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-prune
 ```
 
 `status` and `sync` manage only the minimal required scaffold. Existing optional

@@ -6,19 +6,23 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import datetime as _dt
 import fnmatch
 import json
 import os
+import posixpath
 import re
+import socket
 import sys
 import time
 import urllib.parse
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
-from typing import Optional, List
+from typing import Iterator, Optional, List
 
 try:
     import yaml  # type: ignore
@@ -32,7 +36,52 @@ from scaffold_templates import scaffold_groups, templates_for
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
 _INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX"}
 _GENERATED_NOISE_PATTERNS = [
+    ".local/auto-coding-skill/**",
     "__pycache__/**",
+    "**/__pycache__/**",
+    "*.pyc",
+    "**/*.pyc",
+    ".DS_Store",
+    "**/.DS_Store",
+]
+_DEFAULT_DISPOSABLE_IGNORED_PATTERNS = [
+    ".local/auto-coding-skill",
+    ".local/auto-coding-skill/**",
+    "node_modules",
+    "node_modules/**",
+    "**/node_modules",
+    "**/node_modules/**",
+    "target",
+    "target/**",
+    "**/target",
+    "**/target/**",
+    "dist",
+    "dist/**",
+    "**/dist",
+    "**/dist/**",
+    "build",
+    "build/**",
+    "**/build",
+    "**/build/**",
+    "coverage",
+    "coverage/**",
+    "**/coverage",
+    "**/coverage/**",
+    ".pytest_cache",
+    ".pytest_cache/**",
+    "**/.pytest_cache",
+    "**/.pytest_cache/**",
+    ".mypy_cache",
+    ".mypy_cache/**",
+    "**/.mypy_cache",
+    "**/.mypy_cache/**",
+    ".ruff_cache",
+    ".ruff_cache/**",
+    "**/.ruff_cache",
+    "**/.ruff_cache/**",
+    "__pycache__",
+    "__pycache__/**",
+    "**/__pycache__",
     "**/__pycache__/**",
     "*.pyc",
     "**/*.pyc",
@@ -85,6 +134,13 @@ def _append_jsonl(path: Path, payload: dict) -> None:
 
 
 def _evidence_log_path(repo: Path, cfg: dict) -> Path:
+    manifest = _active_task_manifest(repo)
+    if manifest:
+        docs_cfg = cfg.get("docs") or {}
+        task_dir = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
+        return Path(repo, task_dir, f"{manifest['task_id']}.jsonl")
+    if _task_isolation(cfg) == "worktree":
+        return Path(repo, ".local/auto-coding-skill/evidence.jsonl")
     docs_cfg = cfg.get("docs") or {}
     rel = _text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl"
     return Path(repo, rel)
@@ -1020,6 +1076,451 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _concurrency_cfg(cfg: dict) -> dict:
+    value = cfg.get("concurrency") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _task_isolation(cfg: dict) -> str:
+    isolation = _text(_concurrency_cfg(cfg).get("isolation")).lower() or "worktree"
+    if isolation not in {"worktree", "legacy"}:
+        raise APError("concurrency.isolation must be worktree or legacy")
+    return isolation
+
+
+def _cleanup_policy(cfg: dict) -> dict:
+    concurrency_cfg = _concurrency_cfg(cfg)
+    return {
+        "cleanup_merged": _bool_config(concurrency_cfg.get("cleanup_merged"), True),
+        "delete_remote_branch": _bool_config(concurrency_cfg.get("delete_remote_branch"), True),
+        "disposable_ignored": [
+            _text(item)
+            for item in _as_list(concurrency_cfg.get("disposable_ignored"))
+            if _text(item)
+        ],
+    }
+
+
+def _manifest_cleanup_policy(manifest: dict, fallback_cfg: dict) -> dict:
+    value = manifest.get("cleanup_policy")
+    return value if isinstance(value, dict) else _cleanup_policy(fallback_cfg)
+
+
+def _validate_task_id(task_id: str) -> str:
+    value = _text(task_id)
+    if not _TASK_ID_RE.fullmatch(value) or value.endswith(".lock") or ".." in value:
+        raise APError(
+            "Task ID must be 1-64 characters using letters, digits, '.', '_' or '-', "
+            "must start with a letter/digit, and cannot contain '..' or end with '.lock'."
+        )
+    return value
+
+
+def _resolve_git_dir(repo: Path, option: str) -> Path:
+    result = run(["git", "rev-parse", option], cwd=repo, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise APError(f"Cannot resolve {option} for Git repository: {repo}")
+    value = Path(result.stdout.strip())
+    if not value.is_absolute():
+        value = repo / value
+    return value.resolve()
+
+
+def _git_common_dir(repo: Path) -> Path:
+    return _resolve_git_dir(repo, "--git-common-dir")
+
+
+def _git_dir(repo: Path) -> Path:
+    return _resolve_git_dir(repo, "--git-dir")
+
+
+def _task_state_root(repo: Path) -> Path:
+    return _git_common_dir(repo) / "auto-coding-skill"
+
+
+def _task_registry_path(repo: Path, task_id: str) -> Path:
+    return _task_state_root(repo) / "tasks" / f"{_validate_task_id(task_id)}.json"
+
+
+def _worktree_manifest_path(repo: Path) -> Path:
+    return _git_dir(repo) / "auto-coding-skill-task.json"
+
+
+def _read_json_object(path: Path) -> Optional[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_json_object(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _active_task_manifest(repo: Path) -> Optional[dict]:
+    try:
+        return _read_json_object(_worktree_manifest_path(repo))
+    except APError:
+        return None
+
+
+def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = "") -> dict:
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    if expected_task_id and task_id != _validate_task_id(expected_task_id):
+        raise APError(
+            f"Task registry identity mismatch: expected={expected_task_id}, manifest={task_id}"
+        )
+    task_uuid = _text(manifest.get("task_uuid"))
+    if not re.fullmatch(r"[0-9a-f]{32}", task_uuid):
+        raise APError(f"Invalid task manifest UUID for {task_id}; refusing Git operations.")
+    task_branch = _text(manifest.get("task_branch"))
+    if not task_branch.endswith(f"/{task_id}") or run(
+        ["git", "check-ref-format", "--branch", task_branch],
+        cwd=repo,
+        check=False,
+    ).returncode != 0:
+        raise APError(f"Invalid task branch in manifest for {task_id}: {task_branch!r}")
+    target_branch = _text(manifest.get("target_branch"))
+    if run(
+        ["git", "check-ref-format", "--branch", target_branch],
+        cwd=repo,
+        check=False,
+    ).returncode != 0:
+        raise APError(f"Invalid target branch in manifest for {task_id}: {target_branch!r}")
+    remote = _text(manifest.get("remote"))
+    if not remote or remote.startswith("-") or any(char in remote for char in "\0\r\n"):
+        raise APError(f"Invalid remote in manifest for {task_id}: {remote!r}")
+    base_sha = _text(manifest.get("base_sha"))
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base_sha):
+        raise APError(f"Invalid base commit in manifest for {task_id}: {base_sha!r}")
+    worktree_raw = _text(manifest.get("worktree_path"))
+    control_raw = _text(manifest.get("control_worktree_path"))
+    worktree = Path(worktree_raw)
+    control = Path(control_raw)
+    if not worktree_raw or not control_raw or not worktree.is_absolute() or not control.is_absolute():
+        raise APError(f"Task manifest paths must be absolute for {task_id}.")
+    worktree = worktree.resolve()
+    control = control.resolve()
+    if worktree == control or control in worktree.parents or worktree in control.parents:
+        raise APError(
+            f"Task worktree must be outside its control checkout for {task_id}: {worktree}"
+        )
+    return manifest
+
+
+def _load_task_manifest(repo: Path, task_id: str) -> dict:
+    path = _task_registry_path(repo, task_id)
+    manifest = _read_json_object(path)
+    if not manifest:
+        raise APError(
+            f"Task is not registered: {task_id}. Run `ap.py task-start {task_id}` first."
+        )
+    return _validate_task_manifest(repo, manifest, task_id)
+
+
+def _save_task_manifest(repo: Path, manifest: dict) -> None:
+    _validate_task_manifest(repo, manifest)
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    manifest["updated_at"] = _now_iso()
+    _write_json_object(_task_registry_path(repo, task_id), manifest)
+    worktree_value = _text(manifest.get("worktree_path"))
+    if worktree_value:
+        worktree = Path(worktree_value)
+        if worktree.exists():
+            try:
+                _write_json_object(_worktree_manifest_path(worktree), manifest)
+            except APError:
+                pass
+
+
+def _delete_task_manifest(repo: Path, manifest: dict) -> None:
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    _task_registry_path(repo, task_id).unlink(missing_ok=True)
+
+
+def _current_branch(repo: Path) -> str:
+    result = run(["git", "branch", "--show-current"], cwd=repo, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _require_control_checkout(repo: Path, manifest: Optional[dict] = None) -> None:
+    if _active_task_manifest(repo):
+        raise APError("Run this command from the primary/control checkout, not from a task worktree.")
+    if _git_dir(repo) != _git_common_dir(repo):
+        raise APError("Run this command from the primary/control checkout, not from a linked worktree.")
+    if manifest:
+        expected = _text(manifest.get("control_worktree_path"))
+        if expected and repo.resolve() != Path(expected).resolve():
+            raise APError(f"Task control checkout mismatch: current={repo.resolve()}, expected={expected}")
+
+
+def _resolve_commit(repo: Path, ref: str) -> str:
+    result = run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise APError(f"Cannot resolve Git commit: {ref}")
+    return result.stdout.strip()
+
+
+def _git_z_paths(repo: Path, command: list[str]) -> list[str]:
+    result = run(command, cwd=repo, check=False)
+    if result.returncode != 0:
+        return []
+    return [item for item in result.stdout.split("\0") if item]
+
+
+def _checked_git_z_paths(repo: Path, command: list[str], context: str) -> list[str]:
+    result = run(command, cwd=repo, check=False)
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect {context}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    return [item for item in result.stdout.split("\0") if item]
+
+
+def _working_tree_paths(repo: Path) -> list[str]:
+    paths: set[str] = set()
+    paths.update(
+        _git_z_paths(
+            repo,
+            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+        )
+    )
+    paths.update(
+        _git_z_paths(
+            repo,
+            ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+        )
+    )
+    paths.update(
+        _git_z_paths(repo, ["git", "ls-files", "--others", "--exclude-standard", "-z"])
+    )
+    return sorted(path.replace("\\", "/") for path in paths if path)
+
+
+def _task_runtime_paths(repo: Path, cfg: dict, manifest: Optional[dict]) -> set[str]:
+    docs_cfg = cfg.get("docs") or {}
+    gate_cfg = _gate_cfg(cfg)
+    paths = {
+        _text(gate_cfg.get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl",
+    }
+    if manifest:
+        task_id = _validate_task_id(_text(manifest.get("task_id")))
+        evidence_dir = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
+        paths.add(f"{evidence_dir.rstrip('/')}/{task_id}.jsonl")
+    else:
+        paths.add(_text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl")
+    normalized: set[str] = set()
+    for path in paths:
+        value = path.replace("\\", "/")
+        if value.startswith("./"):
+            value = value[2:]
+        if value:
+            normalized.add(value)
+    return normalized
+
+
+def _task_content_fingerprint(repo: Path, cfg: dict, manifest: Optional[dict]) -> str:
+    runtime_paths = _task_runtime_paths(repo, cfg, manifest)
+    relevant = [
+        path
+        for path in _working_tree_paths(repo)
+        if path not in runtime_paths and not _is_generated_noise_path(path)
+    ]
+    digest = hashlib.sha256()
+    digest.update(f"branch:{_current_branch(repo)}\n".encode("utf-8"))
+    digest.update(f"head:{_resolve_commit(repo, 'HEAD')}\n".encode("utf-8"))
+    for rel in relevant:
+        digest.update(rel.encode("utf-8", errors="surrogateescape"))
+        path = repo / rel
+        try:
+            digest.update(f"mode:{path.lstat().st_mode:o}".encode("ascii"))
+        except OSError:
+            digest.update(b"mode:<missing>")
+        if path.is_symlink():
+            try:
+                digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            except OSError:
+                digest.update(b"<unreadable-symlink>")
+        elif path.is_file():
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(b"<unreadable>")
+        else:
+            digest.update(b"<missing>")
+    for start in range(0, len(relevant), 100):
+        batch = relevant[start : start + 100]
+        if not batch:
+            continue
+        cached = run(
+            ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--", *batch],
+            cwd=repo,
+            check=False,
+        )
+        digest.update(cached.stdout.encode("utf-8", errors="surrogateescape"))
+        unstaged = run(
+            ["git", "diff", "--binary", "--no-ext-diff", "--", *batch],
+            cwd=repo,
+            check=False,
+        )
+        digest.update(unstaged.stdout.encode("utf-8", errors="surrogateescape"))
+        index_state = run(
+            ["git", "ls-files", "--stage", "-z", "--", *batch],
+            cwd=repo,
+            check=False,
+        )
+        digest.update(index_state.stdout.encode("utf-8", errors="surrogateescape"))
+    return digest.hexdigest()
+
+
+def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
+    expected = sorted(set(path for path in paths if path))
+    for start in range(0, len(expected), 100):
+        run(["git", "add", "-A", "--", *expected[start : start + 100]], cwd=repo)
+    staged = sorted(
+        set(
+            _checked_git_z_paths(
+                repo,
+                [
+                    "git",
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "-z",
+                    "--diff-filter=ACDMRTUXB",
+                ],
+                "staged task paths",
+            )
+        )
+    )
+    unexpected = sorted(set(staged) - set(expected))
+    if unexpected:
+        raise APError(
+            "Refusing to commit paths outside the current task:\n- " + "\n- ".join(unexpected)
+        )
+    return staged
+
+
+def _task_commit_paths(repo: Path) -> list[str]:
+    return [path for path in _working_tree_paths(repo) if not _is_generated_noise_path(path)]
+
+
+def _unstaged_task_paths(repo: Path) -> list[str]:
+    paths = set(
+        _checked_git_z_paths(
+            repo,
+            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+            "unstaged task paths",
+        )
+    )
+    paths.update(
+        _checked_git_z_paths(
+            repo,
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            "untracked task paths",
+        )
+    )
+    return sorted(path for path in paths if not _is_generated_noise_path(path))
+
+
+def _require_task_context(repo: Path, cfg: dict, task_id: str) -> Optional[dict]:
+    manifest = _active_task_manifest(repo)
+    if not manifest:
+        if _git_dir(repo) != _git_common_dir(repo):
+            raise APError(
+                "This linked worktree has no registered task manifest. Refusing legacy fallback; "
+                "return to the primary checkout and create or recover the task with task-start."
+            )
+        if _task_isolation(cfg) == "legacy":
+            return None
+        raise APError(
+            "This project requires an isolated task worktree. "
+            f"Run `python3 docs/tools/autopipeline/ap.py task-start {task_id}` from the main checkout, "
+            "then continue in the returned worktree."
+        )
+    expected_task = _validate_task_id(task_id)
+    actual_task = _text(manifest.get("task_id"))
+    if actual_task != expected_task:
+        raise APError(
+            f"Task/worktree mismatch: command={expected_task}, worktree={actual_task or '(missing)'}."
+        )
+    registered = _read_json_object(_task_registry_path(repo, expected_task))
+    if not registered:
+        raise APError(f"Task registry entry is missing for {expected_task}; refusing to recreate it implicitly.")
+    for field in ("task_id", "task_uuid", "task_branch", "worktree_path", "base_sha"):
+        if _text(registered.get(field)) != _text(manifest.get(field)):
+            raise APError(f"Task manifest/registry mismatch for {expected_task}: {field}")
+    manifest = registered
+    expected_path = Path(_text(manifest.get("worktree_path"))).resolve()
+    if repo.resolve() != expected_path:
+        raise APError(f"Task manifest belongs to {expected_path}, not {repo.resolve()}.")
+    branch = _current_branch(repo)
+    expected_branch = _text(manifest.get("task_branch"))
+    if not branch or branch != expected_branch:
+        raise APError(
+            f"Task branch mismatch: current={branch or '(detached)'}, expected={expected_branch}."
+        )
+    if _text(manifest.get("state")) in {"integrated", "finished"}:
+        raise APError(f"Task {expected_task} is already {_text(manifest.get('state'))}.")
+    return manifest
+
+
+@contextlib.contextmanager
+def _repo_lock(repo: Path, name: str, timeout_s: float = 30.0) -> Iterator[None]:
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "repository"
+    lock_path = _task_state_root(repo) / "locks" / f"{safe_name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl  # type: ignore
+        except ImportError as exc:  # pragma: no cover - current runtime is POSIX
+            raise APError("Task locking requires a POSIX fcntl runtime.") from exc
+        deadline = time.time() + max(0.0, timeout_s)
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() >= deadline:
+                    raise APError(f"Timed out waiting for repository lock: {name}")
+                time.sleep(0.1)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "acquired_at": _now_iso(),
+                    "name": name,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        handle.flush()
+        yield
+    finally:
+        try:
+            import fcntl  # type: ignore
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        handle.close()
+
+
 def _is_placeholder(value: object) -> bool:
     raw = _text(value)
     upper = raw.upper()
@@ -1226,11 +1727,12 @@ def _default_base_ref(repo: Path) -> str:
 
 def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
     paths: list[str] = []
-    effective_base = base_ref or _default_base_ref(repo)
+    manifest = _active_task_manifest(repo)
+    effective_base = base_ref or (_text(manifest.get("base_sha")) if manifest else "") or _default_base_ref(repo)
     if effective_base:
-        paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", f"{effective_base}...HEAD"]))
-    paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB"]))
-    paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB"]))
+        paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB", f"{effective_base}...HEAD"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB"]))
     paths.extend(_git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]))
     return _unique_paths(paths)
 
@@ -1256,10 +1758,15 @@ def _commit_changed_files(repo: Path, ref: str) -> list[str]:
     return _unique_paths([line.strip() for line in result.stdout.splitlines() if line.strip()])
 
 
-def _cleanup_generated_noise(repo: Path) -> None:
+def _cleanup_generated_noise(repo: Path, protected_paths: Optional[set[str]] = None) -> None:
+    protected = {path.replace("\\", "/") for path in (protected_paths or set())}
     candidates = [
-        rel for rel in _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"])
-        if _is_generated_noise_path(rel)
+        rel
+        for rel in _git_z_paths(
+            repo,
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        if _is_generated_noise_path(rel) and rel.replace("\\", "/") not in protected
     ]
     for rel in candidates:
         path = repo / rel
@@ -1373,7 +1880,7 @@ def _impact_summary(
 ) -> dict:
     paths = _changed_files(repo, base_ref=base_ref) if changed_paths is None else _unique_paths(changed_paths)
     docs_cfg = cfg.get("docs") or {}
-    ignored_runtime_paths = {
+    ignored_runtime_paths = _task_runtime_paths(repo, cfg, _active_task_manifest(repo)) | {
         _text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl",
         _text(docs_cfg.get("closure_log")) or "docs/tasks/closure-log.md",
         _text(_gate_cfg(cfg).get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl",
@@ -1464,9 +1971,14 @@ def _run_full_gate(repo: Path, cfg: dict) -> list[str]:
 
 
 def _run_git_diff_check(repo: Path, cfg: dict) -> None:
-    print("[diff-check] git diff --check")
+    print("[diff-check] working tree + index + task commits")
     start = time.time()
     run(["git", "diff", "--check"], cwd=repo)
+    run(["git", "diff", "--cached", "--check"], cwd=repo)
+    manifest = _active_task_manifest(repo)
+    base_sha = _text(manifest.get("base_sha")) if manifest else ""
+    if base_sha:
+        run(["git", "diff", "--check", f"{base_sha}...HEAD"], cwd=repo)
     _record_gate_profile(repo, cfg, "diff_check", "pass", time.time() - start)
     _record_evidence(repo, cfg, "diff_check", "pass")
     print("[diff-check] OK")
@@ -3329,6 +3841,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     docs_cfg = (cfg.get("docs") or {})
     runtime_cfg = (cfg.get("runtime") or {})
     structure_cfg = _structure_cfg(cfg)
+    concurrency_cfg = _concurrency_cfg(cfg)
 
     missing: List[str] = []
     validation_errors: List[str] = []
@@ -3341,6 +3854,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         missing.append("workflow.mode (must be dev or verify)")
     if profile not in _WORKFLOW_PROFILES:
         missing.append("workflow.profile (must be auto, micro, standard, or high-risk)")
+    isolation = _text(concurrency_cfg.get("isolation")).lower() or "worktree"
+    if isolation not in {"worktree", "legacy"}:
+        validation_errors.append("concurrency.isolation must be worktree or legacy")
+    branch_prefix = _text(concurrency_cfg.get("branch_prefix")) or "codex/"
+    if not branch_prefix.endswith("/"):
+        validation_errors.append("concurrency.branch_prefix must end with '/'")
+    elif run(
+        ["git", "check-ref-format", "--branch", f"{branch_prefix}TASK"],
+        cwd=repo,
+        check=False,
+    ).returncode != 0:
+        validation_errors.append("concurrency.branch_prefix does not form a valid Git branch")
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
     enforcement = _text(structure_cfg.get("enforcement")).lower()
@@ -3678,6 +4203,7 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    context_manifest = _require_task_context(repo, cfg, args.task_id)
     plan = _resolve_execution_plan(
         cfg,
         repo,
@@ -3701,7 +4227,12 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     docs_cfg = (cfg.get("docs") or {})
     target_cfg = (cfg.get("target_env") or {})
     taskbook = Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md")))
-    closure_log = Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md")))
+    manifest = context_manifest or _active_task_manifest(repo)
+    closure_log = (
+        _task_doc_path(repo, cfg, manifest, "closure")
+        if manifest
+        else Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md")))
+    )
     closure_log.parent.mkdir(parents=True, exist_ok=True)
     if not closure_log.exists():
         closure_log.write_text("# Closure Log\n\n", encoding="utf-8")
@@ -3739,6 +4270,8 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
             f.write("\n")
         f.write("\n".join(lines))
         f.write("\n")
+    if manifest:
+        _update_active_task_status(repo, cfg, manifest, str(args.result))
     _record_evidence(
         repo,
         cfg,
@@ -3753,6 +4286,1605 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
         },
     )
     print(f"[record-closure] OK: {closure_log}")
+
+
+def _task_remote_and_target(cfg: dict, args: argparse.Namespace) -> tuple[str, str, str]:
+    concurrency_cfg = _concurrency_cfg(cfg)
+    remote = _text(getattr(args, "remote", "")) or _text(concurrency_cfg.get("remote")) or "origin"
+    target_branch = (
+        _text(getattr(args, "target_branch", ""))
+        or _text(concurrency_cfg.get("target_branch"))
+    )
+    base_ref = _text(getattr(args, "base", "")) or _text(concurrency_cfg.get("base_ref"))
+    if not target_branch and base_ref.startswith(f"{remote}/"):
+        target_branch = base_ref[len(remote) + 1 :]
+    if not target_branch:
+        branch = _current_branch(Path(args.repo).resolve())
+        target_branch = branch or "dev"
+    if not base_ref:
+        base_ref = f"{remote}/{target_branch}"
+    return remote, target_branch, base_ref
+
+
+def _fetch_target(repo: Path, remote: str, target_branch: str) -> str:
+    remote_ref = f"refs/remotes/{remote}/{target_branch}"
+    run(
+        [
+            "git",
+            "fetch",
+            "--no-tags",
+            remote,
+            f"refs/heads/{target_branch}:{remote_ref}",
+        ],
+        cwd=repo,
+    )
+    return _resolve_commit(repo, remote_ref)
+
+
+def _task_branch_prefix(cfg: dict) -> str:
+    prefix = _text(_concurrency_cfg(cfg).get("branch_prefix")) or "codex/"
+    if not prefix.endswith("/"):
+        raise APError("concurrency.branch_prefix must end with '/'.")
+    return prefix
+
+
+def _task_worktree_path(repo: Path, cfg: dict, task_id: str, override: str = "") -> Path:
+    raw_root = override or _text(_concurrency_cfg(cfg).get("worktree_root")) or "../.worktrees"
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        root = repo / root
+    root = root.resolve()
+    candidate = (root / repo.name / _validate_task_id(task_id)).resolve()
+    if repo.resolve() == candidate or repo.resolve() in candidate.parents:
+        raise APError("Task worktrees must live outside the primary repository directory.")
+    return candidate
+
+
+def _parse_null_config_entries(result, *, context: str) -> dict[str, list[str]]:
+    if result.returncode == 1 and not result.stdout:
+        return {}
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect {context}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    entries: dict[str, list[str]] = {}
+    for item in result.stdout.split("\0"):
+        if not item:
+            continue
+        key, separator, value = item.partition("\n")
+        if not separator or not key:
+            raise APError(f"Malformed Git config entry while inspecting {context}: {item!r}")
+        entries.setdefault(key, []).append(value)
+    return entries
+
+
+def _gitmodules_urls(repo: Path) -> dict[str, str]:
+    path = repo / ".gitmodules"
+    if not path.exists():
+        return {}
+    result = run(
+        [
+            "git",
+            "config",
+            "--null",
+            "--file",
+            str(path),
+            "--get-regexp",
+            r"^submodule\..*\.url$",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    entries = _parse_null_config_entries(result, context=f"submodule URLs in {path}")
+    return {key: values[-1] for key, values in entries.items() if values}
+
+
+def _common_submodule_config(repo: Path) -> dict[str, list[str]]:
+    result = run(
+        [
+            "git",
+            "config",
+            "--null",
+            "--local",
+            "--get-regexp",
+            r"^submodule\.",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    return _parse_null_config_entries(result, context="shared submodule config")
+
+
+def _config_values(repo: Path, scope: str, key: str) -> list[str]:
+    result = run(
+        ["git", "config", "--null", scope, "--get-all", key],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode == 1 and not result.stdout:
+        return []
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect {scope} Git config {key!r}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return [value for value in result.stdout.split("\0") if value]
+
+
+def _replace_config_values(repo: Path, scope: str, key: str, values: list[str]) -> None:
+    removed = run(
+        ["git", "config", scope, "--unset-all", key],
+        cwd=repo,
+        check=False,
+    )
+    if removed.returncode not in {0, 5}:
+        raise APError(
+            f"Cannot clear {scope} Git config {key!r}: "
+            f"{removed.stderr.strip() or removed.stdout.strip()}"
+        )
+    for value in values:
+        run(["git", "config", scope, "--add", key, value], cwd=repo)
+
+
+def _enable_worktree_config(repo: Path) -> None:
+    enabled = run(
+        ["git", "config", "--local", "--bool", "--get", "extensions.worktreeConfig"],
+        cwd=repo,
+        check=False,
+    )
+    if enabled.returncode == 0 and enabled.stdout.strip() == "true":
+        return
+    run(["git", "config", "--local", "extensions.worktreeConfig", "true"], cwd=repo)
+
+
+def _require_worktree_config(repo: Path) -> None:
+    enabled = run(
+        ["git", "config", "--local", "--bool", "--get", "extensions.worktreeConfig"],
+        cwd=repo,
+        check=False,
+    )
+    if enabled.returncode != 0 or enabled.stdout.strip() != "true":
+        raise APError(
+            "Git extensions.worktreeConfig is not enabled. Return to the control checkout and "
+            "recreate or recover the task; task commands will not write shared config."
+        )
+
+
+def _default_submodule_remote_url(repo: Path) -> str:
+    branch = _current_branch(repo)
+    remote = ""
+    if branch:
+        configured = run(
+            ["git", "config", "--get", f"branch.{branch}.remote"],
+            cwd=repo,
+            check=False,
+        )
+        if configured.returncode == 0:
+            remote = configured.stdout.strip()
+    if not remote:
+        names = run(["git", "remote"], cwd=repo, check=False)
+        if names.returncode != 0:
+            raise APError(
+                f"Cannot inspect Git remotes while resolving submodule URLs: {names.stderr.strip()}"
+            )
+        if "origin" in {line.strip() for line in names.stdout.splitlines()}:
+            remote = "origin"
+    if not remote or remote == ".":
+        return str(repo.resolve())
+    remote_url_result = run(
+        ["git", "remote", "get-url", remote],
+        cwd=repo,
+        check=False,
+    )
+    if remote_url_result.returncode != 0 or not remote_url_result.stdout.strip():
+        raise APError(f"Default submodule remote {remote!r} has no URL in {repo}.")
+    return remote_url_result.stdout.strip()
+
+
+def _resolve_submodule_url(repo: Path, raw_url: str) -> str:
+    if not raw_url.startswith(("./", "../")):
+        return raw_url
+    remote_url = _default_submodule_remote_url(repo)
+    has_explicit_scheme = bool(
+        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", remote_url)
+        or remote_url.startswith("file:")
+    )
+    scp_like = (
+        None
+        if has_explicit_scheme
+        else re.fullmatch(r"([^/:]+(?:@[^/:]+)?):(.*)", remote_url)
+    )
+    if scp_like is not None:
+        prefix, remote_path = scp_like.groups()
+        return f"{prefix}:{posixpath.normpath(posixpath.join(remote_path, raw_url))}"
+    parsed = urllib.parse.urlsplit(remote_url)
+    if parsed.scheme:
+        resolved_path = posixpath.normpath(posixpath.join(parsed.path, raw_url))
+        if parsed.path.startswith("/") and not resolved_path.startswith("/"):
+            resolved_path = f"/{resolved_path}"
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, resolved_path, parsed.query, parsed.fragment)
+        )
+    remote_path = Path(remote_url).expanduser()
+    if not remote_path.is_absolute():
+        remote_path = (repo / remote_path).resolve()
+    return str(Path(os.path.normpath(os.path.join(str(remote_path), raw_url))))
+
+
+def _seed_control_submodule_config(repo: Path) -> None:
+    _enable_worktree_config(repo)
+    for key, declared_url in _gitmodules_urls(repo).items():
+        if _config_values(repo, "--worktree", key):
+            continue
+        effective = _config_values(repo, "--local", key)
+        value = effective[-1] if effective else _resolve_submodule_url(repo, declared_url)
+        _replace_config_values(repo, "--worktree", key, [value])
+
+
+def _sync_task_submodule_config(
+    control_repo: Path,
+    worktree: Path,
+    manifest: dict,
+    *,
+    initial: bool,
+    check_common: bool,
+) -> None:
+    _require_worktree_config(control_repo)
+    urls = _gitmodules_urls(worktree)
+    control_urls = _gitmodules_urls(control_repo)
+    previous_raw = manifest.get("submodule_config_claims")
+    previous_claims = (
+        {str(key): str(value) for key, value in previous_raw.items()}
+        if isinstance(previous_raw, dict)
+        else {}
+    )
+    claims: dict[str, str] = {}
+    for key, declared_url in urls.items():
+        value = _resolve_submodule_url(worktree, declared_url)
+        if initial and control_urls.get(key) == declared_url:
+            control_values = _config_values(control_repo, "--worktree", key)
+            if control_values:
+                value = control_values[-1]
+        _replace_config_values(worktree, "--worktree", key, [value])
+        claims[key] = value
+        active_key = f"{key[:-len('.url')]}.active"
+        _replace_config_values(worktree, "--worktree", active_key, ["true"])
+        claims[active_key] = "true"
+
+    for stale_key in sorted(set(previous_claims) - set(claims)):
+        _replace_config_values(worktree, "--worktree", stale_key, [])
+
+    manifest["submodule_config_claims"] = claims
+    if not check_common:
+        return
+    baseline = manifest.get("common_submodule_config")
+    baseline = baseline if isinstance(baseline, dict) else {}
+    candidate_values: dict[str, set[str]] = {}
+    for source in (previous_claims, claims):
+        for key, value in source.items():
+            candidate_values.setdefault(key, set()).add(value)
+    for key, candidates in candidate_values.items():
+        current = _config_values(control_repo, "--local", key)
+        before_raw = baseline.get(key) or []
+        before = [str(value) for value in before_raw] if isinstance(before_raw, list) else []
+        if current != before:
+            raise APError(
+                "Shared submodule config changed after task-start; no common config was modified. "
+                f"Resolve ownership before continuing: key={key!r}, before={before!r}, "
+                f"current={current!r}, task_values={sorted(candidates)!r}"
+            )
+
+
+def _git_ref_exists(repo: Path, ref: str) -> bool:
+    return run(["git", "show-ref", "--verify", "--quiet", ref], cwd=repo, check=False).returncode == 0
+
+
+def _git_status(repo: Path) -> str:
+    result = run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(f"Cannot inspect Git status for {repo}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _ignored_paths(repo: Path) -> list[str]:
+    result = run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect ignored files for {repo}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return sorted(
+        path.rstrip("/")
+        for path in result.stdout.split("\0")
+        if path.rstrip("/")
+    )
+
+
+def _pattern_may_match_descendant(directory: str, pattern_ref: str) -> bool:
+    directory = directory.replace("\\", "/").lstrip("./").rstrip("/")
+    pattern = _text(pattern_ref).replace("\\", "/").lstrip("./")
+    if not directory or not pattern:
+        return False
+    if "/" not in pattern or pattern.startswith("**/"):
+        return True
+    wildcard = min(
+        (index for token in ("*", "?", "[") if (index := pattern.find(token)) >= 0),
+        default=len(pattern),
+    )
+    literal_prefix = pattern[:wildcard].rstrip("/")
+    if not literal_prefix:
+        return True
+    return (
+        literal_prefix == directory
+        or literal_prefix.startswith(f"{directory}/")
+        or directory.startswith(literal_prefix)
+    )
+
+
+def _expanded_ignored_paths(repo: Path, directory: str) -> list[str]:
+    result = run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            directory,
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect ignored directory {directory!r}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return sorted(path for path in result.stdout.split("\0") if path)
+
+
+def _unsafe_ignored_paths(repo: Path, extra_patterns: list[str]) -> list[str]:
+    patterns = list(_DEFAULT_DISPOSABLE_IGNORED_PATTERNS) + [
+        _text(item) for item in extra_patterns if _text(item)
+    ]
+    unsafe: list[str] = []
+    for path in _ignored_paths(repo):
+        # Git deliberately collapses ignored directories (for example `.local/`).
+        # A declared disposable subtree is safe without walking it; an ambiguous
+        # parent is expanded so an allowed child cannot hide an unknown sibling.
+        if _path_matches(path, patterns):
+            continue
+        if not any(_pattern_may_match_descendant(path, pattern) for pattern in patterns):
+            unsafe.append(path)
+            continue
+        expanded = _expanded_ignored_paths(repo, path)
+        unsafe.extend(item for item in expanded if not _path_matches(item, patterns))
+        if not expanded:
+            unsafe.append(path)
+    return sorted(set(unsafe))
+
+
+def _initialized_submodules(repo: Path) -> list[tuple[str, Path]]:
+    result = run(
+        [
+            "git",
+            "submodule",
+            "foreach",
+            "--quiet",
+            "--recursive",
+            'printf "%s\\0" "$displaypath"',
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect initialized submodules for {repo}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    root = repo.resolve()
+    submodules: list[tuple[str, Path]] = []
+    for raw_path in result.stdout.split("\0"):
+        rel = raw_path.replace("\\", "/").strip("/")
+        if rel.startswith("./"):
+            rel = rel[2:]
+        if not rel:
+            continue
+        candidate = (root / rel).resolve()
+        if root not in candidate.parents:
+            raise APError(f"Initialized submodule resolves outside the task worktree: {rel}")
+        submodules.append((rel, candidate))
+    return sorted(set(submodules), key=lambda item: item[0])
+
+
+def _stored_submodule_gitdirs(worktree: Path) -> tuple[set[Path], list[Path]]:
+    modules_root = _git_dir(worktree) / "modules"
+    if not modules_root.exists():
+        return set(), []
+    repositories: set[Path] = set()
+    unknown: list[Path] = []
+
+    def scan_container(container: Path) -> None:
+        try:
+            children = sorted(container.iterdir(), key=lambda item: item.name)
+        except OSError:
+            unknown.append(container)
+            return
+        for child in children:
+            if child.is_symlink():
+                unknown.append(child)
+                continue
+            if not child.is_dir():
+                unknown.append(child)
+                continue
+            is_git_dir = (
+                (child / "HEAD").is_file()
+                and (child / "config").is_file()
+                and (child / "objects").is_dir()
+            )
+            if is_git_dir:
+                repositories.add(child.resolve())
+                nested_modules = child / "modules"
+                if nested_modules.exists():
+                    scan_container(nested_modules)
+                continue
+            scan_container(child)
+
+    scan_container(modules_root)
+    return repositories, unknown
+
+
+def _submodule_disposable_patterns(submodule_path: str, extra_patterns: list[str]) -> list[str]:
+    prefix = submodule_path.replace("\\", "/").strip("/")
+    patterns = [_text(item) for item in extra_patterns if _text(item)]
+    for item in list(patterns):
+        normalized = item.replace("\\", "/").lstrip("./").strip("/")
+        if normalized == prefix:
+            patterns.append("**")
+        elif normalized.startswith(f"{prefix}/"):
+            patterns.append(normalized[len(prefix) + 1 :])
+    return patterns
+
+
+def _submodule_local_only_commits(submodule: Path) -> list[str]:
+    result = run(
+        [
+            "git",
+            "rev-list",
+            "--max-count=20",
+            "--all",
+            "--reflog",
+            "--not",
+            "--remotes",
+        ],
+        cwd=submodule,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect local-only submodule history for {submodule}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _submodule_unmirrored_branches(submodule: Path) -> list[str]:
+    result = run(
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        cwd=submodule,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect submodule branches for {submodule}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    local: dict[str, str] = {}
+    remote: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        ref, commit = line.split("\t", 1)
+        if ref.startswith("refs/heads/"):
+            local[ref[len("refs/heads/") :]] = commit
+            continue
+        if not ref.startswith("refs/remotes/"):
+            continue
+        remote_and_branch = ref[len("refs/remotes/") :]
+        if "/" not in remote_and_branch:
+            continue
+        _, branch = remote_and_branch.split("/", 1)
+        remote.setdefault(branch, set()).add(commit)
+    return sorted(
+        branch
+        for branch, commit in local.items()
+        if commit not in remote.get(branch, set())
+    )
+
+
+def _submodule_other_worktrees(submodule: Path) -> list[str]:
+    result = run(
+        ["git", "worktree", "list", "--porcelain", "-z"],
+        cwd=submodule,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect linked submodule worktrees for {submodule}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    current_paths = {submodule.resolve(), _git_dir(submodule).resolve()}
+    others: list[str] = []
+    for field in result.stdout.split("\0"):
+        if not field.startswith("worktree "):
+            continue
+        raw_path = field[len("worktree ") :]
+        candidate = Path(raw_path).resolve()
+        if candidate not in current_paths:
+            others.append(raw_path)
+    return sorted(set(others))
+
+
+def _refresh_submodule_remotes(submodule: Path) -> None:
+    remotes = run(["git", "remote"], cwd=submodule, check=False)
+    if remotes.returncode != 0:
+        raise APError(
+            f"Cannot inspect submodule remotes for {submodule}: "
+            f"{remotes.stderr.strip() or remotes.stdout.strip()}"
+        )
+    names = [line.strip() for line in remotes.stdout.splitlines() if line.strip()]
+    if not names:
+        raise APError(
+            f"Initialized submodule has no remote to verify before destructive cleanup: {submodule}"
+        )
+    for remote in names:
+        fetched = run(
+            [
+                "git",
+                "-c",
+                "credential.interactive=never",
+                "fetch",
+                "--prune",
+                "--no-tags",
+                remote,
+            ],
+            cwd=submodule,
+            check=False,
+        )
+        if fetched.returncode != 0:
+            raise APError(
+                f"Cannot refresh submodule remote {remote!r}; cleanup was blocked so Git history remains local.\n"
+                f"{fetched.stdout}\n{fetched.stderr}"
+            )
+
+
+def _submodule_refs(submodule: Path) -> dict[str, str]:
+    result = run(
+        ["git", "for-each-ref", "--format=%(refname)%09%(objectname)", "refs"],
+        cwd=submodule,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot snapshot submodule refs for {submodule}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        ref, object_id = line.split("\t", 1)
+        if ref.startswith("refs/") and object_id:
+            refs[ref] = object_id
+    return refs
+
+
+def _submodule_reflog_commits(submodule: Path) -> list[str]:
+    result = run(
+        ["git", "reflog", "show", "--all", "--format=%H"],
+        cwd=submodule,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot snapshot submodule reflogs for {submodule}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    commits = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    commits.add(_resolve_commit(submodule, "HEAD"))
+    return sorted(commits)
+
+
+def _archive_submodule_git_state(
+    control_repo: Path,
+    manifest: dict,
+    submodule_path: str,
+    submodule: Path,
+) -> dict:
+    task_uuid = _text(manifest.get("task_uuid")) or uuid.uuid4().hex
+    object_format_result = run(
+        ["git", "rev-parse", "--show-object-format"],
+        cwd=submodule,
+        check=False,
+    )
+    if object_format_result.returncode != 0:
+        raise APError(
+            f"Cannot inspect submodule object format for {submodule_path}: "
+            f"{object_format_result.stderr.strip() or object_format_result.stdout.strip()}"
+        )
+    object_format = object_format_result.stdout.strip() or "sha1"
+    recovery_root = _task_state_root(control_repo) / "submodule-recovery"
+    repo_key = hashlib.sha256(submodule_path.encode("utf-8")).hexdigest()[:20]
+    recovery_repo = recovery_root / "repos" / f"{repo_key}-{object_format}.git"
+    if not recovery_repo.exists():
+        recovery_repo.parent.mkdir(parents=True, exist_ok=True)
+        init_command = ["git", "init", "--bare", "--quiet"]
+        if object_format != "sha1":
+            init_command.append(f"--object-format={object_format}")
+        init_command.append(str(recovery_repo))
+        run(init_command, cwd=control_repo)
+    bare = run(
+        ["git", f"--git-dir={recovery_repo}", "rev-parse", "--is-bare-repository"],
+        cwd=control_repo,
+        check=False,
+    )
+    recovery_format = run(
+        ["git", f"--git-dir={recovery_repo}", "rev-parse", "--show-object-format"],
+        cwd=control_repo,
+        check=False,
+    )
+    if (
+        bare.returncode != 0
+        or bare.stdout.strip() != "true"
+        or recovery_format.returncode != 0
+        or recovery_format.stdout.strip() != object_format
+    ):
+        raise APError(f"Invalid submodule recovery repository: {recovery_repo}")
+
+    original_refs = _submodule_refs(submodule)
+    reflog_commits = _submodule_reflog_commits(submodule)
+    snapshot_id = uuid.uuid4().hex
+    temporary_prefix = f"refs/auto-coding-recovery/{snapshot_id}/reflog"
+    temporary_refs: dict[str, str] = {}
+    try:
+        for commit in reflog_commits:
+            temporary_ref = f"{temporary_prefix}/{commit}"
+            run(
+                ["git", "update-ref", temporary_ref, commit, "0" * len(commit)],
+                cwd=submodule,
+            )
+            temporary_refs[temporary_ref] = commit
+        source_refs = _submodule_refs(submodule)
+        destination_prefix = f"refs/tasks/{task_uuid}/{snapshot_id}"
+        run(
+            [
+                "git",
+                f"--git-dir={recovery_repo}",
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                str(submodule),
+                f"+refs/*:{destination_prefix}/*",
+            ],
+            cwd=control_repo,
+        )
+        archived_refs = run(
+            [
+                "git",
+                f"--git-dir={recovery_repo}",
+                "for-each-ref",
+                "--format=%(refname)%09%(objectname)",
+                destination_prefix,
+            ],
+            cwd=control_repo,
+        )
+        archived: dict[str, str] = {}
+        for line in archived_refs.stdout.splitlines():
+            if "\t" in line:
+                ref, object_id = line.split("\t", 1)
+                archived[ref] = object_id
+        missing: list[str] = []
+        for source_ref, object_id in source_refs.items():
+            destination = f"{destination_prefix}/{source_ref[len('refs/'):]}"
+            if archived.get(destination) != object_id:
+                missing.append(source_ref)
+        if missing:
+            raise APError(
+                f"Submodule recovery snapshot verification failed for {submodule_path}:\n- "
+                + "\n- ".join(missing)
+            )
+        metadata_path = (
+            recovery_root
+            / "snapshots"
+            / task_uuid
+            / f"{repo_key}-{snapshot_id}.json"
+        )
+        _write_json_object(
+            metadata_path,
+            {
+                "schema": 1,
+                "created_at": _now_iso(),
+                "task_id": _text(manifest.get("task_id")),
+                "task_uuid": task_uuid,
+                "submodule_path": submodule_path,
+                "source_git_dir": str(_git_dir(submodule)),
+                "recovery_repo": str(recovery_repo),
+                "destination_prefix": destination_prefix,
+                "refs": original_refs,
+                "reflog_commits": reflog_commits,
+            },
+        )
+    finally:
+        for temporary_ref, commit in temporary_refs.items():
+            run(
+                ["git", "update-ref", "-d", temporary_ref, commit],
+                cwd=submodule,
+                check=False,
+            )
+
+    print(
+        f"[task-cleanup] submodule recovery snapshot: {submodule_path} -> "
+        f"{recovery_repo} ({destination_prefix})"
+    )
+    return {
+        "submodule_path": submodule_path,
+        "recovery_repo": str(recovery_repo),
+        "destination_prefix": destination_prefix,
+        "metadata_path": str(metadata_path),
+    }
+
+
+def _prepare_submodules_for_removal(
+    control_repo: Path,
+    manifest: dict,
+    worktree: Path,
+    extra_disposable_patterns: list[str],
+) -> bool:
+    submodules = _initialized_submodules(worktree)
+    stored_gitdirs, unknown_store_paths = _stored_submodule_gitdirs(worktree)
+    initialized_gitdirs = {_git_dir(submodule).resolve() for _, submodule in submodules}
+    residual_gitdirs = sorted(stored_gitdirs - initialized_gitdirs)
+    if residual_gitdirs or unknown_store_paths:
+        details = [
+            *(f"residual module Git directory: {path}" for path in residual_gitdirs),
+            *(f"unrecognized module-store path: {path}" for path in unknown_store_paths[:20]),
+        ]
+        raise APError(
+            "Task worktree has deinitialized, removed, or unrecognized submodule Git state that "
+            "cannot be proven safe for forced removal. Reinitialize the submodule and rerun cleanup, "
+            "or move/recover its Git data first; the task worktree and branch were retained:\n- "
+            + "\n- ".join(details)
+        )
+    if not submodules:
+        return False
+    problems: list[str] = []
+    for rel, submodule in submodules:
+        other_worktrees = _submodule_other_worktrees(submodule)
+        if other_worktrees:
+            problems.append(
+                f"{rel}: additional linked worktrees must be handled before cleanup:\n"
+                + "\n".join(f"  - {path}" for path in other_worktrees)
+            )
+            continue
+        try:
+            _refresh_submodule_remotes(submodule)
+        except APError as exc:
+            problems.append(f"{rel}: {exc}")
+            continue
+        local_only_commits = _submodule_local_only_commits(submodule)
+        if local_only_commits:
+            problems.append(
+                f"{rel}: local refs/reflogs contain commits not reachable from remote-tracking refs:\n"
+                + "\n".join(f"  - {commit}" for commit in local_only_commits)
+            )
+            continue
+        unmirrored_branches = _submodule_unmirrored_branches(submodule)
+        if unmirrored_branches:
+            problems.append(
+                f"{rel}: local branches have no same-name remote-tracking ref at the same commit:\n"
+                + "\n".join(f"  - {branch}" for branch in unmirrored_branches)
+            )
+            continue
+        dirty = _git_status(submodule)
+        if dirty:
+            problems.append(f"{rel}: tracked or untracked changes:\n{dirty}")
+            continue
+        conflicts = run(["git", "ls-files", "-u"], cwd=submodule, check=False)
+        if conflicts.returncode != 0:
+            raise APError(
+                f"Cannot inspect submodule conflicts for {rel}: "
+                f"{conflicts.stderr.strip() or conflicts.stdout.strip()}"
+            )
+        if conflicts.stdout.strip():
+            problems.append(f"{rel}: unresolved conflicts")
+            continue
+        unsafe_ignored = _unsafe_ignored_paths(
+            submodule,
+            _submodule_disposable_patterns(rel, extra_disposable_patterns),
+        )
+        if unsafe_ignored:
+            rendered = "\n".join(f"  - {rel}/{path}" for path in unsafe_ignored)
+            problems.append(f"{rel}: ignored files are not declared disposable:\n{rendered}")
+    if problems:
+        raise APError(
+            "Task submodules contain data that cannot be discarded; refusing cleanup:\n- "
+            + "\n- ".join(problems)
+            + "\nPush or move local submodule history, commit/move working data, or add only "
+            "disposable cache paths to concurrency.disposable_ignored; then rerun task-finish."
+        )
+
+    for rel, submodule in submodules:
+        _archive_submodule_git_state(control_repo, manifest, rel, submodule)
+    return True
+
+
+def _task_doc_path(repo: Path, cfg: dict, manifest: dict, kind: str) -> Path:
+    docs_cfg = cfg.get("docs") or {}
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    if kind == "active":
+        rel = _text(docs_cfg.get("active_task_dir")) or "docs/tasks/active"
+        suffix = ".md"
+    elif kind == "closure":
+        rel = _text(docs_cfg.get("task_closure_dir")) or "docs/tasks/closures"
+        suffix = ".md"
+    elif kind == "evidence":
+        rel = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
+        suffix = ".jsonl"
+    else:
+        raise APError(f"Unknown task document kind: {kind}")
+    return repo / rel / f"{task_id}{suffix}"
+
+
+def _create_active_task_doc(repo: Path, cfg: dict, manifest: dict) -> None:
+    path = _task_doc_path(repo, cfg, manifest, "active")
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                f"# Task {manifest['task_id']}",
+                "",
+                "- Status: Active",
+                f"- Base: `{manifest['base_ref']}` (`{manifest['base_sha'][:12]}`)",
+                f"- Target: `{manifest['remote']}/{manifest['target_branch']}`",
+                f"- Branch: `{manifest['task_branch']}`",
+                "- Scope: TODO",
+                "- Acceptance: TODO",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _update_active_task_status(repo: Path, cfg: dict, manifest: dict, status: str) -> None:
+    path = _task_doc_path(repo, cfg, manifest, "active")
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    updated, count = re.subn(r"(?m)^- Status: .*?$", f"- Status: {status}", text, count=1)
+    if count == 0:
+        updated = text.rstrip() + f"\n- Status: {status}\n"
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+
+
+def _rollback_fresh_task_worktree(
+    repo: Path,
+    worktree: Path,
+    task_branch: str,
+    expected_tip: str,
+) -> bool:
+    run(["git", "worktree", "unlock", str(worktree)], cwd=repo, check=False)
+    removed = run(
+        ["git", "worktree", "remove", "--force", str(worktree)],
+        cwd=repo,
+        check=False,
+    )
+    if removed.returncode == 0:
+        run(
+            ["git", "update-ref", "-d", f"refs/heads/{task_branch}", expected_tip],
+            cwd=repo,
+            check=False,
+        )
+    return removed.returncode == 0
+
+
+def cmd_task_start(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    _require_control_checkout(repo)
+    remote, target_branch, base_ref = _task_remote_and_target(cfg, args)
+    concurrency_cfg = _concurrency_cfg(cfg)
+    timeout_s = float(concurrency_cfg.get("lock_timeout_sec") or 30)
+
+    with (
+        _repo_lock(repo, "integration", timeout_s=timeout_s),
+        _repo_lock(repo, "task-registry", timeout_s=timeout_s),
+    ):
+        if _read_json_object(_task_registry_path(repo, task_id)):
+            raise APError(f"Task is already registered: {task_id}")
+
+        common_submodule_config = _common_submodule_config(repo)
+        _seed_control_submodule_config(repo)
+        task_uuid = uuid.uuid4().hex
+
+        if not getattr(args, "no_fetch", False) and base_ref.startswith(f"{remote}/"):
+            _fetch_target(repo, remote, target_branch)
+        base_sha = _resolve_commit(repo, base_ref)
+        prefix = _task_branch_prefix(cfg)
+        task_branch = f"{prefix}{task_id}"
+        check_ref = run(["git", "check-ref-format", "--branch", task_branch], cwd=repo, check=False)
+        if check_ref.returncode != 0:
+            raise APError(f"Invalid task branch name: {task_branch}")
+        if _git_ref_exists(repo, f"refs/heads/{task_branch}"):
+            raise APError(f"Task branch already exists: {task_branch}. Run task-prune or choose another ID.")
+        worktree = _task_worktree_path(repo, cfg, task_id, _text(getattr(args, "worktree_root", "")))
+        if worktree.exists():
+            raise APError(f"Task worktree path already exists: {worktree}")
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                "git",
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                task_branch,
+                str(worktree),
+                base_sha,
+            ],
+            cwd=repo,
+        )
+        run(
+            ["git", "worktree", "lock", "--reason", f"auto-coding task {task_id}", str(worktree)],
+            cwd=repo,
+        )
+        manifest = {
+            "schema": 1,
+            "task_id": task_id,
+            "task_uuid": task_uuid,
+            "owner": _text(getattr(args, "owner", "")) or os.environ.get("CODEX_THREAD_ID", "") or f"{socket.gethostname()}:{os.getpid()}",
+            "base_ref": base_ref,
+            "base_sha": base_sha,
+            "remote": remote,
+            "target_branch": target_branch,
+            "task_branch": task_branch,
+            "worktree_path": str(worktree.resolve()),
+            "control_worktree_path": str(repo.resolve()),
+            "cleanup_policy": _cleanup_policy(cfg),
+            "state": "active",
+            "created_at": _now_iso(),
+            "initial_untracked": [],
+            "claimed_paths": [],
+            "remote_task_tip": "",
+            "common_submodule_config": common_submodule_config,
+        }
+        try:
+            _sync_task_submodule_config(
+                repo,
+                worktree,
+                manifest,
+                initial=True,
+                check_common=True,
+            )
+        except APError as exc:
+            rolled_back = _rollback_fresh_task_worktree(
+                repo,
+                worktree,
+                task_branch,
+                base_sha,
+            )
+            raise APError(
+                f"Could not isolate task-local submodule config; fresh worktree rollback="
+                f"{str(rolled_back).lower()}.\n{exc}"
+            ) from exc
+        initial_status = _git_status(worktree)
+        initial_head = _resolve_commit(worktree, "HEAD")
+        initial_branch = _current_branch(worktree)
+        if initial_status or initial_head != base_sha or initial_branch != task_branch:
+            rolled_back = _rollback_fresh_task_worktree(
+                repo,
+                worktree,
+                task_branch,
+                initial_head,
+            )
+            raise APError(
+                "A checkout hook changed the new task worktree. The fresh worktree and branch were rolled "
+                f"back={str(rolled_back).lower()} so hook-created content cannot be committed accidentally. "
+                f"branch={initial_branch or '(detached)'} head={initial_head}\n{initial_status}"
+            )
+        _save_task_manifest(repo, manifest)
+        _create_active_task_doc(worktree, cfg, manifest)
+
+    print(f"[task-start] task={task_id}")
+    print(f"[task-start] branch={task_branch}")
+    print(f"[task-start] base={base_ref}@{base_sha}")
+    print(f"[task-start] worktree={worktree}")
+    print(f"[task-start] next: cd {worktree}")
+
+
+def _task_status_payload(repo: Path, manifest: dict) -> dict:
+    worktree = Path(_text(manifest.get("worktree_path")))
+    task_branch = _text(manifest.get("task_branch"))
+    local_ref = f"refs/heads/{task_branch}"
+    tip = _resolve_commit(repo, local_ref) if _git_ref_exists(repo, local_ref) else ""
+    remote = _text(manifest.get("remote")) or "origin"
+    target = _text(manifest.get("target_branch"))
+    remote_ref = f"refs/remotes/{remote}/{target}"
+    merged = bool(
+        tip
+        and _git_ref_exists(repo, remote_ref)
+        and run(["git", "merge-base", "--is-ancestor", tip, remote_ref], cwd=repo, check=False).returncode == 0
+    )
+    return {
+        **manifest,
+        "worktree_exists": worktree.exists(),
+        "dirty": bool(_git_status(worktree)) if worktree.exists() else False,
+        "local_branch_exists": bool(tip),
+        "tip": tip,
+        "merged_into_target": merged,
+    }
+
+
+def cmd_task_status(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    task_id = _text(getattr(args, "task_id", ""))
+    manifests: list[dict] = []
+    if task_id:
+        manifests.append(_load_task_manifest(repo, _validate_task_id(task_id)))
+    else:
+        registry = _task_state_root(repo) / "tasks"
+        for path in sorted(registry.glob("*.json")) if registry.exists() else []:
+            payload = _read_json_object(path)
+            if payload:
+                manifests.append(_validate_task_manifest(repo, payload))
+    statuses = [_task_status_payload(repo, manifest) for manifest in manifests]
+    if args.json:
+        print(json.dumps({"tasks": statuses}, ensure_ascii=False, indent=2))
+        return
+    if not statuses:
+        print("[task-status] no registered tasks")
+        return
+    for status in statuses:
+        print(
+            f"[task-status] task={status['task_id']} state={status.get('state')} "
+            f"branch={status.get('task_branch')} worktree={status.get('worktree_path')} "
+            f"dirty={str(status['dirty']).lower()} merged={str(status['merged_into_target']).lower()}"
+        )
+
+
+def cmd_task_submodule_sync(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    manifest = _require_task_context(repo, cfg, task_id)
+    if not manifest:
+        raise APError("task-submodule-sync requires a registered task worktree.")
+    control_repo = Path(_text(manifest.get("control_worktree_path"))).resolve()
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with (
+        _repo_lock(control_repo, "integration", timeout_s=timeout_s),
+        _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s),
+    ):
+        manifest = _require_task_context(repo, cfg, task_id)
+        if not manifest:
+            raise APError("Task manifest disappeared while synchronizing submodule config.")
+        _sync_task_submodule_config(
+            control_repo,
+            repo,
+            manifest,
+            initial=False,
+            check_common=True,
+        )
+        _save_task_manifest(repo, manifest)
+    url_count = sum(
+        1 for key in (manifest.get("submodule_config_claims") or {}) if key.endswith(".url")
+    )
+    print(f"[task-submodule-sync] OK task={task_id} urls={url_count}")
+
+
+def _remote_branch_tip(repo: Path, remote: str, branch: str) -> str:
+    result = run(["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"], cwd=repo, check=False)
+    if result.returncode != 0:
+        raise APError(
+            f"Cannot inspect remote branch {remote}/{branch}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    if not result.stdout.strip():
+        return ""
+    return result.stdout.split()[0]
+
+
+def _branch_is_occupied(repo: Path, task_branch: str) -> bool:
+    wanted = f"refs/heads/{task_branch}"
+    return any(
+        line.strip() == f"branch {wanted}"
+        for line in run(["git", "worktree", "list", "--porcelain"], cwd=repo).stdout.splitlines()
+    )
+
+
+def _delete_remote_task_branch(repo: Path, manifest: dict) -> bool:
+    remote = _text(manifest.get("remote")) or "origin"
+    branch = _text(manifest.get("task_branch"))
+    actual_tip = _remote_branch_tip(repo, remote, branch)
+    if not actual_tip:
+        return True
+    expected_tip = _text(manifest.get("remote_task_tip"))
+    if not expected_tip or actual_tip != expected_tip:
+        print(
+            f"[task-cleanup] WARN: remote branch retained because its tip changed: "
+            f"{remote}/{branch}",
+            file=sys.stderr,
+        )
+        return False
+    result = run(
+        [
+            "git",
+            "push",
+            "--no-verify",
+            f"--force-with-lease=refs/heads/{branch}:{expected_tip}",
+            remote,
+            f":refs/heads/{branch}",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"[task-cleanup] WARN: failed to delete remote task branch {remote}/{branch}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _finish_registered_task(
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+    *,
+    keep_remote: bool = False,
+) -> dict:
+    manifest = _validate_task_manifest(repo, manifest)
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    worktree = Path(_text(manifest.get("worktree_path")))
+    branch = _text(manifest.get("task_branch"))
+    remote = _text(manifest.get("remote")) or "origin"
+    target = _text(manifest.get("target_branch"))
+    cleanup_policy = _manifest_cleanup_policy(manifest, cfg)
+
+    if worktree.exists():
+        worktree_manifest = _active_task_manifest(worktree)
+        if not worktree_manifest or _text(worktree_manifest.get("task_uuid")) != _text(manifest.get("task_uuid")):
+            raise APError(f"Task worktree manifest does not match the registry for {task_id}.")
+        _sync_task_submodule_config(
+            repo,
+            worktree,
+            manifest,
+            initial=False,
+            check_common=True,
+        )
+        _save_task_manifest(repo, manifest)
+        unsafe_ignored = _unsafe_ignored_paths(
+            worktree,
+            list(cleanup_policy.get("disposable_ignored") or []),
+        )
+        if unsafe_ignored:
+            raise APError(
+                "Task worktree contains ignored files that are not declared disposable; refusing cleanup:\n- "
+                + "\n- ".join(unsafe_ignored)
+            )
+        dirty = _git_status(worktree)
+        if dirty:
+            raise APError(f"Task worktree is dirty; refusing cleanup for {task_id}:\n{dirty}")
+        conflicts = run(["git", "ls-files", "-u"], cwd=worktree).stdout.strip()
+        if conflicts:
+            raise APError(f"Task worktree has unresolved conflicts; refusing cleanup for {task_id}.")
+
+    target_sha = _fetch_target(repo, remote, target)
+    local_ref = f"refs/heads/{branch}"
+    tip = _resolve_commit(repo, local_ref) if _git_ref_exists(repo, local_ref) else _text(manifest.get("integrated_sha"))
+    if not tip:
+        raise APError(f"Task branch is missing and no integrated commit was recorded: {branch}")
+    if run(["git", "merge-base", "--is-ancestor", tip, target_sha], cwd=repo, check=False).returncode != 0:
+        raise APError(
+            f"Task branch is not merged into {remote}/{target}; refusing cleanup for {task_id}."
+        )
+
+    if worktree.exists():
+        archived_submodules = _prepare_submodules_for_removal(
+            repo,
+            manifest,
+            worktree,
+            list(cleanup_policy.get("disposable_ignored") or []),
+        )
+        run(["git", "worktree", "unlock", str(worktree)], cwd=repo, check=False)
+        remove_command = ["git", "worktree", "remove"]
+        if archived_submodules:
+            # Git requires --force for any worktree that has ever initialized a
+            # submodule. Reaching this branch means root and recursive submodule
+            # state was checked, unknown ignored data was rejected, additional
+            # linked worktrees were excluded, and Git state was archived. Do not
+            # run `submodule deinit` here: its config changes are shared with the
+            # primary checkout.
+            remove_command.append("--force")
+        remove_command.append(str(worktree))
+        run(remove_command, cwd=repo)
+    if _branch_is_occupied(repo, branch):
+        raise APError(f"Task branch is still checked out by a worktree: {branch}")
+    if _git_ref_exists(repo, local_ref):
+        current_tip = _resolve_commit(repo, local_ref)
+        if current_tip != tip:
+            raise APError(f"Task branch moved during cleanup: {branch}")
+        run(["git", "update-ref", "-d", local_ref, tip], cwd=repo)
+
+    delete_remote = bool(cleanup_policy.get("delete_remote_branch", True))
+    remote_deleted = False
+    if delete_remote and not keep_remote:
+        remote_deleted = _delete_remote_task_branch(repo, manifest)
+    cleanup_pending = delete_remote and not keep_remote and not remote_deleted
+    if cleanup_pending:
+        manifest["state"] = "cleanup-pending"
+        manifest["integrated_sha"] = tip
+        _save_task_manifest(repo, manifest)
+    else:
+        _delete_task_manifest(repo, manifest)
+    run(["git", "worktree", "prune"], cwd=repo, check=False)
+    return {
+        "task_id": task_id,
+        "tip": tip,
+        "target": f"{remote}/{target}",
+        "remote_branch_deleted": remote_deleted,
+        "cleanup_pending": cleanup_pending,
+    }
+
+
+def cmd_task_finish(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    manifest = _load_task_manifest(repo, task_id)
+    _require_control_checkout(repo, manifest)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with (
+        _repo_lock(repo, "integration", timeout_s=timeout_s),
+        _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s),
+    ):
+        manifest = _load_task_manifest(repo, task_id)
+        result = _finish_registered_task(
+            repo,
+            cfg,
+            manifest,
+            keep_remote=bool(getattr(args, "keep_remote", False)),
+        )
+    print(
+        f"[task-finish] OK task={task_id} target={result['target']} "
+        f"remote_branch_deleted={str(result['remote_branch_deleted']).lower()}"
+    )
+
+
+def _append_integration_closure(repo: Path, cfg: dict, manifest: dict, target_sha: str) -> None:
+    path = _task_doc_path(repo, cfg, manifest, "closure")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(f"# Task Closure — {manifest['task_id']}\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n## Integration\n")
+        handle.write(f"- Target: `{manifest['remote']}/{manifest['target_branch']}`\n")
+        handle.write(f"- Base: `{target_sha}`\n")
+        handle.write("- Gate: passed after rebase\n")
+
+
+def cmd_task_integrate(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    manifest = _load_task_manifest(repo, task_id)
+    _require_control_checkout(repo, manifest)
+    worktree = Path(_text(manifest.get("worktree_path")))
+    if repo.resolve() == worktree.resolve():
+        raise APError("Run task-integrate from the primary/control checkout, not from the task worktree.")
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+
+    with (
+        _repo_lock(repo, "integration", timeout_s=timeout_s),
+        _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s),
+    ):
+        manifest = _load_task_manifest(repo, task_id)
+        worktree = Path(_text(manifest.get("worktree_path")))
+        if not worktree.exists():
+            raise APError(f"Task worktree is missing: {worktree}")
+        worktree_manifest = _active_task_manifest(worktree)
+        if not worktree_manifest or _text(worktree_manifest.get("task_uuid")) != _text(manifest.get("task_uuid")):
+            raise APError(f"Task worktree manifest does not match the registry for {task_id}.")
+        _sync_task_submodule_config(
+            repo,
+            worktree,
+            manifest,
+            initial=False,
+            check_common=True,
+        )
+        _save_task_manifest(repo, manifest)
+        if _text(manifest.get("state")) not in {"pushed", "integration-raced", "gate-failed"}:
+            raise APError(f"Task {task_id} must be committed and pushed before integration.")
+        dirty = _git_status(worktree)
+        if dirty:
+            raise APError(f"Task worktree is dirty; run commit-push before integration:\n{dirty}")
+
+        remote = _text(manifest.get("remote")) or "origin"
+        target = _text(manifest.get("target_branch"))
+        task_cfg = _load_cfg(worktree)
+        target_sha = _fetch_target(worktree, remote, target)
+        rebase = run(["git", "rebase", target_sha], cwd=worktree, check=False)
+        if rebase.returncode != 0:
+            manifest["state"] = "conflicted"
+            _save_task_manifest(repo, manifest)
+            raise APError(
+                f"Task integration rebase conflicted for {task_id}; resolve it only in {worktree}.\n"
+                f"{rebase.stdout}\n{rebase.stderr}"
+            )
+
+        _sync_task_submodule_config(
+            repo,
+            worktree,
+            manifest,
+            initial=False,
+            check_common=True,
+        )
+        _save_task_manifest(repo, manifest)
+
+        before_gate = _task_content_fingerprint(worktree, task_cfg, manifest)
+        try:
+            cmd_light_gate(
+                argparse.Namespace(
+                    repo=str(worktree),
+                    scope="auto",
+                    profile="",
+                    mode="",
+                    base=target_sha,
+                    explain=False,
+                )
+            )
+        except APError:
+            manifest["state"] = "gate-failed"
+            _save_task_manifest(repo, manifest)
+            raise
+        after_gate = _task_content_fingerprint(worktree, task_cfg, manifest)
+        if after_gate != before_gate:
+            manifest["state"] = "gate-mutated"
+            _save_task_manifest(repo, manifest)
+            raise APError(
+                "Integration gate changed task-owned files. Review those changes, run commit-push again, "
+                "then retry integration."
+            )
+        manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
+
+        _append_integration_closure(worktree, task_cfg, manifest, target_sha)
+        _update_active_task_status(worktree, task_cfg, manifest, "Integrated")
+        protected = set(manifest.get("initial_untracked") or [])
+        _cleanup_generated_noise(worktree, protected_paths=protected)
+        integration_fingerprint = _task_content_fingerprint(worktree, task_cfg, manifest)
+        manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
+        if _task_content_fingerprint(worktree, task_cfg, manifest) != integration_fingerprint:
+            raise APError("Task-owned files changed immediately before staging integration evidence.")
+        integration_paths = _task_commit_paths(worktree)
+        task_tip = ""
+        if integration_paths:
+            staged = _stage_exact_paths(worktree, integration_paths)
+            if staged:
+                unstaged = _unstaged_task_paths(worktree)
+                if unstaged:
+                    raise APError(
+                        "Task-owned files changed while staging integration evidence:\n- "
+                        + "\n- ".join(unstaged)
+                    )
+                manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
+                task_tip = _commit_exact_index(
+                    worktree,
+                    f"{task_id}: record integration evidence [skip ci]",
+                )
+
+        task_tip = task_tip or _resolve_commit(worktree, "HEAD")
+        if _resolve_commit(worktree, "HEAD") != task_tip:
+            raise APError("HEAD moved after the verified integration commit; refusing to push.")
+        if run(
+            ["git", "merge-base", "--is-ancestor", target_sha, task_tip],
+            cwd=worktree,
+            check=False,
+        ).returncode != 0:
+            raise APError(f"Integration tip {task_tip} is not a descendant of target base {target_sha}.")
+        push = run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/{target}:{target_sha}",
+                remote,
+                f"{task_tip}:refs/heads/{target}",
+            ],
+            cwd=worktree,
+            check=False,
+        )
+        if push.returncode != 0:
+            manifest["state"] = "integration-raced"
+            manifest["integration_tip"] = task_tip
+            _save_task_manifest(repo, manifest)
+            raise APError(
+                f"Target branch moved while integrating {task_id}. Re-run task-integrate to fetch, rebase, "
+                f"and gate the new target.\n{push.stdout}\n{push.stderr}"
+            )
+
+        fresh_target = _fetch_target(worktree, remote, target)
+        if run(
+            ["git", "merge-base", "--is-ancestor", task_tip, fresh_target],
+            cwd=worktree,
+            check=False,
+        ).returncode != 0:
+            raise APError(
+                f"Remote target verification mismatch after push: {task_tip} is not in {fresh_target}."
+            )
+        if _resolve_commit(worktree, "HEAD") != task_tip:
+            raise APError("A push hook changed the task branch after integration; remote target is safe, local state needs review.")
+        manifest["state"] = "integrated"
+        manifest["integrated_sha"] = task_tip
+        manifest["integration_base_sha"] = target_sha
+        _save_task_manifest(repo, manifest)
+
+        cleanup_enabled = bool(
+            _manifest_cleanup_policy(manifest, cfg).get("cleanup_merged", True)
+        )
+        if cleanup_enabled and not getattr(args, "keep_worktree", False):
+            result = _finish_registered_task(
+                repo,
+                cfg,
+                manifest,
+                keep_remote=bool(getattr(args, "keep_remote", False)),
+            )
+        else:
+            result = {
+                "task_id": task_id,
+                "target": f"{remote}/{target}",
+                "remote_branch_deleted": False,
+            }
+
+    print(
+        f"[task-integrate] OK task={task_id} target={result['target']} commit={task_tip} "
+        f"cleaned={str(cleanup_enabled and not getattr(args, 'keep_worktree', False)).lower()}"
+    )
+
+
+def _worktree_branches(repo: Path) -> set[str]:
+    branches: set[str] = set()
+    for line in run(["git", "worktree", "list", "--porcelain"], cwd=repo).stdout.splitlines():
+        if line.startswith("branch refs/heads/"):
+            branches.add(line[len("branch refs/heads/") :].strip())
+    return branches
+
+
+def cmd_task_prune(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    _require_control_checkout(repo)
+    concurrency_cfg = _concurrency_cfg(cfg)
+    remote = _text(concurrency_cfg.get("remote")) or "origin"
+    target = _text(concurrency_cfg.get("target_branch")) or _current_branch(repo) or "dev"
+    prefix = _task_branch_prefix(cfg)
+    timeout_s = float(concurrency_cfg.get("lock_timeout_sec") or 30)
+    removed: list[str] = []
+    skipped: list[str] = []
+
+    with _repo_lock(repo, "integration", timeout_s=timeout_s):
+        registry = _task_state_root(repo) / "tasks"
+        registered_branches: set[str] = set()
+        for path in list(sorted(registry.glob("*.json"))) if registry.exists() else []:
+            manifest = _read_json_object(path)
+            if not manifest:
+                continue
+            manifest = _validate_task_manifest(repo, manifest)
+            branch = _text(manifest.get("task_branch"))
+            registered_branches.add(branch)
+            task_id = _validate_task_id(_text(manifest.get("task_id")))
+            try:
+                with _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s):
+                    manifest = _read_json_object(path)
+                    if not manifest:
+                        continue
+                    manifest = _validate_task_manifest(repo, manifest)
+                    branch = _text(manifest.get("task_branch"))
+                    if _text(manifest.get("state")) not in {"integrated", "cleanup-pending"}:
+                        skipped.append(f"{branch}: state={_text(manifest.get('state')) or 'unknown'}")
+                        continue
+                    result = _finish_registered_task(repo, cfg, manifest)
+            except APError as exc:
+                skipped.append(f"{branch}: {exc}")
+            else:
+                if result["cleanup_pending"]:
+                    skipped.append(f"{branch}: remote cleanup pending")
+                else:
+                    removed.append(branch)
+
+        target_sha = _fetch_target(repo, remote, target)
+        occupied = _worktree_branches(repo)
+        result = run(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)\t%(objectname)",
+                f"refs/heads/{prefix}",
+            ],
+            cwd=repo,
+        )
+        for line in result.stdout.splitlines():
+            if not line.strip() or "\t" not in line:
+                continue
+            branch, tip = line.split("\t", 1)
+            if branch in registered_branches:
+                skipped.append(f"{branch}: registered task")
+                continue
+            if branch in occupied:
+                skipped.append(f"{branch}: occupied")
+                continue
+            if run(["git", "merge-base", "--is-ancestor", tip, target_sha], cwd=repo, check=False).returncode != 0:
+                skipped.append(f"{branch}: unmerged")
+                continue
+            run(["git", "update-ref", "-d", f"refs/heads/{branch}", tip], cwd=repo)
+            removed.append(branch)
+
+        for path in sorted(registry.glob("*.json")) if registry.exists() else []:
+            manifest = _read_json_object(path)
+            if not manifest:
+                continue
+            manifest = _validate_task_manifest(repo, manifest)
+            if _text(manifest.get("state")) == "cleanup-pending":
+                continue
+            branch = _text(manifest.get("task_branch"))
+            if _git_ref_exists(repo, f"refs/heads/{branch}"):
+                continue
+            worktree = Path(_text(manifest.get("worktree_path")))
+            if worktree.exists():
+                continue
+            path.unlink(missing_ok=True)
+        run(["git", "worktree", "prune"], cwd=repo, check=False)
+
+    if args.json:
+        print(json.dumps({"removed": removed, "skipped": skipped}, ensure_ascii=False, indent=2))
+        return
+    print(f"[task-prune] removed={len(removed)} skipped={len(skipped)}")
+    for branch in removed:
+        print(f"[task-prune] removed: {branch}")
+    for detail in skipped:
+        print(f"[task-prune] kept: {detail}")
 
 
 def _record_commit_push_closure(
@@ -3787,9 +5919,95 @@ def _record_commit_push_closure(
     )
 
 
-def cmd_commit_push(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).resolve()
-    ensure_git_repo(repo)
+def _commit_exact_index(repo: Path, message: str) -> str:
+    expected_parent = _resolve_commit(repo, "HEAD")
+    expected_tree = run(["git", "write-tree"], cwd=repo).stdout.strip()
+    run(["git", "commit", "-m", message], cwd=repo)
+    commit_sha = _resolve_commit(repo, "HEAD")
+    actual_tree = run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo).stdout.strip()
+    parents = run(["git", "show", "-s", "--format=%P", "HEAD"], cwd=repo).stdout.strip().split()
+    post_commit_staged = _checked_git_z_paths(
+        repo,
+        [
+            "git",
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACDMRTUXB",
+        ],
+        "post-commit staged paths",
+    )
+    post_commit_unstaged = _unstaged_task_paths(repo)
+    if (
+        parents != [expected_parent]
+        or actual_tree != expected_tree
+        or post_commit_staged
+        or post_commit_unstaged
+    ):
+        raise APError(
+            "Git hooks or another writer changed the commit or working tree after staging. "
+            "The local commit was not pushed; inspect HEAD and rerun the gate before publishing."
+        )
+    return commit_sha
+
+
+def _push_current_task(repo: Path, manifest: Optional[dict], expected_commit: str = "") -> str:
+    commit_sha = expected_commit or _resolve_commit(repo, "HEAD")
+    if _resolve_commit(repo, "HEAD") != commit_sha:
+        raise APError("HEAD moved after the verified commit; refusing to push.")
+    if manifest:
+        remote = _text(manifest.get("remote")) or "origin"
+        task_branch = _text(manifest.get("task_branch"))
+        remote_tip = _remote_branch_tip(repo, remote, task_branch)
+        command = ["git", "push", "--set-upstream"]
+        if remote_tip and run(
+            ["git", "merge-base", "--is-ancestor", remote_tip, "HEAD"],
+            cwd=repo,
+            check=False,
+        ).returncode != 0:
+            expected_tip = _text(manifest.get("remote_task_tip"))
+            if not expected_tip or expected_tip != remote_tip:
+                raise APError(
+                    f"Remote task branch moved unexpectedly: {remote}/{task_branch}. "
+                    "No force push was attempted."
+                )
+            command.append(f"--force-with-lease=refs/heads/{task_branch}:{expected_tip}")
+        command.extend([remote, f"{commit_sha}:refs/heads/{task_branch}"])
+        run(command, cwd=repo)
+        if _resolve_commit(repo, "HEAD") != commit_sha:
+            raise APError("A push hook changed HEAD. The verified task commit was pushed, but local state needs review.")
+        pushed_tip = _remote_branch_tip(repo, remote, task_branch)
+        if pushed_tip != commit_sha:
+            raise APError(
+                f"Remote task branch verification failed: expected {commit_sha}, got {pushed_tip or '(missing)'}."
+            )
+        manifest["state"] = "pushed"
+        manifest["remote_task_tip"] = commit_sha
+        manifest["last_commit"] = commit_sha
+        manifest["claimed_paths"] = _changed_files(repo, _text(manifest.get("base_sha")))
+        _save_task_manifest(repo, manifest)
+    else:
+        run(["git", "push"], cwd=repo)
+    return commit_sha
+
+
+def _cmd_commit_push_locked(
+    args: argparse.Namespace,
+    repo: Path,
+    cfg: dict,
+    manifest: Optional[dict],
+) -> None:
+    if manifest:
+        control_repo = Path(_text(manifest.get("control_worktree_path"))).resolve()
+        _sync_task_submodule_config(
+            control_repo,
+            repo,
+            manifest,
+            initial=False,
+            check_common=False,
+        )
+        _save_task_manifest(repo, manifest)
     cmd_doctor(
         argparse.Namespace(
             repo=str(repo),
@@ -3797,13 +6015,14 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             mode=_text(getattr(args, "mode", "")).lower(),
         )
     )
-    cfg = _load_cfg(repo)
+    base_ref = _text(manifest.get("base_sha")) if manifest else ""
     plan = _resolve_execution_plan(
         cfg,
         repo,
         requested_scope="",
         requested_profile=_text(getattr(args, "profile", "")).lower(),
         requested_mode=_text(getattr(args, "mode", "")).lower(),
+        base_ref=base_ref,
     )
     mode = str(plan["effective_mode"])
     args.effective_profile = str(plan["profile"])
@@ -3819,6 +6038,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     if args.require_runtime_health:
         cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
 
+    before_gate = _task_content_fingerprint(repo, cfg, manifest)
     if mode in {"dev", "verify"} or args.require_light_gate:
         cmd_light_gate(
             argparse.Namespace(
@@ -3826,17 +6046,32 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
                 scope=plan["selected_scope"],
                 profile=plan["profile"],
                 mode=mode,
-                base="",
+                base=base_ref,
                 explain=False,
             )
         )
         structure_check_status = "passed via light-gate" if _structure_gate_enabled(cfg) else "skipped (structure disabled)"
+
+    after_gate = _task_content_fingerprint(repo, cfg, manifest)
+    if after_gate != before_gate:
+        raise APError(
+            "The gate changed task-owned files or another writer modified this worktree. "
+            "Review the changes and rerun commit-push; no files were staged or restored."
+        )
+    if manifest:
+        manifest = _require_task_context(repo, cfg, args.task_id)
 
     if args.require_jenkins:
         cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
 
     if args.require_matrix and mode != "verify":
         cmd_check_matrix(argparse.Namespace(repo=str(repo)))
+
+    if _task_content_fingerprint(repo, cfg, manifest) != after_gate:
+        raise APError(
+            "Task-owned files changed after the gate. Review them and rerun commit-push; "
+            "no files were staged or restored."
+        )
 
     if mode == "dev":
         dev_verification = args.verification or [
@@ -3856,16 +6091,31 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             structure_check=args.structure_check or structure_check_status,
         )
 
-    _cleanup_generated_noise(repo)
-    run(["git", "add", "-A"], cwd=repo)
-    diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
-    if not diff:
+    protected = set(manifest.get("initial_untracked") or []) if manifest else set()
+    if manifest:
+        _cleanup_generated_noise(repo, protected_paths=protected)
+    pre_stage_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
+    if manifest:
+        manifest = _require_task_context(repo, cfg, args.task_id)
+    if _task_content_fingerprint(repo, cfg, manifest) != pre_stage_fingerprint:
+        raise APError("Task-owned files changed immediately before staging; refusing to commit.")
+    task_paths = _task_commit_paths(repo)
+    staged = _stage_exact_paths(repo, task_paths)
+    if not staged:
         raise APError("Nothing to commit.")
+    unstaged = _unstaged_task_paths(repo)
+    if unstaged:
+        raise APError(
+            "Task-owned files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged)
+        )
+    if manifest:
+        manifest = _require_task_context(repo, cfg, args.task_id)
 
-    run(["git", "commit", "-m", msg], cwd=repo)
-    run(["git", "push"], cwd=repo)
+    committed_sha = _commit_exact_index(repo, msg)
+    _push_current_task(repo, manifest, committed_sha)
 
     if mode == "verify":
+        verification_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
         if jenkins_required:
             jenkins_build = cmd_verify_jenkins_build(
                 argparse.Namespace(
@@ -3910,6 +6160,13 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
                 verification.append(f"Target verification: {target_summary}")
             else:
                 verification.append("Target verification skipped by verification.target_env_required=false")
+        if _task_content_fingerprint(repo, cfg, manifest) != verification_fingerprint:
+            raise APError(
+                "Verification changed task-owned files. Review them and rerun commit-push before "
+                "recording the verification closure."
+            )
+        if manifest:
+            manifest = _require_task_context(repo, cfg, args.task_id)
         _record_commit_push_closure(
             repo,
             args,
@@ -3922,12 +6179,24 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             follow_up=args.follow_up or "none",
             structure_check=args.structure_check or structure_check_status,
         )
-        _cleanup_generated_noise(repo)
-        run(["git", "add", "-A"], cwd=repo)
-        closure_diff = run(["git", "diff", "--cached", "--name-only"], cwd=repo).stdout.strip()
-        if closure_diff:
-            run(["git", "commit", "-m", f"{args.task_id}: record verification closure [skip ci]"], cwd=repo)
-            run(["git", "push"], cwd=repo)
+        if manifest:
+            _cleanup_generated_noise(repo, protected_paths=protected)
+        closure_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
+        if manifest:
+            manifest = _require_task_context(repo, cfg, args.task_id)
+        if _task_content_fingerprint(repo, cfg, manifest) != closure_fingerprint:
+            raise APError("Task-owned files changed immediately before staging verification closure.")
+        closure_paths = _task_commit_paths(repo)
+        closure_staged = _stage_exact_paths(repo, closure_paths)
+        if closure_staged:
+            unstaged = _unstaged_task_paths(repo)
+            if unstaged:
+                raise APError(
+                    "Task-owned files changed while staging verification closure:\n- "
+                    + "\n- ".join(unstaged)
+                )
+            closure_sha = _commit_exact_index(repo, f"{args.task_id}: record verification closure [skip ci]")
+            _push_current_task(repo, manifest, closure_sha)
     elif args.record_closure and mode != "dev":
         _record_commit_push_closure(
             repo,
@@ -3941,6 +6210,17 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
             structure_check=args.structure_check or structure_check_status,
         )
     print(f"[commit-push] OK - profile={plan['profile']} mode={mode} scope={plan['selected_scope']}")
+
+
+def cmd_commit_push(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    manifest = _require_task_context(repo, cfg, args.task_id)
+    lock_name = f"task-{_validate_task_id(args.task_id)}" if manifest else "legacy-commit"
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(repo, lock_name, timeout_s=timeout_s):
+        _cmd_commit_push_locked(args, repo, cfg, manifest)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -4090,6 +6370,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--ci-failure", "--jenkins-failure", dest="jenkins_failure", metavar="CI_FAILURE")
     s.add_argument("--fix-commit")
     s.set_defaults(func=cmd_record_closure)
+
+    s = sp.add_parser("task-start")
+    s.add_argument("task_id")
+    s.add_argument("--base")
+    s.add_argument("--target-branch")
+    s.add_argument("--remote")
+    s.add_argument("--worktree-root")
+    s.add_argument("--owner")
+    s.add_argument("--no-fetch", action="store_true")
+    s.set_defaults(func=cmd_task_start)
+
+    s = sp.add_parser("task-status")
+    s.add_argument("task_id", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_task_status)
+
+    s = sp.add_parser("task-submodule-sync")
+    s.add_argument("task_id")
+    s.set_defaults(func=cmd_task_submodule_sync)
+
+    s = sp.add_parser("task-integrate")
+    s.add_argument("task_id")
+    s.add_argument("--keep-worktree", action="store_true")
+    s.add_argument("--keep-remote", action="store_true")
+    s.set_defaults(func=cmd_task_integrate)
+
+    s = sp.add_parser("task-finish")
+    s.add_argument("task_id")
+    s.add_argument("--keep-remote", action="store_true")
+    s.set_defaults(func=cmd_task_finish)
+
+    s = sp.add_parser("task-prune")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_task_prune)
 
     s = sp.add_parser("commit-push")
     s.add_argument("task_id")

@@ -439,11 +439,23 @@ function projectStatus(project, assetSkill, assetAgents){
   const engineeringMissing = !exists(engineering);
   const requiredConfigPaths = [
     { label: "workflow.mode", path: ["workflow", "mode"] },
+    { label: "workflow.profile", path: ["workflow", "profile"] },
+    { label: "concurrency.isolation", path: ["concurrency", "isolation"] },
+    { label: "concurrency.base_ref", path: ["concurrency", "base_ref"] },
+    { label: "concurrency.target_branch", path: ["concurrency", "target_branch"] },
+    { label: "concurrency.branch_prefix", path: ["concurrency", "branch_prefix"] },
+    { label: "concurrency.worktree_root", path: ["concurrency", "worktree_root"] },
+    { label: "concurrency.cleanup_merged", path: ["concurrency", "cleanup_merged"] },
+    { label: "concurrency.delete_remote_branch", path: ["concurrency", "delete_remote_branch"] },
+    { label: "concurrency.disposable_ignored", path: ["concurrency", "disposable_ignored"] },
     { label: "project.name", path: ["project", "name"] },
     { label: "verification.target_env_required", path: ["verification", "target_env_required"] },
     { label: "verification.jenkins_required", path: ["verification", "jenkins_required"] },
     { label: "docs.taskbook", path: ["docs", "taskbook"] },
     { label: "docs.closure_log", path: ["docs", "closure_log"] },
+    { label: "docs.active_task_dir", path: ["docs", "active_task_dir"] },
+    { label: "docs.task_closure_dir", path: ["docs", "task_closure_dir"] },
+    { label: "docs.task_evidence_dir", path: ["docs", "task_evidence_dir"] },
   ];
   let missingConfigTokens = requiredConfigPaths.map(item => item.label);
   if (!engineeringMissing) {

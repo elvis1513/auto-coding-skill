@@ -27,6 +27,7 @@ def run(repo: Path, *args: str) -> None:
 def base_config() -> dict:
     return {
         "workflow": {"mode": "dev", "profile": "auto"},
+        "concurrency": {"isolation": "legacy"},
         "project": {"name": "profile-test"},
         "commands": {
             "gate_changed": "true",

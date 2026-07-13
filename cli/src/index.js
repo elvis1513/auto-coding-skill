@@ -364,19 +364,9 @@ function inferredGateCommands(project){
     const parsed = JSON.parse(fs.readFileSync(pkg, "utf8"));
     const scripts = parsed?.scripts;
     if (!scripts || typeof scripts !== "object") return {};
-    const inferred = {};
-    if (typeof scripts.test === "string" && scripts.test.trim()) {
-      inferred.gate_changed = typeof scripts["test:changed"] === "string" && scripts["test:changed"].trim()
-        ? "npm run test:changed"
-        : "npm test";
-      inferred.gate_standard = typeof scripts["test:standard"] === "string" && scripts["test:standard"].trim()
-        ? "npm run test:standard"
-        : "npm test";
-    }
-    if (typeof scripts["test:full"] === "string" && scripts["test:full"].trim()) {
-      inferred.gate_full = "npm run test:full";
-    }
-    return inferred;
+    return typeof scripts["test:changed"] === "string" && scripts["test:changed"].trim()
+      ? { gate_changed: "npm run test:changed" }
+      : {};
   } catch {
     return {};
   }
@@ -388,7 +378,7 @@ function renderEngineeringTemplate(templateText, project){
     `project:\n  name: ${JSON.stringify(path.basename(path.resolve(project)))}`,
   );
   for (const [key, gate] of Object.entries(inferredGateCommands(project))) {
-    rendered = rendered.replace(`  ${key}: ""`, `  ${key}: ${JSON.stringify(gate)}`);
+    rendered = rendered.replace(`  ${key}: "git diff --check"`, `  ${key}: ${JSON.stringify(gate)}`);
   }
   return rendered;
 }
@@ -408,14 +398,14 @@ function extractFrontmatter(text){
   return match ? match[1] : "";
 }
 
-function frontmatterHasPath(text, keyPath){
+function frontmatterPathState(text, keyPath){
   const frontmatter = extractFrontmatter(text);
-  if (!frontmatter) return false;
+  if (!frontmatter) return { present: false, value: "" };
 
   const stack = [];
   for (const rawLine of frontmatter.split(/\r?\n/)) {
     if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue;
-    const match = rawLine.match(/^(\s*)(["']?[^:"']+["']?)\s*:/);
+    const match = rawLine.match(/^(\s*)(["']?[^:"']+["']?)\s*:(.*)$/);
     if (!match) continue;
 
     const indent = match[1].replace(/\t/g, "  ").length;
@@ -423,11 +413,68 @@ function frontmatterHasPath(text, keyPath){
     while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
     const currentPath = [...stack.map(item => item.key), key];
     if (currentPath.length === keyPath.length && currentPath.every((part, index) => part === keyPath[index])) {
-      return true;
+      return { present: true, value: match[3].trim() };
     }
     stack.push({ indent, key });
   }
-  return false;
+  return { present: false, value: "" };
+}
+
+function frontmatterValueIsFilled(raw){
+  const source = String(raw || "");
+  let quote = "";
+  let escaped = false;
+  let commentAt = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote === '"' && char === "\\" && !escaped) {
+      escaped = true;
+      continue;
+    }
+    if ((char === '"' || char === "'") && !escaped) {
+      quote = quote === char ? "" : (quote || char);
+    } else if (char === "#" && !quote && (index === 0 || /\s/.test(source[index - 1]))) {
+      commentAt = index;
+      break;
+    }
+    escaped = false;
+  }
+  const value = (commentAt >= 0 ? source.slice(0, commentAt) : source).trim();
+  if (!value || value.startsWith("#")) return false;
+  const quoted = (
+    (value.startsWith('"') && value.endsWith('"'))
+    || (value.startsWith("'") && value.endsWith("'"))
+  );
+  const unquoted = quoted ? value.slice(1, -1).trim() : value;
+  let semanticValue = unquoted;
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      semanticValue = JSON.parse(value).trim();
+    } catch {
+      // Be conservative for YAML-only escape sequences that this fast parser
+      // cannot decode consistently with PyYAML. Single quotes remain available
+      // for literal backslashes.
+      return false;
+    }
+  } else if (value.startsWith("'") && value.endsWith("'")) {
+    semanticValue = unquoted.replace(/''/g, "'").trim();
+  }
+  if (!semanticValue) return false;
+  if (!quoted && (
+    /^(?:null|true|false|yes|no|on|off|~)$/i.test(semanticValue)
+    || /^(?:\[|\{|\||>|&|\*|!)/.test(semanticValue)
+    || /^[+-]?(?:0b[01_]+|0o[0-7_]+|0x[\da-f_]+|\d[\d_]*(?:\.\d*)?(?:e[+-]?\d+)?|\.\d+(?:e[+-]?\d+)?|\.inf|\.nan)$/i.test(semanticValue)
+    || /^\d{4}-\d{1,2}-\d{1,2}(?:[Tt ]|$)/.test(semanticValue)
+    || /^\d+(?::\d+)+(?:\.\d+)?$/.test(semanticValue)
+  )) return false;
+  const upper = semanticValue.toUpperCase();
+  return ![
+    "N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME",
+    "PLACEHOLDER", "XXX", "NULL", "~",
+  ].includes(upper)
+    && !(semanticValue.startsWith("<") && semanticValue.endsWith(">"))
+    && !upper.startsWith("REPLACE_")
+    && !upper.startsWith("YOUR_");
 }
 
 function projectStatus(project, assetSkill, assetAgents){
@@ -440,6 +487,7 @@ function projectStatus(project, assetSkill, assetAgents){
   const requiredConfigPaths = [
     { label: "workflow.mode", path: ["workflow", "mode"] },
     { label: "workflow.profile", path: ["workflow", "profile"] },
+    { label: "workflow.completion", path: ["workflow", "completion"] },
     { label: "concurrency.isolation", path: ["concurrency", "isolation"] },
     { label: "concurrency.base_ref", path: ["concurrency", "base_ref"] },
     { label: "concurrency.target_branch", path: ["concurrency", "target_branch"] },
@@ -448,22 +496,42 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "concurrency.cleanup_merged", path: ["concurrency", "cleanup_merged"] },
     { label: "concurrency.delete_remote_branch", path: ["concurrency", "delete_remote_branch"] },
     { label: "concurrency.disposable_ignored", path: ["concurrency", "disposable_ignored"] },
-    { label: "project.name", path: ["project", "name"] },
-    { label: "verification.target_env_required", path: ["verification", "target_env_required"] },
-    { label: "verification.jenkins_required", path: ["verification", "jenkins_required"] },
+    { label: "project.name", path: ["project", "name"], filled: true },
+    { label: "access.project.frontend.url", path: ["access", "project", "frontend", "url"], filled: true },
+    { label: "access.project.frontend.username", path: ["access", "project", "frontend", "username"], filled: true },
+    { label: "access.project.frontend.password", path: ["access", "project", "frontend", "password"], filled: true },
+    { label: "access.project.backend.url", path: ["access", "project", "backend", "url"], filled: true },
+    { label: "access.project.backend.username", path: ["access", "project", "backend", "username"], filled: true },
+    { label: "access.project.backend.password", path: ["access", "project", "backend", "password"], filled: true },
+    { label: "access.jenkins.frontend.url", path: ["access", "jenkins", "frontend", "url"], filled: true },
+    { label: "access.jenkins.frontend.username", path: ["access", "jenkins", "frontend", "username"], filled: true },
+    { label: "access.jenkins.frontend.password", path: ["access", "jenkins", "frontend", "password"], filled: true },
+    { label: "access.jenkins.backend.url", path: ["access", "jenkins", "backend", "url"], filled: true },
+    { label: "access.jenkins.backend.username", path: ["access", "jenkins", "backend", "username"], filled: true },
+    { label: "access.jenkins.backend.password", path: ["access", "jenkins", "backend", "password"], filled: true },
+    { label: "access.gitlab.url", path: ["access", "gitlab", "url"], filled: true },
+    { label: "access.gitlab.username", path: ["access", "gitlab", "username"], filled: true },
+    { label: "access.gitlab.password", path: ["access", "gitlab", "password"], filled: true },
+    { label: "access.nexus.frontend.url", path: ["access", "nexus", "frontend", "url"], filled: true },
+    { label: "access.nexus.frontend.username", path: ["access", "nexus", "frontend", "username"], filled: true },
+    { label: "access.nexus.frontend.password", path: ["access", "nexus", "frontend", "password"], filled: true },
     { label: "docs.taskbook", path: ["docs", "taskbook"] },
     { label: "docs.closure_log", path: ["docs", "closure_log"] },
     { label: "docs.active_task_dir", path: ["docs", "active_task_dir"] },
     { label: "docs.task_closure_dir", path: ["docs", "task_closure_dir"] },
     { label: "docs.task_evidence_dir", path: ["docs", "task_evidence_dir"] },
   ];
-  let missingConfigTokens = requiredConfigPaths.map(item => item.label);
+  let missingConfigPaths = requiredConfigPaths.map(item => item.label);
+  let unfilledConfigTokens = [];
   if (!engineeringMissing) {
     const text = fs.readFileSync(engineering, "utf8");
-    missingConfigTokens = requiredConfigPaths
-      .filter(item => !frontmatterHasPath(text, item.path))
-      .map(item => item.label);
+    const states = requiredConfigPaths.map(item => ({ item, state: frontmatterPathState(text, item.path) }));
+    missingConfigPaths = states.filter(({ state }) => !state.present).map(({ item }) => item.label);
+    unfilledConfigTokens = states
+      .filter(({ item, state }) => state.present && item.filled === true && !frontmatterValueIsFilled(state.value))
+      .map(({ item }) => item.label);
   }
+  const missingConfigTokens = [...missingConfigPaths, ...unfilledConfigTokens];
   const scriptDiffs = [];
   const launcherSrc = path.join(assetSkill, "data", "templates", "tools", "ap.py");
   const launcherDst = path.join(toolDir, "ap.py");
@@ -489,8 +557,10 @@ function projectStatus(project, assetSkill, assetAgents){
     next = "run autocoding sync --projects <repo>";
   } else if (engineeringMissing || scriptDiffs.length || missingDocs.length) {
     next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
-  } else if (missingConfigTokens.length) {
-    next = "run project-local ap.py upgrade --write to merge docs/ENGINEERING.md safely";
+  } else if (missingConfigPaths.length) {
+    next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
+  } else if (unfilledConfigTokens.length) {
+    next = "fill every required value in docs/ENGINEERING.md, then run project-local ap.py doctor";
   }
   return {
     project: root,
@@ -501,6 +571,8 @@ function projectStatus(project, assetSkill, assetAgents){
     scriptDiffs,
     missingDocs,
     missingConfigTokens,
+    missingConfigPaths,
+    unfilledConfigTokens,
     next,
   };
 }
@@ -681,6 +753,9 @@ Compatibility:
   syncManagedAgents(assetAgents, agentsDir, { resetModel: args.resetAgentModels });
   console.log(`[autocoding] installed agents to: ${agentsDir}`);
 
+  if (args.mode === "project") {
+    console.log("[autocoding] next: run autocoding sync --projects ., fill every access.* field in docs/ENGINEERING.md, then run doctor.");
+  }
   console.log("[autocoding] done.");
 }
 

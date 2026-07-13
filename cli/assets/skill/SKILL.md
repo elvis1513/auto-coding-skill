@@ -1,12 +1,12 @@
 ---
 name: auto-coding-skill
-description: Generic .agents engineering workflow with isolated Git worktrees for parallel write tasks, adaptive micro/standard/high-risk profiles, minimal project scaffolding, safe integration and branch cleanup, and evidence-backed dev or verified closure.
+description: Generic .agents engineering workflow with isolated Git worktrees for parallel write tasks, fast changed-scope local gates, push-based completion, required project access configuration, safe integration, and branch cleanup.
 ---
 
 # Auto Coding Skill
 
-Use this skill for a disciplined task → design → implementation → verification
-→ closure workflow. The project keeps one manual configuration source:
+Use this skill for an analysis → decomposition → design → development → fast
+gate → push workflow. The project keeps one manual configuration source:
 `docs/ENGINEERING.md`.
 
 At task start, inventory installed skills, MCP servers, connectors, browser
@@ -36,30 +36,32 @@ python3 docs/tools/autopipeline/ap.py upgrade --write
 
 Upgrade preserves project documents, custom agents, and explicit local model
 overrides. Managed agents without a `model` inherit the current client model.
+Initialization is incomplete until every URL, username, and direct password under
+`access.*` is filled in `docs/ENGINEERING.md` and `doctor` passes.
 
 ## Configuration and profiles
 
 Read `docs/ENGINEERING.md` before choosing a path. `workflow.profile: auto`
 resolves to exactly one execution profile:
 
-- `micro`: docs/tests-only or isolated low-risk work; changed gate; dev closure.
-- `standard`: ordinary feature or defect work; standard gate; dev closure.
-- `high-risk`: DB, auth, payment, deployment/build configuration, declared full
-  rules, or explicit verify work; real full gate; verify closure.
+- `micro`: docs/tests-only or isolated low-risk work.
+- `standard`: ordinary feature or defect work.
+- `high-risk`: DB, auth, payment, deployment/build, or broad structural work.
 
-High-risk signals cannot be manually downgraded. A full gate must use
-`commands.gate_full` or `commands.full_gate`; light/standard fallbacks do not
-count. An explicit non-auto configured profile replaces auto's low/normal
-baseline but cannot suppress high-risk signals. CI/Jenkins and target
-verification remain controlled by `verification.*_required`.
+Use profiles only to adjust analysis, design depth, and reviewer recommendations.
+Run exactly one changed-scope fast local gate for every profile. Keep standard/full
+regression, structure scans, Docker, API verification, Jenkins, deployment, and
+target checks as explicit diagnostics outside the default development flow.
 
-Run:
+Run the configuration and impact preflight:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
-python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 ```
+
+`light-gate` remains available for an explicit gate-diagnostic task. Do not run
+it before normal `commit-push`; `commit-push` owns the single automatic gate.
 
 ## Parallel write isolation
 
@@ -80,6 +82,14 @@ in the repository manifest. `commit-push` is valid only inside that task's
 registered worktree and may stage only changes owned by that task. If unknown
 changes appear, stop and report them. Never restore, reset, stash, clean, or
 otherwise modify another task's or the user's changes.
+
+Treat `commit-push` plus `task-integrate` as one push stage. Run the fast gate
+only in `commit-push`; integration fetches/rebases, safely pushes the target, and
+cleans the task without repeating the gate. Successful target push ends the
+coding task. Do not wait for or inspect Jenkins/build/deploy results afterward.
+The task commit runs project commit hooks once. The internal backup task-branch
+push skips the pre-push hook; the final target-branch push runs it once.
+Integration creates no second evidence commit.
 
 After a successful integration, remove the clean worktree and merged local task
 branch. Delete the merged remote task branch by default. Use `task-finish` to
@@ -115,18 +125,12 @@ explicitly recovered.
 4. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
    flow, or lasting structural decisions.
 5. Implement only necessary changes.
-6. Run the resolved gate.
-7. Record `DEV-CLOSED`, commit, push, integrate, and clean the task worktree.
-
-## Verified closure
-
-High-risk or explicitly verified work uses the strongest path:
-
-1. Run the real full local gate.
-2. Commit and push.
-3. Verify enabled CI/Jenkins and target-environment surfaces.
-4. Record `PASS`, `FAIL`, or `PARTIAL` only from executed evidence.
-5. Integrate successful work and clean its temporary worktree and branches.
+6. Run `commit-push`; it executes the changed-scope fast gate once, records
+   `DEV-CLOSED`, commits, and pushes the task branch.
+7. Run `task-integrate` to push the target branch and clean the task worktree and
+   merged task branches.
+8. Stop. Jenkins owns later build/deploy work and the project owner owns actual
+   acceptance. Ignore later external failures unless the user opens a diagnostic task.
 
 ## Structure policy
 
@@ -155,8 +159,8 @@ client supplies the available model unless a project keeps an explicit override.
 - `fixer`: bounded implementation after scope is clear.
 - `reviewer`: correctness, security, regression, and evidence review.
 
-The main agent owns framing, architecture decisions, integration, verification,
-closure records, and Git state.
+The main agent owns framing, architecture decisions, the fast gate, integration,
+closure records, and Git state through successful push.
 
 ## Tool routing
 
@@ -164,11 +168,11 @@ closure records, and Git state.
 - Current library/API behavior: official documentation MCP or matching skill.
 - UI: in-app browser for local pages, Chrome for existing logged-in state,
   Playwright for deterministic automation, Computer Use for unsupported native UI.
-- PR/issue/CI state: GitHub connector; local Git for local changes and pushes.
+- PR/issue state: GitHub connector; local Git for local changes and pushes.
 - Design, security, analytics, and document artifacts: use the matching installed
   skill or connector before manual recreation.
-- Secrets: use configured environment references or secure platform flows; do
-  not invent values.
+- Credentials: use the direct values configured under `access.*` in
+  `docs/ENGINEERING.md`; do not invent or echo values unnecessarily.
 
 ## Optional documents and operations
 

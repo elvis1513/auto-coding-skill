@@ -6,16 +6,16 @@ they are useful.
 
 ## Task T0001 — <Title>
 
-- Status: Planned | Designing | Implementing | Checking | Verifying | Done | Blocked
+- Status: Planned | Designing | Implementing | Checking | Pushed | Blocked
 - Scope:
 - Non-goals:
 - Effective profile: micro | standard | high-risk
 - Classification reasons:
 - Existing owner / reuse points:
 - Minimal design:
-- Acceptance criteria:
-- Verification evidence:
-- Commit / CI / target environment:
+- Development acceptance criteria:
+- Fast local gate evidence:
+- Commit / target push:
 - Follow-up:
 
 ---

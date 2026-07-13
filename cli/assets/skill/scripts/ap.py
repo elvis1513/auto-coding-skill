@@ -34,7 +34,7 @@ from scaffold_templates import scaffold_groups, templates_for
 
 
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
-_INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX"}
+_INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX", "NULL", "~"}
 _GENERATED_NOISE_PATTERNS = [
     ".local/auto-coding-skill/**",
     "__pycache__/**",
@@ -563,21 +563,9 @@ def _inferred_gate_commands(repo: Path) -> dict[str, str]:
     scripts = payload.get("scripts") or {}
     if not isinstance(scripts, dict):
         return {}
-    inferred: dict[str, str] = {}
-    if isinstance(scripts.get("test"), str) and scripts["test"].strip():
-        inferred["gate_changed"] = (
-            "npm run test:changed"
-            if isinstance(scripts.get("test:changed"), str) and scripts["test:changed"].strip()
-            else "npm test"
-        )
-        inferred["gate_standard"] = (
-            "npm run test:standard"
-            if isinstance(scripts.get("test:standard"), str) and scripts["test:standard"].strip()
-            else "npm test"
-        )
-    if isinstance(scripts.get("test:full"), str) and scripts["test:full"].strip():
-        inferred["gate_full"] = "npm run test:full"
-    return inferred
+    if isinstance(scripts.get("test:changed"), str) and scripts["test:changed"].strip():
+        return {"gate_changed": "npm run test:changed"}
+    return {}
 
 
 def _initialize_engineering_defaults(path: Path, repo: Path) -> None:
@@ -590,13 +578,57 @@ def _initialize_engineering_defaults(path: Path, repo: Path) -> None:
         1,
     )
     for key, gate_command in _inferred_gate_commands(repo).items():
-        updated = updated.replace(
-            f'  {key}: ""',
-            f"  {key}: {json.dumps(gate_command)}",
-            1,
-        )
+        for default_value in ['""', '"git diff --check"']:
+            candidate = updated.replace(
+                f"  {key}: {default_value}",
+                f"  {key}: {json.dumps(gate_command)}",
+                1,
+            )
+            if candidate != updated:
+                updated = candidate
+                break
     if updated != text:
         path.write_text(updated, encoding="utf-8")
+
+
+def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
+    changed: list[str] = []
+
+    workflow_cfg = cfg.setdefault("workflow", {})
+    if not isinstance(workflow_cfg, dict):
+        workflow_cfg = {}
+        cfg["workflow"] = workflow_cfg
+    if _text(workflow_cfg.get("mode")).lower() != "dev":
+        workflow_cfg["mode"] = "dev"
+        changed.append("workflow.mode")
+    if _text(workflow_cfg.get("completion")).lower() != "push":
+        workflow_cfg["completion"] = "push"
+        changed.append("workflow.completion")
+
+    commands_cfg = cfg.setdefault("commands", {})
+    if not isinstance(commands_cfg, dict):
+        commands_cfg = {}
+        cfg["commands"] = commands_cfg
+    current_changed_gate = _text(commands_cfg.get("gate_changed"))
+    if current_changed_gate in {"", "npm test"}:
+        replacement = _inferred_gate_commands(repo).get("gate_changed", "git diff --check")
+        if current_changed_gate != replacement:
+            commands_cfg["gate_changed"] = replacement
+            changed.append("commands.gate_changed")
+
+    gate_cfg = cfg.setdefault("gate", {})
+    if not isinstance(gate_cfg, dict):
+        gate_cfg = {}
+        cfg["gate"] = gate_cfg
+    for key in ["default_scope", "fallback_scope", "no_change_scope"]:
+        if _text(gate_cfg.get(key)).lower() != "changed":
+            gate_cfg[key] = "changed"
+            changed.append(f"gate.{key}")
+    if _bool_config(gate_cfg.get("full_on_unknown"), False):
+        gate_cfg["full_on_unknown"] = False
+        changed.append("gate.full_on_unknown")
+
+    return changed
 
 
 def cmd_scaffold(args: argparse.Namespace) -> None:
@@ -671,8 +703,8 @@ def cmd_install(args: argparse.Namespace) -> None:
     layout = "full" if args.full else "minimal"
     print(f"[install] OK: {layout} scaffold installed into {repo}")
     print(
-        "[install] Next: edit docs/ENGINEERING.md frontmatter, set verification.*_required, "
-        "fill only enabled environment fields, and commit that file into Git."
+        "[install] Next: fill every access.* URL, username, and password in "
+        "docs/ENGINEERING.md, run doctor, and commit that file into Git."
     )
 
 
@@ -765,8 +797,14 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         template_cfg, _ = _read_frontmatter_markdown(template_engineering)
         merged_cfg = json.loads(json.dumps(current_cfg))
         added_keys = _deep_merge_missing(merged_cfg, template_cfg)
-        if added_keys:
-            add_action("config", engineering, "merge", ", ".join(added_keys))
+        migrated_keys = _migrate_fast_development_defaults(merged_cfg, repo)
+        if added_keys or migrated_keys:
+            detail_parts = []
+            if added_keys:
+                detail_parts.append("add " + ", ".join(added_keys))
+            if migrated_keys:
+                detail_parts.append("migrate " + ", ".join(migrated_keys))
+            add_action("config", engineering, "merge", "; ".join(detail_parts))
             if write:
                 _write_frontmatter_markdown(engineering, merged_cfg, body)
         else:
@@ -852,9 +890,9 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 
 ---
 
-## 1. 目标与验收结论
+## 1. 目标与开发闭环
 - 目标：TODO
-- 验收结论：PASS / FAIL — TODO
+- 开发结论：DEV-CLOSED / BLOCKED — TODO
 
 ## 2. 变更概览
 ### Git change snapshot
@@ -871,14 +909,13 @@ def cmd_gen_summary(args: argparse.Namespace) -> None:
 - 变更记录位置：`{api_change_log}`
 
 ## 4. 质量证据
-- 本地轻量校验：light_gate or quick_test/test/build / api docs / CI/Jenkins / diff-check — TODO
-- 结构检查：structure-check — TODO
+- 本地快速门禁：changed gate + diff-check — TODO
+- 项目 Git hooks：commit/push 时执行
 - 结构化证据：docs/tasks/evidence.jsonl — TODO
 - 门禁画像：.local/auto-coding-skill/gate-profile.jsonl — TODO
-- CI/Jenkins Build：TODO
-- 目标环境验证：TODO
-- 闭环记录：TODO
-- 回归矩阵（如有）：`{regression_matrix}`
+- 目标分支推送：TODO
+- Jenkins / 构建 / 部署 / 实际验收：项目负责人推送后处理
+- 可选诊断（如明确要求）：`{regression_matrix}`
 
 ## 5. 风险与回滚
 - 风险：TODO
@@ -1067,8 +1104,8 @@ def _workflow_mode(cfg: dict, args: Optional[argparse.Namespace] = None) -> str:
     explicit = str(getattr(args, "mode", "") or "").strip().lower() if args else ""
     configured = str(((cfg.get("workflow") or {}).get("mode")) or "dev").strip().lower()
     mode = explicit or configured or "dev"
-    if mode not in {"dev", "verify"}:
-        raise APError("workflow.mode must be 'dev' or 'verify'.")
+    if mode != "dev":
+        raise APError("workflow.mode must be 'dev'; external verification is owner-managed after push.")
     return mode
 
 
@@ -1559,6 +1596,48 @@ def _require_explicit_field(missing: List[str], field: str, value: object) -> No
         missing.append(f"{field} (must be explicitly filled, not blank/TODO)")
 
 
+_REQUIRED_ACCESS_FIELDS = [
+    "access.project.frontend.url",
+    "access.project.frontend.username",
+    "access.project.frontend.password",
+    "access.project.backend.url",
+    "access.project.backend.username",
+    "access.project.backend.password",
+    "access.jenkins.frontend.url",
+    "access.jenkins.frontend.username",
+    "access.jenkins.frontend.password",
+    "access.jenkins.backend.url",
+    "access.jenkins.backend.username",
+    "access.jenkins.backend.password",
+    "access.gitlab.url",
+    "access.gitlab.username",
+    "access.gitlab.password",
+    "access.nexus.frontend.url",
+    "access.nexus.frontend.username",
+    "access.nexus.frontend.password",
+]
+
+
+def _nested_config_value(cfg: dict, field: str) -> object:
+    value: object = cfg
+    for part in field.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _access_config_issues(cfg: dict) -> list[str]:
+    issues: list[str] = []
+    for field in _REQUIRED_ACCESS_FIELDS:
+        value = _nested_config_value(cfg, field)
+        if not isinstance(value, str) or not _is_explicit_fill(value):
+            issues.append(f"{field} (must be an explicitly filled string, not blank/TODO)")
+    for field in [name for name in _REQUIRED_ACCESS_FIELDS if name.endswith(".url")]:
+        _validate_url_field(issues, field, _nested_config_value(cfg, field))
+    return issues
+
+
 def _has_secret_reference(section_cfg: dict, field: str) -> bool:
     return _is_explicit_fill(section_cfg.get(field)) or _is_explicit_fill(section_cfg.get(f"{field}_env"))
 
@@ -1596,7 +1675,7 @@ def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
 
 _GATE_SCOPES = {"auto", "changed", "standard", "full"}
 _WORKFLOW_PROFILES = {"auto", "micro", "standard", "high-risk"}
-_PROFILE_GATE_SCOPE = {"micro": "changed", "standard": "standard", "high-risk": "full"}
+_PROFILE_GATE_SCOPE = {"micro": "changed", "standard": "changed", "high-risk": "changed"}
 _PROFILE_RANK = {"micro": 0, "standard": 1, "high-risk": 2}
 _SCOPE_RANK = {"changed": 0, "standard": 1, "full": 2}
 _DOC_PATH_PATTERNS = ["*.md", "docs/**"]
@@ -1831,44 +1910,16 @@ def _has_changed_gate(cfg: dict, gate_cfg: dict, paths: list[str]) -> bool:
 
 def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tuple[str, list[str], list[dict]]:
     gate_cfg = _gate_cfg(cfg)
-    scope = (requested_scope or _text(gate_cfg.get("default_scope")) or "standard").lower()
+    scope = (requested_scope or _text(gate_cfg.get("default_scope")) or "changed").lower()
     if scope not in _GATE_SCOPES:
         raise APError("gate scope must be one of: " + ", ".join(sorted(_GATE_SCOPES)))
 
     matching_rules = _matching_gate_rules(paths, gate_cfg)
-    reasons: list[str] = []
-
-    rule_scopes = {_text(rule.get("scope")).lower() for rule in matching_rules if _text(rule.get("scope"))}
-    if "full" in rule_scopes:
-        return "full", ["matched gate rule with scope=full"], matching_rules
-    if any(_path_matches(path, _gate_full_patterns(gate_cfg)) for path in paths):
-        return "full", ["changed files match full-gate patterns"], matching_rules
-
-    if scope != "auto":
-        return scope, [f"requested scope: {scope}"], matching_rules
-
-    if not paths:
-        fallback = _text(gate_cfg.get("no_change_scope")) or "standard"
-        if fallback not in {"changed", "standard", "full"}:
-            fallback = "standard"
-        return fallback, ["no changed files detected"], matching_rules
-
-    if "standard" in rule_scopes:
-        return "standard", ["matched gate rule with scope=standard"], matching_rules
-
-    if _docs_only(paths):
-        return "changed", ["docs-only change"], matching_rules
-
-    if _has_changed_gate(cfg, gate_cfg, paths):
-        return "changed", ["matched changed-gate command or rule"], matching_rules
-
-    fallback = _text(gate_cfg.get("fallback_scope")) or "standard"
-    if fallback not in {"changed", "standard", "full"}:
-        fallback = "standard"
-    if fallback == "changed" and _text(gate_cfg.get("full_on_unknown")).lower() in {"1", "true", "yes", "on"}:
-        fallback = "full"
-    reasons.append("no changed-gate command/rule matched")
-    return fallback, reasons, matching_rules
+    requested = "auto" if scope == "auto" else scope
+    reason = "local development gate is fixed to changed/quick scope"
+    if requested not in {"auto", "changed"}:
+        reason += f"; ignored requested scope={requested}"
+    return "changed", [reason], matching_rules
 
 
 def _impact_summary(
@@ -1922,12 +1973,13 @@ def _print_impact(summary: dict, as_json: bool = False) -> None:
         print("[impact] changed: (none)")
 
 
-def _run_changed_gate(repo: Path, cfg: dict, paths: list[str], matching_rules: list[dict]) -> list[str]:
-    executed: list[str] = []
-    for rule in matching_rules:
-        executed.extend(_run_configured_command_list(repo, cfg, _as_list(rule.get("commands"))))
-    if executed:
-        return executed
+def _run_changed_gate(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
+    # The generic scaffold uses this command as its whole fast gate. The
+    # built-in diff check below covers working tree, index, and task commits, so
+    # do not execute the narrower configured spelling first as a duplicate.
+    if _configured_command(cfg, "gate_changed").strip() == "git diff --check":
+        print("[gate] gate_changed is handled by the built-in diff check")
+        return []
 
     fallback_commands = ["gate_changed"]
     if _docs_only(paths):
@@ -1940,13 +1992,13 @@ def _run_changed_gate(repo: Path, cfg: dict, paths: list[str], matching_rules: l
         print("[gate] docs-only change with no changed-gate command configured; running built-in post checks only.")
         return ["docs_only_builtin"]
 
-    fallback = _run_first_configured_command(repo, cfg, ["quick_test", "test", "build"])
+    fallback = _run_first_configured_command(repo, cfg, ["quick_test"])
     if fallback:
         return [fallback]
 
     raise APError(
-        "Changed gate has no configured command. Add commands.gate_changed or matching gate.rules commands, "
-        "or run light-gate --scope standard/full."
+        "Changed gate has no fast command. Add commands.gate_changed or commands.quick_test. "
+        "gate.rules commands are never executed by the automatic development flow."
     )
 
 
@@ -1964,8 +2016,8 @@ def _run_full_gate(repo: Path, cfg: dict) -> list[str]:
     command = _run_first_configured_command(repo, cfg, ["gate_full", "full_gate"])
     if not command:
         raise APError(
-            "Full gate is under-configured. High-risk and verify work requires "
-            "commands.gate_full or commands.full_gate; light/standard fallbacks do not count."
+            "Optional full diagnostic is under-configured. Add commands.gate_full or "
+            "commands.full_gate when you explicitly want to run it."
         )
     return [command]
 
@@ -3433,8 +3485,8 @@ def _resolve_execution_plan(
     requested_profile_value = _normalize_workflow_profile(requested_profile) if requested_profile else ""
     configured_mode = _workflow_mode(cfg)
     requested_mode_value = _text(requested_mode).lower()
-    if requested_mode_value and requested_mode_value not in {"dev", "verify"}:
-        raise APError("workflow.mode must be 'dev' or 'verify'.")
+    if requested_mode_value and requested_mode_value != "dev":
+        raise APError("workflow.mode must be 'dev'; use explicit diagnostic commands when requested.")
 
     detected_profile = "standard"
     profile_reasons: list[str] = []
@@ -3472,14 +3524,10 @@ def _resolve_execution_plan(
     high_signals: list[str] = []
     if categories & high_categories and not docs_or_tests_only:
         high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
-    if str(impact["selected_scope"]) == "full":
-        high_signals.append("impact requires full gate")
     if "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
     if len(paths) > 12 and not docs_or_tests_only:
         high_signals.append("change spans more than 12 files")
-    if requested_scope == "full":
-        high_signals.append("full scope explicitly requested")
 
     if high_signals:
         detected_profile = "high-risk"
@@ -3501,30 +3549,16 @@ def _resolve_execution_plan(
     if detected_profile == "high-risk" and effective_profile != "high-risk":
         effective_profile = "high-risk"
         profile_reasons.append("high-risk signals cannot be downgraded")
-    effective_mode = requested_mode_value or configured_mode
-    if configured_mode == "verify":
-        effective_mode = "verify"
-    if effective_mode == "verify" and effective_profile != "high-risk":
-        effective_profile = "high-risk"
-        profile_reasons.append("verify mode requires high-risk execution")
+    effective_mode = "dev"
     if not profile_reasons:
         profile_reasons.append(f"configured profile={configured_profile}")
 
-    selected_scope = _PROFILE_GATE_SCOPE[effective_profile]
-    explicit_scope = _text(requested_scope).lower()
-    if explicit_scope in _SCOPE_RANK and _SCOPE_RANK[explicit_scope] > _SCOPE_RANK[selected_scope]:
-        selected_scope = explicit_scope
-    if str(impact["selected_scope"]) == "full":
-        selected_scope = "full"
-    effective_mode = "verify" if effective_profile == "high-risk" else effective_mode
+    selected_scope = "changed"
     execution_reasons = list(impact.get("reasons") or [])
-    if selected_scope != str(impact["selected_scope"]):
-        execution_reasons.append(f"profile={effective_profile} requires scope={selected_scope}")
+    execution_reasons.append("Jenkins/build/deploy and owner acceptance happen after coding completion")
 
-    jenkins_required = _verification_required(cfg, "jenkins", default=True)
-    target_env_required = _verification_required(cfg, "target_env", default=True)
-    needs_jenkins = bool(classification["needs_jenkins"] and jenkins_required)
-    needs_target = bool(classification["needs_target"] and target_env_required)
+    needs_jenkins = False
+    needs_target = False
     needs_dd = bool(classification["needs_dd"] or effective_profile == "high-risk")
 
     return {
@@ -3560,15 +3594,9 @@ def cmd_classify(args: argparse.Namespace) -> None:
         base_ref=_text(getattr(args, "base", "")),
     )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
-    commands = [
-        "python3 docs/tools/autopipeline/ap.py impact --scope auto",
-        "python3 docs/tools/autopipeline/ap.py structure-check --scope auto",
-        f"python3 docs/tools/autopipeline/ap.py light-gate --profile {plan['profile']} --explain",
-    ]
+    commands: list[str] = []
     if plan["needs_dd"]:
         commands.append("python3 docs/tools/autopipeline/ap.py scaffold design --write")
-    if plan["needs_jenkins"]:
-        commands.append("python3 docs/tools/autopipeline/ap.py verify-jenkins")
     result = {
         **plan,
         "risk": risk,
@@ -3616,18 +3644,17 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     light_gate_start = time.time()
-    cmd_doctor(
-        argparse.Namespace(
-            repo=str(repo),
-            profile=_text(getattr(args, "profile", "")).lower(),
-            mode=_text(getattr(args, "mode", "")).lower(),
-        )
-    )
     cfg = _load_cfg(repo)
+    requested_scope = _text(getattr(args, "scope", "")).lower()
+    if requested_scope not in {"", "auto", "changed"}:
+        raise APError(
+            "light-gate only runs the changed-scope fast gate. "
+            "Use 'ap.py run gate_standard' or 'ap.py run gate_full' for an explicit diagnostic."
+        )
     plan = _resolve_execution_plan(
         cfg,
         repo,
-        requested_scope=_text(getattr(args, "scope", "")).lower(),
+        requested_scope=requested_scope,
         requested_profile=_text(getattr(args, "profile", "")).lower(),
         requested_mode=_text(getattr(args, "mode", "")).lower(),
         base_ref=_text(getattr(args, "base", "")),
@@ -3637,27 +3664,12 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
         for reason in plan["profile_reasons"]:
             print(f"[impact] profile_reason: {reason}")
 
-    selected_scope = str(plan["selected_scope"])
+    selected_scope = "changed"
     paths = list(plan.get("changed_files") or [])
-    matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
-    executed: list[str] = []
-    executed.extend(_run_structure_check_for_gate(repo, cfg, selected_scope, str(getattr(args, "base", "") or "")))
-
-    if selected_scope == "changed":
-        executed.extend(_run_changed_gate(repo, cfg, paths, matching_rules))
-    elif selected_scope == "full":
-        executed.extend(_run_full_gate(repo, cfg))
-    else:
-        executed.extend(_run_standard_gate(repo, cfg))
+    executed = _run_changed_gate(repo, cfg, paths)
 
     _run_git_diff_check(repo, cfg)
-    cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
-    executed.extend(["diff_check", "verify_api_docs"])
-    if _verification_required(cfg, "jenkins", default=True):
-        cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
-        executed.append("verify_jenkins")
-    else:
-        executed.append("verify_jenkins_skipped")
+    executed.append("diff_check")
     duration_s = time.time() - light_gate_start
     _record_gate_profile(repo, cfg, "light_gate", "pass", duration_s, scope=selected_scope, detail=", ".join(executed))
     _record_evidence(
@@ -3835,9 +3847,6 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     cfg = _load_cfg(repo)
     workflow_cfg = (cfg.get("workflow") or {})
     project_cfg = (cfg.get("project") or {})
-    commands = (cfg.get("commands") or {})
-    target_cfg = (cfg.get("target_env") or {})
-    jenkins_cfg = (cfg.get("jenkins") or {})
     docs_cfg = (cfg.get("docs") or {})
     runtime_cfg = (cfg.get("runtime") or {})
     structure_cfg = _structure_cfg(cfg)
@@ -3848,12 +3857,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
     profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
-    target_env_required = _verification_required(cfg, "target_env", default=True)
-    jenkins_required = _verification_required(cfg, "jenkins", default=True)
-    if mode not in {"dev", "verify"}:
-        missing.append("workflow.mode (must be dev or verify)")
+    completion = str(workflow_cfg.get("completion") or "").strip().lower()
+    if mode != "dev":
+        missing.append("workflow.mode (must be dev; external verification is owner-managed)")
     if profile not in _WORKFLOW_PROFILES:
         missing.append("workflow.profile (must be auto, micro, standard, or high-risk)")
+    if completion != "push":
+        missing.append("workflow.completion (must be push)")
     isolation = _text(concurrency_cfg.get("isolation")).lower() or "worktree"
     if isolation not in {"worktree", "legacy"}:
         validation_errors.append("concurrency.isolation must be worktree or legacy")
@@ -3868,6 +3878,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         validation_errors.append("concurrency.branch_prefix does not form a valid Git branch")
     if not str(project_cfg.get("name") or "").strip():
         missing.append("project.name")
+    missing.extend(_access_config_issues(cfg))
     enforcement = _text(structure_cfg.get("enforcement")).lower()
     if enforcement and enforcement not in {"advisory", "blocking"}:
         validation_errors.append("structure.enforcement must be advisory or blocking")
@@ -3895,72 +3906,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 f"gate.rules[{index}].scope must be changed, standard, or full"
             )
 
-    if mode in {"dev", "verify"} and profile in _WORKFLOW_PROFILES and rules_valid:
-        try:
-            plan = _resolve_execution_plan(
-                cfg,
-                repo,
-                requested_profile=_text(getattr(args, "profile", "")).lower(),
-                requested_mode=_text(getattr(args, "mode", "")).lower(),
-            )
-        except APError as exc:
-            validation_errors.append(str(exc))
-        else:
-            effective_profile = str(plan["profile"])
-            changed_files = list(plan.get("changed_files") or [])
-            matching_rules = _matching_gate_rules(changed_files, gate_cfg)
-            rule_changed_gate = any(
-                any(_configured_command(cfg, _command_name(ref)) for ref in _as_list(rule.get("commands")))
-                for rule in matching_rules
-            )
-            changed_gate = bool(
-                _configured_command(cfg, "gate_changed")
-                or _configured_command(cfg, "quick_test")
-                or _configured_command(cfg, "test")
-                or _configured_command(cfg, "build")
-                or rule_changed_gate
-                or _docs_only(changed_files)
-            )
-            standard_gate = bool(
-                _configured_command(cfg, "gate_standard")
-                or _configured_command(cfg, "light_gate")
-                or _configured_command(cfg, "quick_test")
-                or _configured_command(cfg, "test")
-                or _configured_command(cfg, "build")
-            )
-            full_gate = bool(
-                _configured_command(cfg, "gate_full")
-                or _configured_command(cfg, "full_gate")
-            )
-            if effective_profile == "micro" and not changed_gate:
-                missing.append(
-                    "micro gate command: commands.gate_changed, quick_test, test, build, "
-                    "or a matching gate rule command"
-                )
-            elif effective_profile == "standard" and not standard_gate:
-                missing.append(
-                    "standard gate command: commands.gate_standard, light_gate, quick_test, test, or build"
-                )
-            elif effective_profile == "high-risk" and not full_gate:
-                missing.append(
-                    "full gate command: commands.gate_full or commands.full_gate "
-                    "(required for high-risk/verify execution)"
-                )
-    if target_env_required:
-        _require_explicit_field(missing, "target_env.health_base_url", target_cfg.get("health_base_url"))
-        _require_explicit_field(missing, "target_env.health_path", target_cfg.get("health_path"))
-
-    if jenkins_required:
-        _require_explicit_field(missing, "jenkins.base_url", jenkins_cfg.get("base_url"))
-        _require_explicit_field(missing, "jenkins.ui_username", jenkins_cfg.get("ui_username"))
-        _require_secret_reference(missing, "jenkins", jenkins_cfg, "ui_password")
-        _require_explicit_field(missing, "jenkins.job_url", jenkins_cfg.get("job_url"))
-        _require_explicit_field(missing, "jenkins.trigger_branch", jenkins_cfg.get("trigger_branch"))
-        _require_explicit_field(missing, "jenkins.image_repository", jenkins_cfg.get("image_repository"))
-        _require_explicit_field(missing, "jenkins.image_tag_strategy", jenkins_cfg.get("image_tag_strategy"))
-        _require_explicit_field(missing, "jenkins.deploy_env", jenkins_cfg.get("deploy_env"))
-        _require_explicit_field(missing, "jenkins.api_user", jenkins_cfg.get("api_user"))
-        _require_secret_reference(missing, "jenkins", jenkins_cfg, "api_password")
+    if not (_configured_command(cfg, "gate_changed") or _configured_command(cfg, "quick_test")):
+        missing.append("fast gate command: commands.gate_changed or commands.quick_test")
 
     repo_docs = {
         "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
@@ -3980,32 +3927,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if not path.exists():
             validation_errors.append(f"{key} missing on disk: {path}")
 
-    _validate_url_field(validation_errors, "target_env.frontend_base_url", target_cfg.get("frontend_base_url"))
-    _validate_url_field(validation_errors, "target_env.backend_base_url", target_cfg.get("backend_base_url"))
-    _validate_url_field(validation_errors, "target_env.health_base_url", target_cfg.get("health_base_url"))
-    _validate_path_field(validation_errors, "target_env.health_path", target_cfg.get("health_path"))
-    _validate_url_field(validation_errors, "jenkins.base_url", jenkins_cfg.get("base_url"))
-    _validate_url_field(validation_errors, "jenkins.job_url", jenkins_cfg.get("job_url"))
-
     runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
     if runtime_enabled and not str(runtime_cfg.get("docker_compose_file") or "").strip():
         validation_errors.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
-
-    ledger_result = _docs_ledger_check_result(repo, cfg)
-    ledger_status = "skipped" if not ledger_result.get("enabled", True) else ("fail" if ledger_result.get("blocking") else "pass")
-    _record_evidence(repo, cfg, "docs_ledger_check", ledger_status, ledger_result)
-    for issue in ledger_result.get("blocking") or []:
-        validation_errors.append(f"docs-ledger: {issue}")
-    for warning in ledger_result.get("warnings") or []:
-        print(f"[doctor] WARN docs-ledger: {warning}")
-
-    try:
-        timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 0)
-        if (jenkins_required or _is_explicit_fill(jenkins_cfg.get("deploy_timeout_sec"))) and timeout_s <= 0:
-            validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
-    except Exception:
-        if jenkins_required or _is_explicit_fill(jenkins_cfg.get("deploy_timeout_sec")):
-            validation_errors.append("jenkins.deploy_timeout_sec must be a positive integer")
 
     missing.extend(validation_errors)
 
@@ -4018,7 +3942,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         cfg,
         "doctor",
         "pass",
-        {"mode": mode, "target_env_required": target_env_required, "jenkins_required": jenkins_required},
+        {"mode": mode, "completion": completion, "access_fields": len(_REQUIRED_ACCESS_FIELDS)},
     )
     print("[doctor] OK")
 
@@ -4182,9 +4106,7 @@ def _validate_closure_result(effective_mode: str, result: str) -> None:
     mode = _text(effective_mode).lower()
     normalized_result = _text(result).upper()
     if mode == "dev" and normalized_result == "PASS":
-        raise APError("PASS requires verify mode; use DEV-CLOSED, PARTIAL, or FAIL for dev execution.")
-    if mode == "verify" and normalized_result == "DEV-CLOSED":
-        raise APError("DEV-CLOSED is only valid for dev mode; use PASS, PARTIAL, or FAIL for verify execution.")
+        raise APError("Automatic coding closure uses DEV-CLOSED; owner acceptance is handled after push.")
 
 
 def _validate_closure_evidence(result: str, verification_items: list[str]) -> None:
@@ -4241,20 +4163,20 @@ def cmd_record_closure(args: argparse.Namespace) -> None:
     title = str(args.title or "").strip() or _infer_title(taskbook, task_id)
     timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     commit_value = _resolve_git_short_sha(repo, args.commit)
-    target_env = str(args.target_env or target_cfg.get("name") or "").strip() or "(not set)"
-    verification_text = "; ".join(verification_items) if verification_items else "TODO"
+    target_env = str(args.target_env or target_cfg.get("name") or "").strip() or "owner-managed acceptance"
+    verification_text = "; ".join(verification_items) if verification_items else "fast gate evidence not recorded"
     follow_up = str(args.follow_up or "").strip() or "none"
-    jenkins_build = str(args.jenkins or "").strip() or "TODO"
-    structure_check = str(getattr(args, "structure_check", "") or "").strip() or "TODO"
+    jenkins_build = str(args.jenkins or "").strip() or "owner-managed after push"
+    structure_check = str(getattr(args, "structure_check", "") or "").strip() or "not part of the fast local gate"
     lines = [
         f"## {task_id} — {title} — {timestamp}",
         f"- Task: {task_id}",
         f"- Commit: {commit_value}",
-        f"- CI/Jenkins Build: {jenkins_build}",
-        f"- Target Env: {target_env}",
-        f"- Verification: {verification_text}",
+        f"- Fast Local Gate: {verification_text}",
+        f"- External Build/Deploy: {jenkins_build}",
+        f"- Owner Acceptance: {target_env}",
         f"- Effective Profile: {profile}",
-        f"- Structure Check: {structure_check}",
+        f"- Optional Structure Diagnostic: {structure_check}",
         f"- Result: {args.result}",
         f"- Follow-up: {follow_up}",
     ]
@@ -5173,7 +5095,7 @@ def _create_active_task_doc(repo: Path, cfg: dict, manifest: dict) -> None:
                 f"- Target: `{manifest['remote']}/{manifest['target_branch']}`",
                 f"- Branch: `{manifest['task_branch']}`",
                 "- Scope: TODO",
-                "- Acceptance: TODO",
+                "- Development acceptance: TODO",
                 "",
             ]
         ),
@@ -5218,6 +5140,12 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    access_issues = _access_config_issues(cfg)
+    if access_issues:
+        raise APError(
+            "Project initialization is incomplete; fill docs/ENGINEERING.md before starting work:\n- "
+            + "\n- ".join(access_issues)
+        )
     task_id = _validate_task_id(args.task_id)
     _require_control_checkout(repo)
     remote, target_branch, base_ref = _task_remote_and_target(cfg, args)
@@ -5593,18 +5521,6 @@ def cmd_task_finish(args: argparse.Namespace) -> None:
     )
 
 
-def _append_integration_closure(repo: Path, cfg: dict, manifest: dict, target_sha: str) -> None:
-    path = _task_doc_path(repo, cfg, manifest, "closure")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text(f"# Task Closure — {manifest['task_id']}\n", encoding="utf-8")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write("\n## Integration\n")
-        handle.write(f"- Target: `{manifest['remote']}/{manifest['target_branch']}`\n")
-        handle.write(f"- Base: `{target_sha}`\n")
-        handle.write("- Gate: passed after rebase\n")
-
-
 def cmd_task_integrate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
@@ -5636,7 +5552,7 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
             check_common=True,
         )
         _save_task_manifest(repo, manifest)
-        if _text(manifest.get("state")) not in {"pushed", "integration-raced", "gate-failed"}:
+        if _text(manifest.get("state")) not in {"pushed", "integration-raced"}:
             raise APError(f"Task {task_id} must be committed and pushed before integration.")
         dirty = _git_status(worktree)
         if dirty:
@@ -5664,60 +5580,10 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
         )
         _save_task_manifest(repo, manifest)
 
-        before_gate = _task_content_fingerprint(worktree, task_cfg, manifest)
-        try:
-            cmd_light_gate(
-                argparse.Namespace(
-                    repo=str(worktree),
-                    scope="auto",
-                    profile="",
-                    mode="",
-                    base=target_sha,
-                    explain=False,
-                )
-            )
-        except APError:
-            manifest["state"] = "gate-failed"
-            _save_task_manifest(repo, manifest)
-            raise
-        after_gate = _task_content_fingerprint(worktree, task_cfg, manifest)
-        if after_gate != before_gate:
-            manifest["state"] = "gate-mutated"
-            _save_task_manifest(repo, manifest)
-            raise APError(
-                "Integration gate changed task-owned files. Review those changes, run commit-push again, "
-                "then retry integration."
-            )
         manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
-
-        _append_integration_closure(worktree, task_cfg, manifest, target_sha)
-        _update_active_task_status(worktree, task_cfg, manifest, "Integrated")
-        protected = set(manifest.get("initial_untracked") or [])
-        _cleanup_generated_noise(worktree, protected_paths=protected)
-        integration_fingerprint = _task_content_fingerprint(worktree, task_cfg, manifest)
-        manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
-        if _task_content_fingerprint(worktree, task_cfg, manifest) != integration_fingerprint:
-            raise APError("Task-owned files changed immediately before staging integration evidence.")
-        integration_paths = _task_commit_paths(worktree)
-        task_tip = ""
-        if integration_paths:
-            staged = _stage_exact_paths(worktree, integration_paths)
-            if staged:
-                unstaged = _unstaged_task_paths(worktree)
-                if unstaged:
-                    raise APError(
-                        "Task-owned files changed while staging integration evidence:\n- "
-                        + "\n- ".join(unstaged)
-                    )
-                manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
-                task_tip = _commit_exact_index(
-                    worktree,
-                    f"{task_id}: record integration evidence [skip ci]",
-                )
-
-        task_tip = task_tip or _resolve_commit(worktree, "HEAD")
+        task_tip = _resolve_commit(worktree, "HEAD")
         if _resolve_commit(worktree, "HEAD") != task_tip:
-            raise APError("HEAD moved after the verified integration commit; refusing to push.")
+            raise APError("HEAD moved before the target push; refusing to push.")
         if run(
             ["git", "merge-base", "--is-ancestor", target_sha, task_tip],
             cwd=worktree,
@@ -5740,8 +5606,8 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
             manifest["integration_tip"] = task_tip
             _save_task_manifest(repo, manifest)
             raise APError(
-                f"Target branch moved while integrating {task_id}. Re-run task-integrate to fetch, rebase, "
-                f"and gate the new target.\n{push.stdout}\n{push.stderr}"
+                f"Target branch moved while integrating {task_id}. Re-run task-integrate to fetch and "
+                f"rebase the new target.\n{push.stdout}\n{push.stderr}"
             )
 
         fresh_target = _fetch_target(worktree, remote, target)
@@ -5961,6 +5827,9 @@ def _push_current_task(repo: Path, manifest: Optional[dict], expected_commit: st
         task_branch = _text(manifest.get("task_branch"))
         remote_tip = _remote_branch_tip(repo, remote, task_branch)
         command = ["git", "push", "--set-upstream"]
+        # This is an internal backup branch, not the final project push. The
+        # configured pre-push hook runs once later for the target-branch push.
+        command.append("--no-verify")
         if remote_tip and run(
             ["git", "merge-base", "--is-ancestor", remote_tip, "HEAD"],
             cwd=repo,
@@ -6028,29 +5897,21 @@ def _cmd_commit_push_locked(
     args.effective_profile = str(plan["profile"])
     if args.result:
         _validate_closure_result(mode, str(args.result))
-    target_cfg = (cfg.get("target_env") or {})
-    target_env_required = _verification_required(cfg, "target_env", default=True)
-    jenkins_required = _verification_required(cfg, "jenkins", default=True)
 
     msg = args.msg
-    structure_check_status = "skipped"
-
-    if args.require_runtime_health:
-        cmd_wait_health(argparse.Namespace(repo=str(repo), scope="runtime"))
+    structure_check_status = "not part of the fast local gate"
 
     before_gate = _task_content_fingerprint(repo, cfg, manifest)
-    if mode in {"dev", "verify"} or args.require_light_gate:
-        cmd_light_gate(
-            argparse.Namespace(
-                repo=str(repo),
-                scope=plan["selected_scope"],
-                profile=plan["profile"],
-                mode=mode,
-                base=base_ref,
-                explain=False,
-            )
+    cmd_light_gate(
+        argparse.Namespace(
+            repo=str(repo),
+            scope="changed",
+            profile=plan["profile"],
+            mode="dev",
+            base=base_ref,
+            explain=False,
         )
-        structure_check_status = "passed via light-gate" if _structure_gate_enabled(cfg) else "skipped (structure disabled)"
+    )
 
     after_gate = _task_content_fingerprint(repo, cfg, manifest)
     if after_gate != before_gate:
@@ -6061,35 +5922,27 @@ def _cmd_commit_push_locked(
     if manifest:
         manifest = _require_task_context(repo, cfg, args.task_id)
 
-    if args.require_jenkins:
-        cmd_verify_jenkins(argparse.Namespace(repo=str(repo)))
-
-    if args.require_matrix and mode != "verify":
-        cmd_check_matrix(argparse.Namespace(repo=str(repo)))
-
     if _task_content_fingerprint(repo, cfg, manifest) != after_gate:
         raise APError(
             "Task-owned files changed after the gate. Review them and rerun commit-push; "
             "no files were staged or restored."
         )
 
-    if mode == "dev":
-        dev_verification = args.verification or [
-            "light-gate only",
-            "configured CI/Jenkins not verified in dev mode",
-            "target environment not verified in dev mode",
-        ]
-        _record_commit_push_closure(
-            repo,
-            args,
-            commit="generated by this commit-push run",
-            jenkins=args.jenkins_build or "not verified in dev mode",
-            target_env=args.target_env or "not verified in dev mode",
-            verification=dev_verification,
-            result=args.result or "DEV-CLOSED",
-            follow_up=args.follow_up or "Run verify mode when configured CI/Jenkins and target-environment evidence is required.",
-            structure_check=args.structure_check or structure_check_status,
-        )
+    dev_verification = args.verification or [
+        "fast changed-scope gate passed",
+        "project commit/push hooks remain enabled",
+    ]
+    _record_commit_push_closure(
+        repo,
+        args,
+        commit="generated by this commit-push run",
+        jenkins="owner-managed after push",
+        target_env="owner-managed acceptance",
+        verification=dev_verification,
+        result=args.result or "DEV-CLOSED",
+        follow_up=args.follow_up or "Complete the push stage with task-integrate; do not wait for Jenkins.",
+        structure_check=args.structure_check or structure_check_status,
+    )
 
     protected = set(manifest.get("initial_untracked") or []) if manifest else set()
     if manifest:
@@ -6113,102 +5966,6 @@ def _cmd_commit_push_locked(
 
     committed_sha = _commit_exact_index(repo, msg)
     _push_current_task(repo, manifest, committed_sha)
-
-    if mode == "verify":
-        verification_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
-        if jenkins_required:
-            jenkins_build = cmd_verify_jenkins_build(
-                argparse.Namespace(
-                    repo=str(repo),
-                    git_ref="HEAD",
-                    job_name=args.job_name,
-                    job_url=args.job_url,
-                    multibranch_root_job=args.multibranch_root_job,
-                    branch_name=args.branch_name,
-                    build_number=args.build_number,
-                    max_builds=args.max_builds,
-                    timeout_sec=args.timeout_sec,
-                    poll_sec=args.poll_sec,
-                    allow_no_deploy=args.allow_no_deploy,
-                )
-            )
-        else:
-            jenkins_build = "skipped by verification.jenkins_required=false"
-
-        if target_env_required:
-            target_summary = cmd_verify_target(
-                argparse.Namespace(
-                    repo=str(repo),
-                    backend_path=args.backend_path,
-                    frontend_path=args.frontend_path,
-                    backend_basic_auth=args.backend_basic_auth,
-                    frontend_basic_auth=args.frontend_basic_auth,
-                )
-            )
-        else:
-            target_summary = "skipped by verification.target_env_required=false"
-        if args.require_matrix:
-            cmd_check_matrix(argparse.Namespace(repo=str(repo)))
-        verification = args.verification
-        if not verification:
-            verification = []
-            if jenkins_required:
-                verification.append(f"CI/Jenkins build verified: {jenkins_build or 'verified by git-ref HEAD'}")
-            else:
-                verification.append("CI/Jenkins verification skipped by verification.jenkins_required=false")
-            if target_env_required:
-                verification.append(f"Target verification: {target_summary}")
-            else:
-                verification.append("Target verification skipped by verification.target_env_required=false")
-        if _task_content_fingerprint(repo, cfg, manifest) != verification_fingerprint:
-            raise APError(
-                "Verification changed task-owned files. Review them and rerun commit-push before "
-                "recording the verification closure."
-            )
-        if manifest:
-            manifest = _require_task_context(repo, cfg, args.task_id)
-        _record_commit_push_closure(
-            repo,
-            args,
-            commit="HEAD",
-            jenkins=args.jenkins_build or jenkins_build or "verified by git-ref HEAD",
-            target_env=args.target_env
-            or (str(target_cfg.get("name") or "").strip() if target_env_required else "skipped by verification.target_env_required=false"),
-            verification=verification,
-            result=args.result or "PASS",
-            follow_up=args.follow_up or "none",
-            structure_check=args.structure_check or structure_check_status,
-        )
-        if manifest:
-            _cleanup_generated_noise(repo, protected_paths=protected)
-        closure_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
-        if manifest:
-            manifest = _require_task_context(repo, cfg, args.task_id)
-        if _task_content_fingerprint(repo, cfg, manifest) != closure_fingerprint:
-            raise APError("Task-owned files changed immediately before staging verification closure.")
-        closure_paths = _task_commit_paths(repo)
-        closure_staged = _stage_exact_paths(repo, closure_paths)
-        if closure_staged:
-            unstaged = _unstaged_task_paths(repo)
-            if unstaged:
-                raise APError(
-                    "Task-owned files changed while staging verification closure:\n- "
-                    + "\n- ".join(unstaged)
-                )
-            closure_sha = _commit_exact_index(repo, f"{args.task_id}: record verification closure [skip ci]")
-            _push_current_task(repo, manifest, closure_sha)
-    elif args.record_closure and mode != "dev":
-        _record_commit_push_closure(
-            repo,
-            args,
-            commit="HEAD",
-            jenkins=args.jenkins_build or "TODO",
-            target_env=args.target_env or str(target_cfg.get("name") or "").strip(),
-            verification=args.verification or [],
-            result=args.result or "PARTIAL",
-            follow_up=args.follow_up or "none",
-            structure_check=args.structure_check or structure_check_status,
-        )
     print(f"[commit-push] OK - profile={plan['profile']} mode={mode} scope={plan['selected_scope']}")
 
 
@@ -6272,7 +6029,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sp.add_parser("impact")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
     s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
-    s.add_argument("--mode", choices=["dev", "verify"], default="")
+    s.add_argument("--mode", choices=["dev"], default="")
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_impact)
@@ -6280,7 +6037,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sp.add_parser("classify")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
     s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
-    s.add_argument("--mode", choices=["dev", "verify"], default="")
+    s.add_argument("--mode", choices=["dev"], default="")
     s.add_argument("--base")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
@@ -6309,9 +6066,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.set_defaults(func=cmd_docs_ledger_archive)
 
     s = sp.add_parser("light-gate")
-    s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
+    s.add_argument("--scope", choices=["auto", "changed"], default="")
     s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
-    s.add_argument("--mode", choices=["dev", "verify"], default="")
+    s.add_argument("--mode", choices=["dev"], default="")
     s.add_argument("--base")
     s.add_argument("--explain", action="store_true")
     s.set_defaults(func=cmd_light_gate)
@@ -6409,28 +6166,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("task_id")
     s.add_argument("--title")
     s.add_argument("--msg", required=True)
-    s.add_argument("--mode", choices=["dev", "verify"])
+    s.add_argument("--mode", choices=["dev"])
     s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES))
-    s.add_argument("--require-light-gate", action="store_true")
-    s.add_argument("--require-runtime-health", action="store_true")
-    s.add_argument("--require-jenkins", action="store_true")
-    s.add_argument("--require-matrix", action="store_true")
-    s.add_argument("--record-closure", action="store_true")
-    s.add_argument("--job-name")
-    s.add_argument("--job-url")
-    s.add_argument("--multibranch-root-job")
-    s.add_argument("--branch-name")
-    s.add_argument("--build-number", type=int)
-    s.add_argument("--max-builds", type=int, default=20)
-    s.add_argument("--timeout-sec", type=int, default=300)
-    s.add_argument("--poll-sec", type=int, default=5)
-    s.add_argument("--allow-no-deploy", action="store_true")
-    s.add_argument("--backend-path", action="append")
-    s.add_argument("--frontend-path", action="append")
-    s.add_argument("--backend-basic-auth", action="store_true")
-    s.add_argument("--frontend-basic-auth", action="store_true")
-    s.add_argument("--ci-build", "--jenkins-build", dest="jenkins_build", metavar="CI_BUILD")
-    s.add_argument("--target-env")
     s.add_argument("--verification", action="append")
     s.add_argument("--structure-check")
     s.add_argument("--result", choices=["DEV-CLOSED", "PASS", "FAIL", "PARTIAL"])

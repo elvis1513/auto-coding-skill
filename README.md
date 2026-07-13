@@ -1,8 +1,21 @@
 # auto-coding-skill
 
-A generic `.agents` engineering workflow with adaptive execution profiles,
-minimal project scaffolding, evidence-backed closure, and optional CI/Jenkins and
-target-environment verification.
+A generic `.agents` engineering workflow with isolated parallel worktrees, fast
+local validation, push-based completion, required access configuration, and safe
+branch cleanup.
+
+## What changed in v4.0.0
+
+- Fixed normal development to analysis → decomposition → design → development →
+  one changed-scope fast gate → push.
+- Kept risk profiles for planning/review depth without promoting local work to a
+  standard/full gate or verify mode.
+- Ended coding tasks immediately after safe target-branch push; Jenkins owns
+  later build/deploy work and the project owner owns acceptance.
+- Removed repeated integration gates and all automatic post-push Jenkins/target
+  polling from `commit-push`.
+- Required all project/Jenkins/GitLab/Nexus URLs, usernames, and direct passwords
+  under `access.*` during project initialization.
 
 ## What changed in v3.0.0
 
@@ -50,6 +63,9 @@ target-environment verification.
   advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
   model inheritance.
 
+This section records historical v2 behavior. The v4 workflow above supersedes
+its full-gate and verify-mode rules for normal development.
+
 ## Install
 
 ```bash
@@ -82,18 +98,18 @@ Configure the selector in `docs/ENGINEERING.md`:
 workflow:
   mode: dev
   profile: auto
+  completion: push
 ```
 
-| Effective profile | Intended work | Gate scope | Mode |
+| Effective profile | Intended work | Local gate | Completion |
 | --- | --- | --- | --- |
-| `micro` | docs/tests-only or explicitly isolated work | changed | dev |
-| `standard` | normal feature and defect work | standard | dev |
-| `high-risk` | DB/auth/payment/file transfer/gateway/prod/deploy/build changes | full | verify |
+| `micro` | docs/tests-only or explicitly isolated work | changed/quick | pushed |
+| `standard` | normal feature and defect work | changed/quick | pushed |
+| `high-risk` | sensitive, broad, deploy/build, or structural work | changed/quick | pushed |
 
-`auto` is a selector, not a fourth effective profile. Full-path patterns,
-high-risk categories, `gate.rules[].profile: high-risk`, and explicit verify work
-raise the plan to `high-risk`. A CLI `--profile micro` or `--mode dev` cannot
-lower it.
+`auto` is a selector, not a fourth effective profile. Profiles affect analysis,
+design depth, and reviewer recommendations only. They never expand the automatic
+local gate or turn Jenkins/target verification into a completion condition.
 
 An explicit configured `micro`, `standard`, or `high-risk` profile replaces
 auto's low/normal baseline and acts as a floor for CLI overrides. Independently
@@ -106,8 +122,8 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py impact --scope auto --json
 ```
 
-Each result includes the effective profile, mode, gate scope, reasons, required
-verification surfaces, and recommended Agent roles.
+Each result includes the effective profile, fixed fast gate scope, reasons, and
+recommended Agent roles.
 
 ## Parallel write isolation
 
@@ -139,6 +155,14 @@ python3 docs/tools/autopipeline/ap.py task-integrate T0001
 manifest and stages only that task's changes. Unknown changes stop the command;
 the workflow never restores, resets, stashes, or cleans them.
 
+`commit-push` runs the only local gate. `task-integrate` is the rest of the same
+push stage: it fetches/rebases, CAS-pushes the configured target, confirms the
+remote SHA, and cleans up without repeating the gate. Successful integration
+ends the coding task; do not wait for Jenkins, deployment, or acceptance results.
+The task commit runs project commit hooks once. Its internal backup-branch push
+skips the pre-push hook, while the final target-branch push runs that hook once.
+Integration does not create a second evidence commit.
+
 Successful integration removes the clean worktree and merged local branch, and
 deletes the merged remote task branch by default. `task-finish T0001` retries
 cleanup for one integrated task; `task-prune` removes registered merged tasks
@@ -166,9 +190,7 @@ forced cleanup until they are reinitialized or recovered.
 
 ```yaml
 commands:
-  gate_changed: "npm run test:changed"
-  gate_standard: "npm test"
-  gate_full: "npm run test:full"
+  gate_changed: "git diff --check"
 
 gate:
   default_scope: auto
@@ -178,10 +200,14 @@ gate:
       profile: high-risk
 ```
 
-For Node projects, a new scaffold can infer changed/standard commands from
-`test`, `test:changed`, and `test:standard`. It only infers a full command from a
-dedicated `test:full` script; ordinary `npm test` is never promoted to full.
-A high-risk or verify run fails clearly when no real full command is configured.
+Rules affect classification and planning only. Legacy `scope` or `commands`
+inside a rule never execute automatically; invoke an explicitly configured
+diagnostic with `ap.py run <name>` when the user asks for it.
+
+For Node projects, a new scaffold selects `npm run test:changed` only when that
+dedicated quick script exists. It never promotes ordinary `npm test`, builds, or
+full regression into the automatic changed gate. Standard/full commands may be
+kept as explicit diagnostics, but normal development does not invoke them.
 
 ## Structure policy
 
@@ -245,21 +271,19 @@ The effective profile recommends roles dynamically:
 - standard: explorer → fixer, plus browser/docs roles when indicated
 - high-risk: explorer/docs as indicated → fixer → browser as indicated → reviewer
 
-## Verification configuration
+## Required access configuration
 
-Generic projects start with both optional external surfaces disabled:
-
-```yaml
-verification:
-  target_env_required: false
-  jenkins_required: false
-```
-
-When target verification is enabled, `doctor` requires only the health URL/path
-needed by the default health check. Frontend/backend URLs and credentials are
-validated when the corresponding path or basic-auth options are actually used.
-Jenkins keeps its explicit configuration checks. Unused sections should stay
-absent rather than containing placeholders.
+For a new project, `autocoding sync` creates `access.project`, `access.jenkins`,
+`access.gitlab`, and `access.nexus` in `docs/ENGINEERING.md`. Existing projects
+must run `ap.py upgrade --write` to merge newly required fields into their manual
+configuration. Fill every URL, username, and direct password during
+initialization as an inline YAML string; quote values that resemble numbers,
+dates, booleans, or YAML collections. `status` rejects blank/TODO fields;
+`doctor` and `task-start`
+also validate URL shape locally. These access checks never contact the listed
+service endpoints; after validation, `task-start` may still fetch the configured
+Git remote unless `--no-fetch` is used. Configuration presence does not enable
+Jenkins/build/deploy verification.
 
 ## Core commands
 
@@ -299,15 +323,18 @@ Retired template files do not count as drift.
 
 ## Development
 
+Normal changes should use the configured changed-scope gate only. The commands
+below are explicit package-maintainer diagnostics, not the default project
+development gate:
+
 ```bash
-npm run sync-assets
-npm run check:assets
 npm run test:src
 npm test
 npm run release:check
 ```
 
-`release:check` synchronizes source assets, validates Python 3.11 grammar and
-TOML, runs installer and profile regressions, and performs `npm pack --dry-run`.
+Use `release:check` only when preparing a package release. It synchronizes source
+assets, validates Python 3.11 grammar and TOML, runs the broader regressions, and
+performs `npm pack --dry-run`.
 
 License: MIT.

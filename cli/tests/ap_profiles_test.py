@@ -26,9 +26,23 @@ def run(repo: Path, *args: str) -> None:
 
 def base_config() -> dict:
     return {
-        "workflow": {"mode": "dev", "profile": "auto"},
+        "workflow": {"mode": "dev", "profile": "auto", "completion": "push"},
         "concurrency": {"isolation": "legacy"},
         "project": {"name": "profile-test"},
+        "access": {
+            "project": {
+                "frontend": {"url": "https://project-front.test", "username": "front", "password": "front-pass"},
+                "backend": {"url": "https://project-back.test", "username": "back", "password": "back-pass"},
+            },
+            "jenkins": {
+                "frontend": {"url": "https://jenkins-front.test", "username": "front", "password": "front-pass"},
+                "backend": {"url": "https://jenkins-back.test", "username": "back", "password": "back-pass"},
+            },
+            "gitlab": {"url": "https://gitlab.test", "username": "git", "password": "git-pass"},
+            "nexus": {
+                "frontend": {"url": "https://nexus.test", "username": "nexus", "password": "nexus-pass"},
+            },
+        },
         "commands": {
             "gate_changed": "true",
             "gate_standard": "true",
@@ -168,7 +182,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         (repo / "docs" / "tasks" / "evidence.jsonl").write_text("{}\n", encoding="utf-8")
         plan = self.plan(repo, cfg)
         self.assertEqual("standard", plan["profile"])
-        self.assertEqual("standard", plan["selected_scope"])
+        self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
         self.assertEqual(["explorer", "fixer"], plan["recommended_agents"])
 
@@ -188,43 +202,42 @@ class AutoCodingProfileTests(unittest.TestCase):
                 self.assertEqual("changed", plan["selected_scope"])
                 self.assertEqual("dev", plan["effective_mode"])
 
-    def test_high_risk_is_full_verify_and_cannot_be_downgraded(self) -> None:
+    def test_high_risk_changes_keep_fast_dev_gate(self) -> None:
         repo, cfg = self.make_repo("migrations/001.sql")
         plan = self.plan(repo, cfg, requested_profile="micro", requested_mode="dev")
         self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        self.assertEqual("changed", plan["selected_scope"])
+        self.assertEqual("dev", plan["effective_mode"])
         self.assertTrue(plan["needs_dd"])
         self.assertIn("reviewer", plan["recommended_agents"])
+        self.assertFalse(plan["needs_jenkins"])
+        self.assertFalse(plan["needs_target"])
 
-    def test_verify_mode_forces_high_risk_full(self) -> None:
+    def test_requested_verify_mode_is_rejected(self) -> None:
         repo, cfg = self.make_repo("src/widget.py")
-        plan = self.plan(repo, cfg, requested_mode="verify")
-        self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        with self.assertRaises(APError):
+            self.plan(repo, cfg, requested_mode="verify")
 
     def test_configured_high_risk_profile_cannot_be_downgraded_by_cli(self) -> None:
         cfg = base_config()
-        cfg["workflow"] = {"mode": "dev", "profile": "high-risk"}
+        cfg["workflow"] = {"mode": "dev", "profile": "high-risk", "completion": "push"}
         repo, cfg = self.make_repo("src/widget.py", cfg)
         plan = self.plan(repo, cfg, requested_profile="micro", requested_mode="dev")
         self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        self.assertEqual("changed", plan["selected_scope"])
+        self.assertEqual("dev", plan["effective_mode"])
 
-    def test_configured_verify_mode_cannot_be_downgraded_by_cli(self) -> None:
+    def test_doctor_rejects_configured_verify_mode(self) -> None:
         cfg = base_config()
-        cfg["workflow"] = {"mode": "verify", "profile": "auto"}
-        repo, cfg = self.make_repo("src/widget.py", cfg)
-        plan = self.plan(repo, cfg, requested_profile="micro", requested_mode="dev")
-        self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        cfg["workflow"] = {"mode": "verify", "profile": "auto", "completion": "push"}
+        repo, _ = self.make_repo("src/widget.py", cfg)
+        with self.assertRaises(APError) as context:
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn("workflow.mode", str(context.exception))
 
     def test_configured_micro_profile_applies_to_ordinary_code(self) -> None:
         cfg = base_config()
-        cfg["workflow"] = {"mode": "dev", "profile": "micro"}
+        cfg["workflow"] = {"mode": "dev", "profile": "micro", "completion": "push"}
         repo, cfg = self.make_repo("src/widget.py", cfg)
         plan = self.plan(repo, cfg)
         self.assertEqual("micro", plan["profile"])
@@ -239,23 +252,77 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("high-risk", plan["profile"])
         self.assertIn("matched gate rule with profile=high-risk", plan["profile_reasons"])
 
-    def test_full_scope_rule_cannot_be_bypassed_by_explicit_scope(self) -> None:
+    def test_full_scope_rule_does_not_expand_local_gate(self) -> None:
         cfg = base_config()
         cfg["gate"]["rules"] = [{"name": "sensitive", "paths": ["src/sensitive/**"], "scope": "full"}]
         repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
         plan = self.plan(repo, cfg, requested_scope="changed", requested_profile="micro", requested_mode="dev")
-        self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        self.assertEqual("micro", plan["profile"])
+        self.assertEqual("changed", plan["selected_scope"])
+        self.assertEqual("dev", plan["effective_mode"])
 
-    def test_custom_full_on_path_cannot_be_bypassed_by_explicit_scope(self) -> None:
+    def test_legacy_rule_commands_never_run_in_automatic_gate(self) -> None:
+        cfg = base_config()
+        repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
+        quick_marker = repo / "quick-ran"
+        full_marker = repo / "full-ran"
+        build_marker = repo / "build-ran"
+        cfg["commands"] = {
+            "gate_changed": f"touch {quick_marker}",
+            "gate_full": f"touch {full_marker}",
+            "build": f"touch {build_marker}",
+        }
+        cfg["gate"]["rules"] = [
+            {
+                "name": "legacy-heavy-rule",
+                "paths": ["src/sensitive/**"],
+                "scope": "full",
+                "commands": ["gate_full", "build"],
+            }
+        ]
+        self.write_config(repo, cfg)
+
+        ap.cmd_light_gate(
+            argparse.Namespace(
+                repo=str(repo),
+                scope="changed",
+                profile="",
+                mode="dev",
+                base="",
+                explain=False,
+            )
+        )
+
+        self.assertTrue(quick_marker.exists())
+        self.assertFalse(full_marker.exists())
+        self.assertFalse(build_marker.exists())
+
+    def test_classify_never_recommends_a_second_gate_or_structure_scan(self) -> None:
+        repo, _ = self.make_repo("src/widget.py")
+        with mock.patch.object(ap, "_record_evidence"):
+            with mock.patch("builtins.print") as printed:
+                ap.cmd_classify(
+                    argparse.Namespace(
+                        repo=str(repo),
+                        scope="auto",
+                        profile="",
+                        mode="dev",
+                        base="",
+                        json=False,
+                    )
+                )
+        rendered = "\n".join(" ".join(map(str, call.args)) for call in printed.call_args_list)
+        self.assertNotIn("light-gate", rendered)
+        self.assertNotIn("structure-check", rendered)
+
+    def test_custom_full_on_path_does_not_expand_local_gate(self) -> None:
         cfg = base_config()
         cfg["gate"]["full_on"] = {"paths": ["src/sensitive/**"]}
         repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
         plan = self.plan(repo, cfg, requested_scope="changed", requested_profile="micro", requested_mode="dev")
-        self.assertEqual("high-risk", plan["profile"])
-        self.assertEqual("full", plan["selected_scope"])
-        self.assertEqual("verify", plan["effective_mode"])
+        self.assertEqual("micro", plan["profile"])
+        self.assertEqual("changed", plan["selected_scope"])
+        self.assertEqual("dev", plan["effective_mode"])
 
     def test_full_gate_never_falls_back_to_light(self) -> None:
         repo, _ = self.make_repo()
@@ -309,32 +376,53 @@ class AutoCodingProfileTests(unittest.TestCase):
             ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         self.assertIn("gate.rules[0].scope", str(context.exception))
 
-    def test_doctor_requires_a_gate_executable_for_the_configured_profile(self) -> None:
-        cases = [
-            ("micro", {"gate_standard": "true"}, "gate_changed", "tests/widget_test.py"),
-            ("standard", {"gate_changed": "true"}, "gate_standard", None),
-            ("auto", {"gate_changed": "true"}, "gate_standard", None),
-        ]
-        for profile, commands, expected_field, change_path in cases:
+    def test_doctor_requires_one_fast_gate_for_every_profile(self) -> None:
+        for profile in ["micro", "standard", "high-risk", "auto"]:
             with self.subTest(profile=profile):
                 cfg = base_config()
                 cfg["workflow"]["profile"] = profile
-                cfg["commands"] = commands
-                cfg["docs"]["ledger_check_enabled"] = False
-                repo, _ = self.make_repo(change_path, config=cfg)
+                cfg["commands"] = {"gate_standard": "true", "gate_full": "true"}
+                repo, _ = self.make_repo(config=cfg)
                 with self.assertRaises(APError) as context:
                     ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
-                self.assertIn(expected_field, str(context.exception))
+                self.assertIn("fast gate command", str(context.exception))
 
-    def test_doctor_accepts_health_only_target_verification(self) -> None:
+    def test_doctor_requires_direct_access_password_even_with_env_reference(self) -> None:
         cfg = base_config()
-        cfg["verification"]["target_env_required"] = True
-        cfg["target_env"] = {
-            "health_base_url": "https://example.test",
-            "health_path": "/health",
-        }
+        cfg["access"]["gitlab"]["password"] = ""
+        cfg["access"]["gitlab"]["password_env"] = "GITLAB_PASSWORD"
         repo, _ = self.make_repo(config=cfg)
-        ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        with self.assertRaises(APError) as context:
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn("access.gitlab.password", str(context.exception))
+
+    def test_doctor_rejects_quoted_nullish_access_placeholders(self) -> None:
+        for placeholder in ["NULL", "~"]:
+            with self.subTest(placeholder=placeholder):
+                cfg = base_config()
+                cfg["access"]["gitlab"]["password"] = placeholder
+                repo, _ = self.make_repo(config=cfg)
+                with self.assertRaises(APError) as context:
+                    ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+                self.assertIn("access.gitlab.password", str(context.exception))
+
+    def test_doctor_rejects_non_string_access_values(self) -> None:
+        for value in [False, 0]:
+            with self.subTest(value=value):
+                cfg = base_config()
+                cfg["access"]["gitlab"]["password"] = value
+                repo, _ = self.make_repo(config=cfg)
+                with self.assertRaises(APError) as context:
+                    ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+                self.assertIn("access.gitlab.password", str(context.exception))
+
+    def test_doctor_validates_access_url_shape_without_network(self) -> None:
+        cfg = base_config()
+        cfg["access"]["nexus"]["frontend"]["url"] = "nexus.local"
+        repo, _ = self.make_repo(config=cfg)
+        with self.assertRaises(APError) as context:
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn("valid http/https URL", str(context.exception))
 
     def test_api_docs_required_false_is_an_authoritative_opt_out(self) -> None:
         cfg = base_config()
@@ -353,17 +441,14 @@ class AutoCodingProfileTests(unittest.TestCase):
         ap.cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
 
     def test_commit_push_rejects_result_incompatible_with_effective_mode(self) -> None:
-        cases = [
-            ("micro", "dev", "PASS"),
-            ("high-risk", "verify", "DEV-CLOSED"),
-        ]
+        cases = [("micro", "dev", "PASS")]
         for profile, mode, result in cases:
             with self.subTest(profile=profile, mode=mode, result=result):
                 repo, cfg = self.make_repo("src/widget.py")
                 plan = {
                     "profile": profile,
                     "effective_mode": mode,
-                    "selected_scope": "full" if mode == "verify" else "changed",
+                    "selected_scope": "changed",
                 }
                 fake_run_result = subprocess.CompletedProcess([], 0, stdout="changed\n", stderr="")
                 with (
@@ -387,38 +472,30 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertIn("- Effective Profile: standard", closure)
         self.assertNotIn("(not recorded)", closure)
 
-    def test_manual_closure_rejects_result_incompatible_with_inferred_mode(self) -> None:
-        cases = [
-            ("src/widget.py", "PASS"),
-            ("migrations/001.sql", "DEV-CLOSED"),
-        ]
-        for path, result in cases:
-            with self.subTest(path=path, result=result):
-                repo, _ = self.make_repo(path)
-                with self.assertRaises(APError):
-                    ap.cmd_record_closure(self.closure_args(repo, result=result))
+    def test_manual_closure_uses_dev_closed_for_high_risk_work(self) -> None:
+        repo, _ = self.make_repo("migrations/001.sql")
+        ap.cmd_record_closure(self.closure_args(repo, result="DEV-CLOSED"))
+        closure = (repo / "docs" / "tasks" / "closure-log.md").read_text(encoding="utf-8")
+        self.assertIn("- Effective Profile: high-risk", closure)
 
-    def test_manual_pass_requires_concrete_verification_evidence(self) -> None:
+    def test_manual_pass_is_outside_automatic_coding_closure(self) -> None:
         repo, _ = self.make_repo("src/widget.py")
         with self.assertRaises(APError) as context:
             ap.cmd_record_closure(
                 self.closure_args(repo, result="PASS", profile="high-risk", verification=[])
             )
-        self.assertIn("--verification", str(context.exception))
+        self.assertIn("owner acceptance", str(context.exception))
 
     def test_manual_closure_uses_commit_diff_after_high_risk_change_is_committed(self) -> None:
         repo, _ = self.make_repo("migrations/001.sql")
         run(repo, "git", "add", "-A")
         run(repo, "git", "commit", "-qm", "database migration")
 
-        with self.assertRaises(APError):
-            ap.cmd_record_closure(self.closure_args(repo, result="DEV-CLOSED"))
-
         ap.cmd_record_closure(
             self.closure_args(
                 repo,
-                result="PASS",
-                verification=["gate_full: integration suite passed"],
+                result="DEV-CLOSED",
+                verification=["fast changed gate passed"],
             )
         )
         closure = (repo / "docs" / "tasks" / "closure-log.md").read_text(encoding="utf-8")

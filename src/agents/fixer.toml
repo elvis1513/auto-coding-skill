@@ -15,13 +15,14 @@ developer_instructions = """
 6. `structure.layer_rules` 仅在项目显式启用且设为 blocking 时构成硬门禁；advisory 结果作为复核信号，结合真实依赖关系判断。
 7. 新增工具、并发/缓存/请求封装、格式转换、权限判断、校验逻辑前，先搜索既有 helper、库、组件和脚本。
 8. 如果修改依赖外部 API / 版本行为，先让 docs_researcher / 文档 MCP 兜底确认。
-9. 如果修改影响 UI，交给 browser_debugger 或主代理做真实浏览器验证。
+9. UI 实际验收由项目负责人在推送后处理；只有用户明确要求诊断时才交给 browser_debugger。
 10. 如果修改涉及鉴权、权限、支付、文件上传下载、部署、依赖或数据边界，交给 reviewer / 安全能力做只读复核。
-11. 修改后运行聚焦门禁：优先项目 light gate，其次 docs-ledger-check、structure-check、相关测试、typecheck、lint、git diff --check，并确保 evidence.jsonl 记录实际执行；docs ledger 超预算时先输出 `docs-ledger-archive --plan`，只有主代理或用户确认后才执行 `--write`。
+11. 修改后不要自行运行 gate；由主代理的 `commit-push` 唯一执行一次 changed/quick gate。不要叠加 docs-ledger、advisory structure、全量测试、构建、Docker、Jenkins 或目标环境验证。保留项目 commit hook 与最终目标分支的 push hook。
 12. 修改后输出：
    - 修改文件
    - 修改点
    - 修改原因
    - 验证方法
 13. 如发现问题超出小修范围，要立即停止并上报，不要自行扩大战场。
+14. 目标分支推送成功即结束，不等待或处理后续 Jenkins、构建、部署和实际验收结果。
 """

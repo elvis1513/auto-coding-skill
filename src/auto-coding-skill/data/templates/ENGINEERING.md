@@ -2,11 +2,41 @@
 workflow:
   mode: "dev"
   profile: "auto"
+  completion: "push"
 
 project:
   name: ""
   repo_root: "."
   stack: "generic"
+
+access:
+  project:
+    frontend:
+      url: ""
+      username: ""
+      password: ""
+    backend:
+      url: ""
+      username: ""
+      password: ""
+  jenkins:
+    frontend:
+      url: ""
+      username: ""
+      password: ""
+    backend:
+      url: ""
+      username: ""
+      password: ""
+  gitlab:
+    url: ""
+    username: ""
+    password: ""
+  nexus:
+    frontend:
+      url: ""
+      username: ""
+      password: ""
 
 concurrency:
   isolation: "worktree"
@@ -19,38 +49,14 @@ concurrency:
   disposable_ignored: []
 
 commands:
-  gate_changed: ""
-  gate_standard: ""
-  gate_full: ""
+  gate_changed: "git diff --check"
 
 gate:
-  default_scope: "auto"
-  fallback_scope: "standard"
-  full_on_unknown: true
-  no_change_scope: "standard"
+  default_scope: "changed"
+  fallback_scope: "changed"
+  full_on_unknown: false
+  no_change_scope: "changed"
   profile_log: ".local/auto-coding-skill/gate-profile.jsonl"
-  full_on:
-    paths:
-      - "Jenkinsfile"
-      - "Jenkinsfile.*"
-      - ".github/workflows/**"
-      - "Dockerfile"
-      - "**/Dockerfile"
-      - "docker-compose*.yml"
-      - "docker-compose*.yaml"
-      - "compose*.yml"
-      - "compose*.yaml"
-      - "docs/ENGINEERING.md"
-      - "docs/tools/autopipeline/**"
-      - "package-lock.json"
-      - "pnpm-lock.yaml"
-      - "yarn.lock"
-      - "go.mod"
-      - "go.sum"
-      - "Cargo.lock"
-      - "pom.xml"
-      - "build.gradle*"
-      - "settings.gradle*"
   rules: []
 
 structure:
@@ -86,10 +92,6 @@ optimization:
   require_baseline_for_global_review: false
   report_accepted_debt_as_findings: false
 
-verification:
-  target_env_required: false
-  jenkins_required: false
-
 docs:
   taskbook: "docs/tasks/taskbook.md"
   closure_log: "docs/tasks/closure-log.md"
@@ -120,34 +122,42 @@ docs:
 # Engineering Workflow
 
 This file is the single manually maintained workflow configuration. Keep it in
-Git. Add optional sections only when the project enables the related surface.
+Git. Fill every access URL, username, and password during project initialization.
 
 ## Execution profiles
 
 `workflow.profile: auto` selects one of three effective profiles:
 
-| Profile | Typical work | Gate | Closure mode |
+| Profile | Typical work | Local gate | Completion |
 | --- | --- | --- | --- |
-| `micro` | docs/tests-only, very small isolated work | changed | dev |
-| `standard` | ordinary feature and defect work | standard | dev |
-| `high-risk` | DB/auth/payment/deploy/build config or declared high risk | full | verify |
+| `micro` | docs/tests-only, very small isolated work | changed/quick | pushed |
+| `standard` | ordinary feature and defect work | changed/quick | pushed |
+| `high-risk` | DB/auth/payment/deploy/build config or declared high risk | changed/quick | pushed |
 
-`auto` is only a selector. The effective profile is always `micro`, `standard`,
-or `high-risk`. A high-risk signal cannot be downgraded with a CLI flag or a
-project rule. An explicit non-auto profile replaces auto's low/normal baseline.
-`workflow.mode: verify` also requires the full gate.
+`auto` is only a selector. The effective profile remains useful for analysis,
+design depth, and reviewer recommendations, but it never expands the local gate.
+All profiles run the fast changed-scope gate and complete when the configured
+target branch is pushed. Jenkins owns later build/deploy work; its result and
+manual acceptance are outside the coding task.
 
-Project `gate.rules` may declare `paths`, `commands`, `scope`, and an optional
-`profile`. Configure `commands.gate_full` (or legacy `commands.full_gate`) for
-high-risk work; a light or standard command does not count as a full gate.
+Project `gate.rules` may raise the planning profile or request design/reviewer
+attention. Their legacy `scope` and `commands` values never execute in the
+automatic development flow. Standard/full commands remain callable on demand
+with `ap.py run <name>` but are not part of normal development.
 
 ## Minimal configuration
 
 Required for normal development:
 
-- `workflow.mode`: `dev` or `verify`
+- `workflow.mode`: `dev`
 - `workflow.profile`: `auto`, `micro`, `standard`, or `high-risk`
+- `workflow.completion`: `push`
 - `project.name`
+- all URL, username, and direct password fields under `access.project`,
+  `access.jenkins`, `access.gitlab`, and `access.nexus`; blank/TODO values make
+  initialization incomplete and block `doctor`; keep each value as an inline
+  YAML string, quoting values that resemble numbers, dates, booleans, or YAML
+  collections
 - `concurrency.isolation`: keep `worktree` for every task that may write files
 - `concurrency.base_ref` and `target_branch`: leave blank to derive the current
   upstream, or set them explicitly for a fixed integration branch
@@ -155,21 +165,14 @@ Required for normal development:
 - `concurrency.cleanup_merged` and `delete_remote_branch`: keep both enabled to
   remove integrated temporary worktrees and branches
 - `concurrency.disposable_ignored`: add only project-specific ignored cache/build
-  paths that may be discarded with a task worktree; ignored secrets and unknown
+  paths that may be discarded with a task worktree; ignored data and unknown
   paths block cleanup, including inside initialized submodules
-- at least one usable gate command; configure all three gate commands when the
-  project can exercise changed, standard, and full scopes
-- `verification.target_env_required` and `verification.jenkins_required`
+- one fast `commands.gate_changed`; the default is `git diff --check`
 
-Legacy command keys such as `commands.light_gate`, `quick_test`, `test`, and
-`build` remain supported. Run `doctor` for exact missing-field diagnostics.
-
-When target verification is enabled, add `target_env.health_base_url` and
-`health_path`. Add frontend/backend URLs only for requested endpoint checks, and
-login/secret references only when basic auth is requested. When Jenkins is
-enabled, add `jenkins` with its base/job URLs, branch, artifact/deploy metadata,
-timeout, UI/API users, and password values or environment references. Unused
-sections should remain absent rather than filled with placeholders.
+Legacy command keys such as `commands.light_gate`, `test`, and `build` remain
+callable explicitly with `ap.py run <name>` but never replace the automatic
+changed gate. `quick_test` remains the only fallback when `gate_changed` is
+absent. Run `doctor` for exact missing-field diagnostics.
 
 ## Concurrent write tasks
 
@@ -189,6 +192,10 @@ python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
 worktree in the repository manifest. Run `commit-push` only from that registered
 worktree. Stage only task-owned paths. If an unknown change appears, stop and
 report it; never restore, reset, stash, clean, or otherwise alter it.
+
+The task commit runs project commit hooks once. The internal backup task-branch
+push skips the pre-push hook; the final target-branch push runs it once.
+`task-integrate` creates no second evidence commit.
 
 Successful integration removes the clean worktree and merged local branch, and
 deletes the merged remote task branch by default. Use `task-finish <TASK_ID>` to
@@ -220,20 +227,16 @@ Development:
 3. Run or reason through `classify --scope auto`.
 4. Record the smallest useful design note; create DD/ADR only when indicated.
 5. Implement the necessary change using existing project structure and reuse points.
-6. Run the resolved profile gate.
-7. Record `DEV-CLOSED`, commit, push, integrate, and clean the task worktree.
+6. Run `commit-push`; it executes the one changed-scope fast gate, records
+   `DEV-CLOSED`, commits, and pushes the task branch.
+7. Run `task-integrate` to push the target branch and clean the task worktree and
+   merged task branches. This completes the push stage and ends the coding task.
 
-High-risk or explicit verification:
+Do not wait for, poll, diagnose, or record Jenkins/build/deploy results after the
+push. The project owner performs real acceptance separately.
 
-1. Run the real full gate.
-2. Commit and push.
-3. Verify enabled CI/Jenkins and target-environment surfaces.
-4. Record `PASS`, `FAIL`, or `PARTIAL` from actual evidence.
-5. Integrate successful work and clean its temporary worktree and branches.
-
-The authoritative order remains ENGINEERING, taskbook/archives, design and
-interface records, regression/bug records, closure evidence, deployment records,
-then implementation. Do not mark unexecuted checks as PASS.
+The authoritative order is analysis, decomposition, design, development, fast
+local gate, then push. Do not mark unexecuted external checks as PASS.
 
 ## Structure policy
 
@@ -284,6 +287,9 @@ python3 docs/tools/autopipeline/ap.py task-prune
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py gate-profile
 ```
+
+`light-gate` is available for an explicit gate-diagnostic task. Do not run it
+before normal `commit-push`; `commit-push` owns the single automatic gate.
 
 The launcher under `docs/tools/autopipeline` delegates to the single runtime in
 `.agents/skills/auto-coding-skill/scripts`; do not duplicate that runtime.

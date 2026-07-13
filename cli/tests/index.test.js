@@ -97,7 +97,46 @@ function listProjectFiles(root) {
   return out;
 }
 
+function fillRequiredAccess(repo, password = "local-dev-password") {
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const text = fs.readFileSync(engineering, "utf8");
+  const block = [
+    "access:",
+    "  project:",
+    "    frontend:",
+    '      url: "http://project-frontend.local"',
+    '      username: "project-frontend-user"',
+    `      password: ${JSON.stringify(password)}`,
+    "    backend:",
+    '      url: "http://project-backend.local"',
+    '      username: "project-backend-user"',
+    `      password: ${JSON.stringify(password)}`,
+    "  jenkins:",
+    "    frontend:",
+    '      url: "http://jenkins-frontend.local"',
+    '      username: "jenkins-frontend-user"',
+    `      password: ${JSON.stringify(password)}`,
+    "    backend:",
+    '      url: "http://jenkins-backend.local"',
+    '      username: "jenkins-backend-user"',
+    `      password: ${JSON.stringify(password)}`,
+    "  gitlab:",
+    '    url: "http://gitlab.local"',
+    '    username: "gitlab-user"',
+    `    password: ${JSON.stringify(password)}`,
+    "  nexus:",
+    "    frontend:",
+    '      url: "http://nexus-frontend.local"',
+    '      username: "nexus-frontend-user"',
+    `      password: ${JSON.stringify(password)}`,
+  ].join("\n");
+  const updated = text.replace(/^access:\r?\n[\s\S]*?(?=^concurrency:)/m, `${block}\n\n`);
+  assert(updated !== text || text.includes(password), "required access block should be replaceable");
+  fs.writeFileSync(engineering, updated);
+}
+
 function assertStatusOk(repo) {
+  fillRequiredAccess(repo);
   const result = run("node", [cli, "status", "--projects", repo, "--json"]);
   const parsed = JSON.parse(result.stdout);
   assert(parsed.results[0].ok === true, `status should be ok: ${result.stdout}`);
@@ -166,28 +205,46 @@ function testMinimalSyncConvergesWithinBudget() {
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: \"worktree\""), "engineering should require task worktree isolation");
-  assert(engineering.includes("target_env_required: false"), "target verification should be opt-in in generic scaffold");
+  assert(engineering.includes('completion: "push"'), "engineering should complete normal development at push");
+  assert(engineering.includes('gate_changed: "git diff --check"'), "generic projects should receive the fast diff gate");
   assert(engineering.includes(`name: "${path.basename(repo)}"`), "project name should be initialized automatically");
+
+  const incomplete = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(incomplete.status !== 0, "status should require access values after scaffold creation");
+  const missing = JSON.parse(incomplete.stdout).results[0].missingConfigTokens;
+  for (const field of [
+    "access.project.frontend.password",
+    "access.project.backend.password",
+    "access.jenkins.frontend.password",
+    "access.jenkins.backend.password",
+    "access.gitlab.password",
+    "access.nexus.frontend.password",
+  ]) {
+    assert(missing.includes(field), `status should report missing direct credential: ${field}`);
+  }
+  assert(!JSON.parse(incomplete.stdout).results[0].next.includes("upgrade"), "fresh projects with present blank fields should be told to fill them directly");
+
   assertStatusOk(repo);
 
   const doctor = run("python3", [path.join(repo, "docs", "tools", "autopipeline", "ap.py"), "--repo", repo, "doctor"], { check: false });
   const doctorOutput = `${doctor.stdout}\n${doctor.stderr}`;
-  assert(doctor.status !== 0 && doctorOutput.includes("gate command"), "empty generic repo should require only a real gate command");
-  for (const unexpected of ["target_env.name", "backend_root", "jenkins.base_url", "docs.api_doc"]) {
+  assert(doctor.status === 0, `filled generic project should pass the local doctor: ${doctorOutput}`);
+  for (const unexpected of ["target_env.name", "backend_root", "jenkins.base_url", "docs.api_doc", "gate_full"]) {
     assert(!doctorOutput.includes(unexpected), `default doctor should not require optional field: ${unexpected}`);
   }
 }
 
-function testOrdinaryNodeTestIsNotPromotedToFullGate() {
+function testOrdinaryNodeTestIsNotPromotedToAutomaticGate() {
   const repo = tmpdir("node-gate-inference");
   writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }, null, 2) + "\n");
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
-  assert(engineering.includes('gate_changed: "npm test"'), "ordinary test should seed the changed gate");
-  assert(engineering.includes('gate_standard: "npm test"'), "ordinary test should seed the standard gate");
-  assert(engineering.includes('gate_full: ""'), "ordinary test must not be promoted to the full gate");
+  assert(engineering.includes('gate_changed: "git diff --check"'), "ordinary test must not replace the fast default gate");
+  assert(!engineering.includes("gate_standard:"), "ordinary test must not seed an automatic standard gate");
+  assert(!engineering.includes("gate_full:"), "ordinary test must not seed an automatic full gate");
 
+  fillRequiredAccess(repo);
   run("git", ["init", "-q"], { cwd: repo });
   run("git", ["config", "user.email", "test@example.com"], { cwd: repo });
   run("git", ["config", "user.name", "Auto Coding Test"], { cwd: repo });
@@ -196,7 +253,49 @@ function testOrdinaryNodeTestIsNotPromotedToFullGate() {
   writeFile(path.join(repo, "migrations", "001.sql"), "-- migration\n");
   const launcher = path.join(repo, "docs", "tools", "autopipeline", "ap.py");
   const doctor = run("python3", [launcher, "--repo", repo, "doctor"], { check: false });
-  assert(doctor.status !== 0 && `${doctor.stdout}\n${doctor.stderr}`.includes("full gate command"), "high-risk work should block until a dedicated full gate is configured");
+  assert(doctor.status === 0, `high-risk paths must not expand the local gate: ${doctor.stdout}\n${doctor.stderr}`);
+  const gate = run("python3", [launcher, "--repo", repo, "light-gate", "--scope", "changed"]);
+  assert(!gate.stdout.includes("[run] gate_changed"), "the default diff gate must not run twice");
+  assert((gate.stdout.match(/\[diff-check\] OK/g) || []).length === 1, "the built-in fast diff gate should run exactly once");
+  const expanded = run("python3", [launcher, "--repo", repo, "light-gate", "--scope", "full"], { check: false });
+  assert(expanded.status !== 0 && expanded.stderr.includes("invalid choice"), "light-gate must reject standard/full scopes instead of silently downgrading them");
+}
+
+function testAccessPasswordsAreRequiredButNeverPrintedByStatus() {
+  const repo = tmpdir("required-access");
+  const secret = "unique-local-secret-7f91";
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  fillRequiredAccess(repo, secret);
+
+  const healthy = run("node", [cli, "status", "--projects", repo, "--json"]);
+  assert(!healthy.stdout.includes(secret), "status JSON must not echo configured passwords");
+
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  writeFile(engineering, fs.readFileSync(engineering, "utf8").replace(
+    `      password: ${JSON.stringify(secret)}`,
+    '      password: "" # direct value required\n      password_env: "PROJECT_FRONTEND_PASSWORD"',
+  ));
+  const missing = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(missing.status !== 0, "an environment reference must not replace the required direct password");
+  assert(JSON.parse(missing.stdout).results[0].missingConfigTokens.includes("access.project.frontend.password"), "status should name the missing direct password field");
+  assert(!missing.stdout.includes(secret), "failed status JSON must not echo other configured passwords");
+  assert(!JSON.parse(missing.stdout).results[0].next.includes("upgrade"), "present but blank fields should not trigger a no-op upgrade recommendation");
+
+  for (const yamlValue of ["false", "[]", "{}", "2026-07-13", "0x10", "|"]) {
+    fillRequiredAccess(repo);
+    writeFile(engineering, fs.readFileSync(engineering, "utf8").replace('      password: "local-dev-password"', `      password: ${yamlValue}`));
+    const nonString = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+    assert(JSON.parse(nonString.stdout).results[0].missingConfigTokens.includes("access.project.frontend.password"), `YAML non-string ${yamlValue} must not count as a credential string`);
+  }
+  fillRequiredAccess(repo);
+  writeFile(engineering, fs.readFileSync(engineering, "utf8").replace('      password: "local-dev-password"', '      password: "TO\\u0044O"'));
+  const escapedPlaceholder = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(JSON.parse(escapedPlaceholder.stdout).results[0].missingConfigTokens.includes("access.project.frontend.password"), "escaped YAML placeholders must be decoded before validation");
+
+  writeFile(engineering, fs.readFileSync(engineering, "utf8").replace(/^access:\r?\n[\s\S]*?(?=^concurrency:)/m, ""));
+  const absent = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(JSON.parse(absent.stdout).results[0].next.includes("upgrade --write"), "missing access paths should recommend configuration upgrade");
 }
 
 function testManagedAgentModelsInheritAndOverridesSurvive() {
@@ -430,7 +529,7 @@ function testUpgradeInitializesNewEngineeringDefaults() {
   const repo = tmpdir("upgrade-engineering-defaults");
   const fakeHome = tmpdir("upgrade-engineering-home");
   run("git", ["init", "-q"], { cwd: repo });
-  writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test", "test:full": "node --test" } }, null, 2) + "\n");
+  writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test", "test:changed": "node --test" } }, null, 2) + "\n");
   run("node", [cli, "init"], { cwd: repo });
 
   const projectAp = path.join(repo, ".agents", "skills", "auto-coding-skill", "scripts", "ap.py");
@@ -438,10 +537,53 @@ function testUpgradeInitializesNewEngineeringDefaults() {
 
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes(`name: "${path.basename(repo)}"`), "upgrade should initialize a newly created project name");
-  for (const key of ["gate_changed", "gate_standard"]) {
-    assert(engineering.includes(`${key}: "npm test"`), `upgrade should initialize commands.${key} from the ordinary Node test script`);
+  assert(engineering.includes('gate_changed: "npm run test:changed"'), "upgrade should infer only a dedicated changed-scope test");
+  assert(!engineering.includes("gate_standard:"), "upgrade must not infer an automatic standard gate");
+  assert(!engineering.includes("gate_full:"), "upgrade must not infer an automatic full gate");
+}
+
+function testUpgradeMigratesLegacyAutomaticGateToFastDefault() {
+  const repo = tmpdir("upgrade-legacy-fast-gate");
+  run("git", ["init", "-q"], { cwd: repo });
+  writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }, null, 2) + "\n");
+  run("node", [cli, "init"], { cwd: repo });
+  writeFile(path.join(repo, "docs", "ENGINEERING.md"), [
+    "---",
+    "workflow:",
+    "  mode: verify",
+    "  profile: auto",
+    "project:",
+    '  name: "legacy"',
+    "commands:",
+    '  gate_changed: "npm test"',
+    '  gate_standard: "npm test"',
+    '  gate_full: "npm run test:full"',
+    "gate:",
+    "  default_scope: auto",
+    "  fallback_scope: standard",
+    "  full_on_unknown: true",
+    "  no_change_scope: standard",
+    "  rules: []",
+    "---",
+    "# Legacy engineering",
+    "",
+  ].join("\n"));
+
+  run("python3", [assetAp, "--repo", repo, "upgrade", "--write"]);
+  const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
+  assert(engineering.includes("gate_changed: git diff --check"), "upgrade should replace the v3 auto-seeded npm test gate");
+  assert(engineering.includes("mode: dev"), "upgrade should migrate verify mode to fast development mode");
+  assert(engineering.includes("completion: push"), "upgrade should add push completion");
+  for (const key of ["default_scope", "fallback_scope", "no_change_scope"]) {
+    assert(engineering.includes(`${key}: changed`), `upgrade should migrate gate.${key} to changed`);
   }
-  assert(engineering.includes('gate_full: "npm run test:full"'), "upgrade should infer full only from a dedicated test:full script");
+  assert(engineering.includes("full_on_unknown: false"), "upgrade should disable automatic full escalation");
+}
+
+function testRemovedVerificationFlagsFailFast() {
+  const repo = tmpdir("removed-verification-flags");
+  const result = run("python3", [assetAp, "--repo", repo, "commit-push", "T1", "--msg", "T1: test", "--require-jenkins"], { check: false });
+  assert(result.status !== 0 && result.stderr.includes("unrecognized arguments"), "removed post-push verification flags must fail instead of being ignored");
 }
 
 function testUpgradeInstallsRuntimeRequiredByLauncher() {
@@ -511,7 +653,8 @@ testPreflightAvoidsPartialInstall();
 testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
 testMinimalSyncConvergesWithinBudget();
-testOrdinaryNodeTestIsNotPromotedToFullGate();
+testOrdinaryNodeTestIsNotPromotedToAutomaticGate();
+testAccessPasswordsAreRequiredButNeverPrintedByStatus();
 testManagedAgentModelsInheritAndOverridesSurvive();
 testForcePreservesCustomAgentsAndModelOverrides();
 testInvalidManagedAgentModelsFailStatusAndAreDroppedOnSync();
@@ -525,6 +668,8 @@ testTestingScaffoldMatchesCheckMatrixSchema();
 testReviewScaffoldLeavesBaselineGenerationToBaselineCommand();
 testUpgradePrefersModernProjectAssetsAndIgnoresRetiredTemplates();
 testUpgradeInitializesNewEngineeringDefaults();
+testUpgradeMigratesLegacyAutomaticGateToFastDefault();
+testRemovedVerificationFlagsFailFast();
 testUpgradeInstallsRuntimeRequiredByLauncher();
 testLedgerArchiveRecognizesSettledStatuses();
 testLedgerArchiveUpdatesExistingPeriodIndex();

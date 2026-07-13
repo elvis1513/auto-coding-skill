@@ -50,8 +50,22 @@ def git_output(cwd: Path, *args: str) -> str:
 
 def base_config(isolation: str | object = "worktree") -> dict:
     config = {
-        "workflow": {"mode": "dev", "profile": "auto"},
+        "workflow": {"mode": "dev", "profile": "auto", "completion": "push"},
         "project": {"name": "concurrency-test"},
+        "access": {
+            "project": {
+                "frontend": {"url": "https://project-front.test", "username": "front", "password": "front-pass"},
+                "backend": {"url": "https://project-back.test", "username": "back", "password": "back-pass"},
+            },
+            "jenkins": {
+                "frontend": {"url": "https://jenkins-front.test", "username": "front", "password": "front-pass"},
+                "backend": {"url": "https://jenkins-back.test", "username": "back", "password": "back-pass"},
+            },
+            "gitlab": {"url": "https://gitlab.test", "username": "git", "password": "git-pass"},
+            "nexus": {
+                "frontend": {"url": "https://nexus.test", "username": "nexus", "password": "nexus-pass"},
+            },
+        },
         "commands": {
             "gate_changed": "true",
             "gate_standard": "true",
@@ -448,7 +462,24 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
 
     def test_task_integrate_from_primary_pushes_target_and_cleans_task_refs(self) -> None:
-        _, repo, remote = self.make_repo()
+        root, repo, remote = self.make_repo()
+        gate_marker = root / "gate-invocations"
+        commit_hook_marker = root / "commit-hook-invocations"
+        push_hook_marker = root / "push-hook-invocations"
+        engineering = repo / "docs" / "ENGINEERING.md"
+        original = engineering.read_text(encoding="utf-8")
+        configured = original.replace(
+            "gate_changed: 'true'",
+            f"gate_changed: 'printf x >> {gate_marker}'",
+        )
+        self.assertNotEqual(original, configured)
+        engineering.write_text(configured, encoding="utf-8")
+        git(repo, "add", "docs/ENGINEERING.md")
+        git(repo, "commit", "-qm", "configure observable fast gate")
+        git(repo, "push", "-q", "origin", "dev")
+        self.install_hook(repo, "pre-commit", f"printf c >> '{commit_hook_marker}'\n")
+        self.install_hook(repo, "pre-push", f"printf p >> '{push_hook_marker}'\n")
+
         worktree = self.start_task(repo, "INTEGRATE-1")
         (worktree / "integrated.txt").write_text("integrated\n", encoding="utf-8")
         self.ap(
@@ -457,6 +488,12 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "INTEGRATE-1",
             "--msg",
             "INTEGRATE-1: ready",
+        )
+        task_commit = git_output(worktree, "rev-parse", "HEAD")
+        self.assertEqual("c", commit_hook_marker.read_text(encoding="utf-8"))
+        self.assertFalse(
+            push_hook_marker.exists(),
+            "the internal backup push must not duplicate the final pre-push hook",
         )
 
         rejected = self.ap(worktree, "task-integrate", "INTEGRATE-1", check=False)
@@ -475,6 +512,36 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assert_local_branch(repo, "codex/INTEGRATE-1", False)
         self.assert_remote_branch(remote, "codex/INTEGRATE-1", False)
+        self.assertEqual("x", gate_marker.read_text(encoding="utf-8"), "push flow must run the fast gate exactly once")
+        self.assertEqual("c", commit_hook_marker.read_text(encoding="utf-8"), "push flow must create exactly one hook-visible commit")
+        self.assertEqual("p", push_hook_marker.read_text(encoding="utf-8"), "the final target push hook must run exactly once")
+        self.assertEqual(task_commit, git_output(remote, "rev-parse", "refs/heads/dev"), "integration must not create a second evidence commit")
+
+    def test_task_integrate_rejects_legacy_gate_failed_state(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "FAILED-GATE")
+        (worktree / "must-not-integrate.txt").write_text("blocked\n", encoding="utf-8")
+        self.ap(
+            worktree,
+            "commit-push",
+            "FAILED-GATE",
+            "--msg",
+            "FAILED-GATE: staged task",
+        )
+        registry = self.registry_manifest_path(repo, "FAILED-GATE")
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+        payload["state"] = "gate-failed"
+        registry.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = self.ap(repo, "task-integrate", "FAILED-GATE", check=False)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("committed and pushed", (result.stdout + result.stderr).lower())
+        self.assertTrue(worktree.exists())
+        self.assertNotEqual(
+            0,
+            git(remote, "cat-file", "-e", "refs/heads/dev:must-not-integrate.txt", check=False).returncode,
+        )
 
     def test_task_finish_keep_remote_reports_retained_branch(self) -> None:
         _, repo, remote = self.make_repo()
@@ -1174,8 +1241,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         worktree = self.start_task(repo, "MUTATE-1")
         engineering = worktree / "docs" / "ENGINEERING.md"
         text = engineering.read_text(encoding="utf-8")
-        text = text.replace("gate_standard: 'true'", "gate_standard: 'printf gate-change >> shared.txt'")
-        text = text.replace("gate_full: 'true'", "gate_full: 'printf gate-change >> shared.txt'")
+        text = text.replace("gate_changed: 'true'", "gate_changed: 'printf gate-change >> shared.txt'")
         engineering.write_text(text, encoding="utf-8")
         git(worktree, "add", "docs/ENGINEERING.md")
         git(worktree, "commit", "-qm", "configure mutating gate")

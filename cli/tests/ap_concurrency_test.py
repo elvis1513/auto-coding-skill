@@ -49,7 +49,7 @@ def git_output(cwd: Path, *args: str) -> str:
     return git(cwd, *args).stdout.strip()
 
 
-def base_config(isolation: str | object = "worktree") -> dict:
+def base_config(isolation: str | object = "adaptive") -> dict:
     config = {
         "workflow": {"mode": "dev", "profile": "auto", "completion": "push"},
         "project": {"name": "concurrency-test"},
@@ -109,7 +109,7 @@ def base_config(isolation: str | object = "worktree") -> dict:
 class AutoCodingConcurrencyTests(unittest.TestCase):
     def make_repo(
         self,
-        isolation: str | object = "worktree",
+        isolation: str | object = "adaptive",
     ) -> tuple[Path, Path, Path]:
         temp = tempfile.TemporaryDirectory(prefix="autocoding-concurrency-")
         self.addCleanup(temp.cleanup)
@@ -1632,7 +1632,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("must be worktree", result.stdout + result.stderr)
+        self.assertIn("must be adaptive or worktree", result.stdout + result.stderr)
         self.assertEqual(before, git_output(legacy_repo, "rev-parse", "HEAD"))
         self.assertEqual(
             "baseline",

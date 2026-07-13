@@ -39,7 +39,7 @@ access:
       password: ""
 
 concurrency:
-  isolation: "worktree"
+  isolation: "adaptive"
   base_ref: ""
   target_branch: ""
   branch_prefix: "codex/"
@@ -121,7 +121,7 @@ docs:
 
 # Engineering Workflow
 
-<!-- auto-coding-skill:managed-workflow:start version=3.0.2 -->
+<!-- auto-coding-skill:managed-workflow:start version=3.0.3 -->
 
 This file is the single project workflow configuration. Keep it in Git. Its YAML
 frontmatter and content outside these versioned markers are manually maintained;
@@ -162,8 +162,8 @@ Required for normal development:
   initialization incomplete and block `doctor`; keep each value as an inline
   YAML string, quoting values that resemble numbers, dates, booleans, or YAML
   collections
-- `concurrency.isolation`: the only supported value is `worktree`; shared-checkout
-  and legacy write modes are rejected
+- `concurrency.isolation`: use `adaptive`; a clean serial task works directly on
+  the current branch, while dirty or parallel write work uses isolated worktrees
 - `concurrency.base_ref` and `target_branch`: leave blank to derive the current
   upstream, or set them explicitly for a fixed integration branch
 - `concurrency.branch_prefix` and `worktree_root`
@@ -180,7 +180,7 @@ changed gate. `quick_test` remains the only fallback when `gate_changed` is
 absent. Run `doctor` for exact missing-field diagnostics.
 
 If the actual changed gate fails only because a dependency already declared in
-the repository lockfile is not installed in the task worktree, restore that
+the repository lockfile is not installed in the working checkout, restore that
 locked dependency locally (for example with `npm ci`) and rerun the same changed
 gate once. Do not install dependencies or restart a standard/full diagnostic
 that was invoked outside the normal development gate, and never promote this
@@ -188,8 +188,12 @@ recovery into a full-gate run.
 
 ## Concurrent write tasks
 
-Run every write task in a registered Git worktree and task branch. Do not share
-the primary worktree between writers.
+For one serial write task, inspect the current checkout first. If it is clean,
+develop directly on the current branch, run the changed gate once, commit, and
+push without creating a temporary branch. If it already contains changes, or if
+multiple writers will run concurrently, preserve the checkout and use one
+registered task branch/worktree per writer. Never share one worktree between
+writers. Clean temporary worktrees and merged task branches after integration.
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> \
@@ -268,9 +272,10 @@ work concurrently.
    it is not post-push acceptance.
 2. The main agent merges discovery evidence and decides the design, dependency
    graph, and non-overlapping path ownership.
-3. Assign each independent write unit to exactly one `fixer`, one registered task
-   branch, and one worktree. Never run two writers in one worktree, and do not let
-   the main agent edit a fixer-owned worktree concurrently.
+3. Assign each independent write unit to exactly one `fixer`. A single serial
+   fixer may use a clean current branch; dirty checkouts and parallel fixers each
+   require a registered task branch/worktree. Never run two writers in one worktree.
+   Do not let the main agent edit a fixer-owned worktree concurrently.
 4. Parallelize fixer units only when they are dependency-free and their owned
    paths do not overlap. Complete implementation → review → gate/integration for
    the current dependency wave, then start the next wave only after its
@@ -292,7 +297,8 @@ work concurrently.
 `classify` emits a machine-readable `agent_plan` with this stage and ownership
 contract. Micro tasks remain main-agent-only unless useful independent work
 clearly exceeds delegation overhead. If the client cannot run subagents, execute
-the same stages sequentially without weakening worktree isolation.
+the same stages sequentially and check for a clean current branch before creating
+any temporary worktree.
 
 ## Default workflow
 
@@ -302,7 +308,7 @@ Development:
 2. Analyze and decompose the request; run or reason through `classify --scope auto`.
 3. Fan out independent discovery roles, then fan their results back into one main-agent design.
 4. Record the smallest useful design note; create DD/ADR only when indicated.
-5. Start one registered worktree per independent write unit with explicit owned paths, dependency SHAs, and writer lease.
+5. Use the clean current branch for one serial writer; only dirty or parallel work starts registered worktrees with explicit owned paths, dependency SHAs, and writer leases.
 6. Review stable diffs, record their fingerprints with `task-review`, and return findings to their owning fixers until approved.
 7. Hand the writer lease to the main agent. The main agent runs `commit-push` for each write task; it enforces ownership,
    dependency, lease, and current-review gates, executes the one changed-scope fast gate, records
@@ -369,8 +375,9 @@ python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py gate-profile
 ```
 
-`light-gate` is available for an explicit gate-diagnostic task. Do not run it
-before normal `commit-push`; `commit-push` owns the single automatic gate.
+`light-gate` is available for an explicit gate-diagnostic task. Do not add it to
+normal closure. Run exactly one configured changed gate directly on a clean
+serial branch or through `commit-push` for isolated work.
 
 The launcher under `docs/tools/autopipeline` delegates to the single runtime in
 `.agents/skills/auto-coding-skill/scripts`; do not duplicate that runtime.

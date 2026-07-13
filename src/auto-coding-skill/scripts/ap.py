@@ -49,7 +49,7 @@ _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "3.0.2", "engineering": "3.0.2"},
+    "managed_versions": {"agents": "3.0.3", "engineering": "3.0.3"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -682,8 +682,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if not isinstance(concurrency_cfg, dict):
         concurrency_cfg = {}
         cfg["concurrency"] = concurrency_cfg
-    if _text(concurrency_cfg.get("isolation")).lower() != "worktree":
-        concurrency_cfg["isolation"] = "worktree"
+    if _text(concurrency_cfg.get("isolation")).lower() != "adaptive":
+        concurrency_cfg["isolation"] = "adaptive"
         changed.append("concurrency.isolation")
 
     return changed
@@ -1500,10 +1500,10 @@ def _concurrency_cfg(cfg: dict) -> dict:
 
 
 def _task_isolation(cfg: dict) -> str:
-    isolation = _text(_concurrency_cfg(cfg).get("isolation")).lower() or "worktree"
-    if isolation != "worktree":
+    isolation = _text(_concurrency_cfg(cfg).get("isolation")).lower() or "adaptive"
+    if isolation not in {"adaptive", "worktree"}:
         raise APError(
-            "concurrency.isolation must be worktree; shared-checkout/legacy writes are no longer supported"
+            "concurrency.isolation must be adaptive or worktree; legacy shared-checkout mode is unsupported"
         )
     return isolation
 
@@ -4072,7 +4072,7 @@ def _agent_contract_shape() -> tuple[dict, list[str]]:
                 "depends_on",
                 "acceptance",
             ],
-            "writer": ["task_branch", "worktree_path", "owned_paths"],
+            "writer": ["execution_mode", "owned_paths", "task_branch/worktree_path when isolated"],
             "reviewer": [
                 "task_id",
                 "diff_base",
@@ -4136,6 +4136,7 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
             "strategy": "main-only",
             "policies": {
                 "one_writer_per_worktree": True,
+                "workspace_isolation": "adaptive-clean-current-or-isolated",
                 "path_ownership": "explicit-non-overlapping",
                 "dependency_policy": "integrate-before-dependent-start",
                 "review_feedback_owner": "main",
@@ -4171,6 +4172,7 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
         "strategy": "orchestrated-subagents",
         "policies": {
             "one_writer_per_worktree": True,
+            "workspace_isolation": "adaptive-clean-current-or-isolated",
             "path_ownership": "explicit-non-overlapping",
             "dependency_policy": "integrate-before-dependent-start",
             "review_feedback_owner": "owning-fixer",
@@ -4234,12 +4236,12 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
         ],
         "constraints": [
             "Delegate only independent bounded work and declare dependencies before dispatch.",
-            "Every fixer owns exactly one registered task branch/worktree and an explicit path scope.",
+            "One serial fixer may use a clean current branch; dirty or parallel writers require registered task branches/worktrees.",
             "Never run two writers in one worktree or let the main agent edit a fixer-owned worktree concurrently.",
             "Start a dependent write task only after its prerequisite has been integrated into the target branch.",
             "Subagents do not commit, push, integrate, or clean task branches.",
             "Reviewers inspect a stable diff; changes-requested returns to the owning fixer and any edit requires re-review.",
-            "The main agent routes review feedback, runs the single fast gate for each write task, integrates in dependency order, pushes, and cleans branches.",
+            "The main agent routes review feedback, runs one fast gate, pushes, and cleans only temporary branches/worktrees that were actually created.",
         ],
     })
 
@@ -4688,10 +4690,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         missing.append("workflow.profile (must be auto, micro, standard, or high-risk)")
     if completion != "push":
         missing.append("workflow.completion (must be push)")
-    isolation = _text(concurrency_cfg.get("isolation")).lower() or "worktree"
-    if isolation != "worktree":
+    isolation = _text(concurrency_cfg.get("isolation")).lower() or "adaptive"
+    if isolation not in {"adaptive", "worktree"}:
         validation_errors.append(
-            "concurrency.isolation must be worktree; shared-checkout/legacy writes are no longer supported"
+            "concurrency.isolation must be adaptive or worktree; legacy shared-checkout mode is unsupported"
         )
     branch_prefix = _text(concurrency_cfg.get("branch_prefix")) or "codex/"
     if not branch_prefix.endswith("/"):

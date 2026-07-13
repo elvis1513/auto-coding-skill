@@ -903,10 +903,11 @@ function legacyGateEscalationTokens(text){
     const key = match?.[1] || "";
     const value = match?.[2]?.trim() || "";
     if (key === "full_on") tokens.push("gate.full_on (legacy automatic full escalation)");
-    if (key === "full_on_unknown" && /^(?:true|yes|on|1)(?:\s+#.*)?$/i.test(value)) {
+    if (key === "full_on_unknown" && /^(?:true|yes|on|1)$/i.test(frontmatterScalarValue(value))) {
       tokens.push("gate.full_on_unknown=true (legacy automatic full escalation)");
     }
     if (key === "rules") {
+      if (value && value !== "[]") tokens.push("gate.rules inline value (run upgrade to migrate safely)");
       rulesIndent = indent;
       continue;
     }
@@ -1063,8 +1064,8 @@ function projectStatus(project, assetSkill, assetAgents){
       .filter(({ item, state }) => state.present && item.filled === true && !frontmatterValueIsFilled(state.value))
       .map(({ item }) => item.label);
     const isolationState = frontmatterPathState(text, ["concurrency", "isolation"]);
-    if (isolationState.present && frontmatterScalarValue(isolationState.value).toLowerCase() !== "worktree") {
-      invalidConfigTokens.push("concurrency.isolation (must be worktree)");
+    if (isolationState.present && !["adaptive", "worktree"].includes(frontmatterScalarValue(isolationState.value).toLowerCase())) {
+      invalidConfigTokens.push("concurrency.isolation (must be adaptive or worktree)");
     }
     invalidConfigTokens.push(...legacyGateEscalationTokens(text));
   }
@@ -1097,7 +1098,7 @@ function projectStatus(project, assetSkill, assetAgents){
   } else if (missingConfigPaths.length) {
     next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
   } else if (invalidConfigTokens.length) {
-    next = "run project-local ap.py upgrade --write to migrate concurrency.isolation to worktree, then run doctor";
+    next = "run project-local ap.py upgrade --write to migrate concurrency.isolation to adaptive, then run doctor";
   } else if (unfilledConfigTokens.length) {
     next = "fill every required value in docs/ENGINEERING.md, then run project-local ap.py doctor";
   }

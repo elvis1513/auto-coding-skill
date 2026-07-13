@@ -4,6 +4,14 @@ A generic `.agents` engineering workflow with isolated parallel worktrees, fast
 local validation, push-based completion, required access configuration, and safe
 branch cleanup.
 
+## What changed in v3.0.3
+
+- Made workspace isolation adaptive: one serial task uses a clean current branch;
+  dirty checkouts or concurrent writers use isolated task branches/worktrees.
+- Kept one changed-scope fast gate as the complete local validation step and
+  avoided temporary branches when they provide no isolation benefit.
+- Fixed quoted and inline legacy gate YAML detection in CLI status.
+
 ## What changed in v3.0.2
 
 - Added controlled synchronization for the root `AGENTS.md` workflow bridge as
@@ -89,7 +97,7 @@ branch cleanup.
   advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
   model inheritance.
 
-This section records historical v2 behavior. The v3.0.2 workflow above supersedes
+This section records historical v2 behavior. The v3.0.3 workflow above supersedes
 its full-gate and verify-mode rules for normal development.
 
 ## Install
@@ -161,7 +169,7 @@ worktree.
 
 ```yaml
 concurrency:
-  isolation: worktree
+  isolation: adaptive
   base_ref: origin/dev
   target_branch: dev
   branch_prefix: codex/

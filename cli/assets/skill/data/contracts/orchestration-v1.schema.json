@@ -82,6 +82,10 @@
         "acceptance": {
           "$ref": "#/$defs/stringArray"
         },
+        "execution_mode": {
+          "type": "string",
+          "enum": ["direct", "isolated"]
+        },
         "task_branch": {
           "type": "string",
           "minLength": 1
@@ -123,9 +127,21 @@
           },
           "then": {
             "required": [
-              "task_branch",
-              "worktree_path",
+              "execution_mode",
               "owned_paths"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "execution_mode": { "const": "isolated" }
+                  },
+                  "required": ["execution_mode"]
+                },
+                "then": {
+                  "required": ["task_branch", "worktree_path"]
+                }
+              }
             ]
           }
         },

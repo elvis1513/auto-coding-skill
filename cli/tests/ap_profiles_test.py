@@ -27,7 +27,7 @@ def run(repo: Path, *args: str) -> None:
 def base_config() -> dict:
     return {
         "workflow": {"mode": "dev", "profile": "auto", "completion": "push"},
-        "concurrency": {"isolation": "worktree"},
+        "concurrency": {"isolation": "adaptive"},
         "project": {"name": "profile-test"},
         "access": {
             "project": {
@@ -557,7 +557,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         repo, _ = self.make_repo(config=cfg)
         with self.assertRaises(APError) as context:
             ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
-        self.assertIn("must be worktree", str(context.exception))
+        self.assertIn("must be adaptive or worktree", str(context.exception))
 
     def test_doctor_requires_one_fast_gate_for_every_profile(self) -> None:
         for profile in ["micro", "standard", "high-risk", "auto"]:

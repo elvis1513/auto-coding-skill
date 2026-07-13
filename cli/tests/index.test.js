@@ -210,7 +210,7 @@ function testMinimalSyncConvergesWithinBudget() {
   assert(lines <= 10000, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
-  assert(engineering.includes("isolation: \"worktree\""), "engineering should require task worktree isolation");
+  assert(engineering.includes("isolation: \"adaptive\""), "engineering should default to adaptive clean-branch/worktree isolation");
   assert(engineering.includes('completion: "push"'), "engineering should complete normal development at push");
   assert(engineering.includes('gate_changed: "git diff --check"'), "generic projects should receive the fast diff gate");
   assert(engineering.includes(`name: "${path.basename(repo)}"`), "project name should be initialized automatically");
@@ -256,7 +256,7 @@ function testStatusRejectsLegacyIsolation() {
   fillRequiredAccess(repo);
   const engineeringPath = path.join(repo, "docs", "ENGINEERING.md");
   const engineering = fs.readFileSync(engineeringPath, "utf8").replace(
-    'isolation: "worktree"',
+    'isolation: "adaptive"',
     'isolation: "legacy"',
   );
   fs.writeFileSync(engineeringPath, engineering);
@@ -265,7 +265,7 @@ function testStatusRejectsLegacyIsolation() {
   assert(result.status !== 0, "status must reject legacy isolation");
   const parsed = JSON.parse(result.stdout).results[0];
   assert(
-    parsed.invalidConfigTokens.includes("concurrency.isolation (must be worktree)"),
+    parsed.invalidConfigTokens.includes("concurrency.isolation (must be adaptive or worktree)"),
     `status should identify the invalid isolation value: ${result.stdout}`,
   );
   assert(parsed.next.includes("upgrade --write"), "status should direct legacy projects through upgrade");
@@ -278,7 +278,7 @@ function testStatusRejectsLegacyGateEscalation() {
   const engineeringPath = path.join(repo, "docs", "ENGINEERING.md");
   const engineering = fs.readFileSync(engineeringPath, "utf8").replace(
     '  full_on_unknown: false\n  no_change_scope: "changed"\n  profile_log:',
-    '  full_on_unknown: true\n  full_on: ["prod_config"]\n  no_change_scope: "changed"\n  rules:\n    - match: ["Jenkinsfile"]\n      scope: "full"\n      commands: ["gate_full"]\n  profile_log:',
+    '  full_on_unknown: "true"\n  full_on: ["prod_config"]\n  no_change_scope: "changed"\n  rules:\n    - match: ["Jenkinsfile"]\n      scope: "full"\n      commands: ["gate_full"]\n  profile_log:',
   );
   fs.writeFileSync(engineeringPath, engineering);
   const status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
@@ -636,7 +636,7 @@ function testUpgradeMigratesLegacyAutomaticGateToFastDefault() {
   assert(engineering.includes("gate_changed: git diff --check"), "upgrade should replace the v3 auto-seeded npm test gate");
   assert(engineering.includes("mode: dev"), "upgrade should migrate verify mode to fast development mode");
   assert(engineering.includes("completion: push"), "upgrade should add push completion");
-  assert(engineering.includes("isolation: worktree"), "upgrade should migrate legacy isolation to worktree");
+  assert(engineering.includes("isolation: adaptive"), "upgrade should migrate legacy isolation to adaptive");
   for (const key of ["default_scope", "fallback_scope", "no_change_scope"]) {
     assert(engineering.includes(`${key}: changed`), `upgrade should migrate gate.${key} to changed`);
   }
@@ -719,7 +719,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=3\.0\.2 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=3\.0\.3 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -738,7 +738,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "3.0.2", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "3.0.3", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
@@ -748,14 +748,14 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
   assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
   assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
-  assert(updated.includes("version=3.0.2"), "sync should install the current managed workflow version");
+  assert(updated.includes("version=3.0.3"), "sync should install the current managed workflow version");
   assert(updated.includes("## Execution profiles"), "sync should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "3.0.2", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "3.0.3", "status should expose the installed managed workflow version");
 
   const beforeSecondSync = fs.readFileSync(engineering, "utf8");
   const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
@@ -783,7 +783,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=3.0.2"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=3.0.3"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
   const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
   const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
@@ -915,7 +915,7 @@ function testManagedAgentsMigrationPreservesCustomRules() {
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=3.0.2"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=3.0.3"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -932,7 +932,7 @@ function testManagedAgentsMigrationPreservesCustomRules() {
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=3.0.2"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("managed-agents:start version=3.0.3"), "AGENTS migration should install the current managed block");
   assert(migrated.includes("Preserve this repository-specific rule exactly."), "AGENTS migration must preserve unrelated custom rules");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
   const stable = fs.readFileSync(agents);

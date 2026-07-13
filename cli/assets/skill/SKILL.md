@@ -12,9 +12,10 @@ gate → push workflow. The project keeps one manual configuration source:
 At task start, inventory installed skills, MCP servers, connectors, browser
 tools, and repository scripts. Prefer the most direct authoritative capability.
 The main agent decomposes the task before dispatch. Run independent read-only
-discovery roles in parallel when the runtime supports them. Assign each
-independent write unit to exactly one fixer in its own registered worktree;
-never share a write worktree between agents.
+discovery roles in parallel when the runtime supports them. A single serial
+writer uses the current branch when its checkout is clean. Dirty checkouts and
+parallel writers use one registered worktree per fixer; never share a write
+worktree between agents.
 
 ## Install and upgrade
 
@@ -65,15 +66,18 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto
 # or --intent-file when the working tree does not yet describe the task.
 ```
 
-`light-gate` remains available for an explicit gate-diagnostic task. Do not run
-it before normal `commit-push`; `commit-push` owns the single automatic gate.
+`light-gate` remains available for an explicit gate-diagnostic task. Do not add
+it before normal closure. The main agent runs exactly one configured changed
+gate directly on a clean serial branch or through `commit-push` for isolated work.
 
-## Parallel write isolation
+## Adaptive write isolation
 
-Every task that may write files must use its own registered Git worktree and
-task branch. Read-only discovery may stay in the primary worktree. A registered
-worktree has exactly one writer. The main agent and other fixers must not edit it
-while its owning fixer is active.
+For one serial writer, inspect the current checkout before creating anything. If
+it is clean, use its current branch directly. If it already has changes, or two
+or more writers will run concurrently, preserve the checkout and use one
+registered task branch/worktree per writer. Read-only discovery may stay in the
+primary worktree. A worktree has exactly one writer; no other agent may edit it
+while that writer is active. The lifecycle commands below are for isolated mode.
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> \
@@ -151,24 +155,27 @@ explicitly recovered.
    in parallel, then let the main agent merge their evidence into one design.
 3. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
    flow, or lasting structural decisions.
-4. Start one registered task worktree per independent write unit and assign one
-   fixer to it. Parallelize only dependency-free units with non-overlapping paths;
-   deliver implementation → review → gate/integration in dependency waves, and
-   start the next wave only after its prerequisites are integrated.
+4. For one serial writer, inspect the current checkout first and work directly on
+   its current branch when it is clean. Create registered task branches/worktrees
+   only when the checkout already has changes or multiple writers run in parallel.
+   Never share one worktree between writers; parallelize only dependency-free
+   units with non-overlapping paths.
 5. Review each stable diff with a read-only reviewer. Route blocking findings to
    the owning fixer and re-review after any change. The main agent records the
    current verdict with `task-review`, then hands the writer lease back before Git
    closure when required.
-6. After all agents have returned, the main agent runs `commit-push` for each
-   write task; it executes the changed-scope fast gate once, records
-   `DEV-CLOSED`, commits, and pushes the task branch.
+6. After all agents have returned, the main agent executes the changed-scope fast
+   gate once, records `DEV-CLOSED`, commits, and pushes. Use `commit-push` for
+   registered isolated tasks; on a clean serial current branch, commit and push
+   that branch directly without creating a temporary branch.
    If that configured fast gate fails only because a dependency already present
    in the lockfile is not installed locally, restore the locked dependencies and
    rerun that same fast gate once. Missing dependencies in an accidentally or
    explicitly invoked standard/full diagnostic do not justify dependency
    installation or a full-gate rerun.
-7. The main agent runs `task-integrate` in dependency order to push the target
-   branch and clean every task worktree and merged task branch.
+7. For isolated tasks, the main agent runs `task-integrate` in dependency order
+   and cleans every task worktree and merged task branch. Direct serial work has
+   no temporary branch to clean.
 8. Stop. Jenkins owns later build/deploy work and the project owner owns actual
    acceptance. Ignore later external failures unless the user opens a diagnostic task.
 
@@ -205,9 +212,10 @@ For standard and high-risk write tasks, use the following fan-out/fan-in contrac
    role, scope, dependencies, acceptance criteria, and expected output.
 2. Discovery roles are read-only and may run in parallel. Browser work is limited
    to requested reproduction/evidence; it does not replace owner acceptance.
-3. Each fixer receives a task branch, absolute worktree path, and owned paths.
-   It may edit only that worktree and must not commit, push, integrate, clean, or
-   run the project gate.
+3. Each fixer receives `execution_mode` and owned paths. Direct mode also names
+   the clean current checkout; isolated mode supplies a task branch and absolute
+   worktree path. It may edit only its assigned checkout and must not commit,
+   push, integrate, clean, or run the project gate.
 4. Each reviewer receives a stable diff and binds approved or changes-requested
    to its fingerprint. Changes go back to the same fixer and invalidate approval.
 5. Every subagent returns exactly one JSON object conforming to

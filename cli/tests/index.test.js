@@ -207,7 +207,7 @@ function testMinimalSyncConvergesWithinBudget() {
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
   assert(files.length <= 23, `minimal scaffold file budget exceeded: ${files.length}`);
-  assert(lines <= 9500, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(lines <= 10000, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: \"worktree\""), "engineering should require task worktree isolation");
@@ -269,6 +269,24 @@ function testStatusRejectsLegacyIsolation() {
     `status should identify the invalid isolation value: ${result.stdout}`,
   );
   assert(parsed.next.includes("upgrade --write"), "status should direct legacy projects through upgrade");
+}
+
+function testStatusRejectsLegacyGateEscalation() {
+  const repo = tmpdir("legacy-gate-status");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const engineeringPath = path.join(repo, "docs", "ENGINEERING.md");
+  const engineering = fs.readFileSync(engineeringPath, "utf8").replace(
+    '  full_on_unknown: false\n  no_change_scope: "changed"\n  profile_log:',
+    '  full_on_unknown: true\n  full_on: ["prod_config"]\n  no_change_scope: "changed"\n  rules:\n    - match: ["Jenkinsfile"]\n      scope: "full"\n      commands: ["gate_full"]\n  profile_log:',
+  );
+  fs.writeFileSync(engineeringPath, engineering);
+  const status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(status.status === 2, "legacy automatic gate escalation must make status non-zero");
+  const invalid = JSON.parse(status.stdout).results[0].invalidConfigTokens;
+  for (const expected of ["gate.full_on", "gate.full_on_unknown", "gate.rules[].scope", "gate.rules[].commands"]) {
+    assert(invalid.some(item => item.includes(expected)), `status should report ${expected}`);
+  }
 }
 
 function testOrdinaryNodeTestIsNotPromotedToAutomaticGate() {
@@ -933,7 +951,7 @@ function testUnknownWorkflowConflictFailsWholeBatchBeforeWrites() {
   const firstSkill = path.join(first, ".agents", "skills", "auto-coding-skill", "SKILL.md");
   writeFile(firstSkill, "batch-sentinel\n");
   const secondAgents = path.join(second, "AGENTS.md");
-  fs.appendFileSync(secondAgents, "\n- High-risk changes must run the real full gate before push.\n");
+  fs.appendFileSync(secondAgents, "\n- High-risk changes\n  must run the real full gate before push.\n");
 
   const status = run("node", [cli, "status", "--projects", second, "--json"], { check: false });
   assert(status.status !== 0, "status must be non-ok for an unknown conflicting workflow rule");
@@ -964,6 +982,7 @@ testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
 testMinimalSyncConvergesWithinBudget();
 testStatusRejectsLegacyIsolation();
+testStatusRejectsLegacyGateEscalation();
 testOrdinaryNodeTestIsNotPromotedToAutomaticGate();
 testAccessPasswordsAreRequiredButNeverPrintedByStatus();
 testManagedAgentModelsInheritAndOverridesSurvive();

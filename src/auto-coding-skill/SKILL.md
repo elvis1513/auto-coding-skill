@@ -162,6 +162,11 @@ explicitly recovered.
 6. After all agents have returned, the main agent runs `commit-push` for each
    write task; it executes the changed-scope fast gate once, records
    `DEV-CLOSED`, commits, and pushes the task branch.
+   If that configured fast gate fails only because a dependency already present
+   in the lockfile is not installed locally, restore the locked dependencies and
+   rerun that same fast gate once. Missing dependencies in an accidentally or
+   explicitly invoked standard/full diagnostic do not justify dependency
+   installation or a full-gate rerun.
 7. The main agent runs `task-integrate` in dependency order to push the target
    branch and clean every task worktree and merged task branch.
 8. Stop. Jenkins owns later build/deploy work and the project owner owns actual

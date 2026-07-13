@@ -73,10 +73,10 @@ def base_config(isolation: str | object = "worktree") -> dict:
             "gate_full": "true",
         },
         "gate": {
-            "default_scope": "auto",
-            "fallback_scope": "standard",
-            "full_on_unknown": True,
-            "no_change_scope": "standard",
+            "default_scope": "changed",
+            "fallback_scope": "changed",
+            "full_on_unknown": False,
+            "no_change_scope": "changed",
             "rules": [],
         },
         "structure": {"enabled": False, "enforcement": "advisory"},
@@ -245,7 +245,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
     def test_task_start_rejects_unknown_full_gate_policy_before_creating_branch(self) -> None:
         _, repo, _ = self.make_repo()
         (repo / "AGENTS.md").write_text(
-            "# Workflow\nRuntime changes require the full gate.\n",
+            "# Workflow\n- High-risk work\n  must run the real full gate before push.\n",
             encoding="utf-8",
         )
         result = self.ap(
@@ -261,6 +261,32 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("AGENTS.md:2", result.stdout + result.stderr)
         self.assert_local_branch(repo, "codex/POLICY-START", False)
+
+    def test_task_start_rejects_legacy_gate_yaml_before_creating_branch(self) -> None:
+        _, repo, _ = self.make_repo()
+        engineering = repo / "docs" / "ENGINEERING.md"
+        text = engineering.read_text(encoding="utf-8").replace(
+            "  full_on_unknown: false\n",
+            "  full_on_unknown: true\n  full_on:\n  - prod_config\n",
+        ).replace(
+            "  rules: []\n",
+            "  rules:\n  - match:\n    - Jenkinsfile\n    scope: full\n    commands:\n    - gate_full\n",
+        )
+        engineering.write_text(text, encoding="utf-8")
+        result = self.ap(
+            repo,
+            "task-start",
+            "POLICY-YAML",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            ".",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("gate.full_on", result.stdout + result.stderr)
+        self.assertIn("gate.rules[0].scope", result.stdout + result.stderr)
+        self.assert_local_branch(repo, "codex/POLICY-YAML", False)
 
     def test_commit_push_rejects_policy_added_after_task_start(self) -> None:
         _, repo, _ = self.make_repo()

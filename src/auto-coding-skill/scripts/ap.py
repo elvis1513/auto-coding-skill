@@ -1180,6 +1180,8 @@ def _load_workflow_migration_policy(repo: Path) -> dict:
             raise APError(f"Workflow migration policy fragment[{index}] is incomplete")
         if not isinstance(fragment.get("text"), str) or not fragment["text"].strip():
             raise APError(f"Workflow migration policy fragment[{index}] has empty text")
+        if "replacement" in fragment and not isinstance(fragment.get("replacement"), str):
+            raise APError(f"Workflow migration policy fragment[{index}] replacement must be text")
     for index, rule in enumerate(policy["conflict_rules"]):
         if not isinstance(rule, dict):
             raise APError(f"Workflow migration policy conflict_rules[{index}] must be an object")
@@ -1254,19 +1256,21 @@ def _known_fragment_spans(
     visible: str,
     rel: str,
     policy: dict,
-) -> list[tuple[int, int, str, int]]:
-    found: list[tuple[int, int, str, int]] = []
+) -> list[tuple[int, int, str, int, str, str]]:
+    found: list[tuple[int, int, str, int, str, str]] = []
     for fragment in policy.get("known_official_fragments") or []:
         if rel not in fragment.get("paths", []):
             continue
         fragment_id = _text(fragment.get("id"))
+        replacement = str(fragment.get("replacement") or "")
+        match_mode = _text(fragment.get("match"))
         expected = str(fragment.get("text") or "").replace("\r\n", "\n")
         if fragment.get("match") == "exact-line":
             cursor = 0
             for line in visible.splitlines(keepends=True):
                 content = line.rstrip("\n")
                 if content.strip() == expected.strip():
-                    found.append((cursor, cursor + len(line), fragment_id, visible.count("\n", 0, cursor) + 1))
+                    found.append((cursor, cursor + len(line), fragment_id, visible.count("\n", 0, cursor) + 1, replacement, match_mode))
                 cursor += len(line)
             continue
         cursor = 0
@@ -1275,7 +1279,7 @@ def _known_fragment_spans(
             if start < 0:
                 break
             end = start + len(expected)
-            found.append((start, end, fragment_id, visible.count("\n", 0, start) + 1))
+            found.append((start, end, fragment_id, visible.count("\n", 0, start) + 1, replacement, match_mode))
             cursor = end
     return found
 
@@ -1310,28 +1314,35 @@ def _workflow_document_plan(repo: Path, rel: str, policy: dict) -> dict:
             visible = _blank_text_span(visible, body_start, len(visible))
 
     known = _known_fragment_spans(visible, rel, policy)
-    known_spans = _merge_text_spans([(start, end) for start, end, _, _ in known])
+    known_spans = _merge_text_spans([(start, end) for start, end, _, _, _, _ in known])
     scan_text = visible
     for start, end in known_spans:
         scan_text = _blank_text_span(scan_text, start, end)
 
     issues: list[str] = []
+    candidates = _workflow_scan_candidates(scan_text)
+    seen_issues: set[tuple[str, int]] = set()
     for rule in policy.get("conflict_rules") or []:
         if rel not in rule.get("paths", []):
             continue
         regex = re.compile(_text(rule.get("pattern")), _workflow_regex_flags(_text(rule.get("flags"))))
-        for match in regex.finditer(scan_text):
-            line = scan_text.count("\n", 0, match.start()) + 1
+        for candidate, line in candidates:
+            match = regex.search(candidate)
+            if not match or (_text(rule.get("id")), line) in seen_issues:
+                continue
+            seen_issues.add((_text(rule.get("id")), line))
             snippet = " ".join(match.group(0).strip().split())[:180]
             message = _text(rule.get("message")) or "conflicts with the fast development workflow"
             issues.append(f"{rel}:{line} [{_text(rule.get('id'))}] {message}: {snippet}")
 
     output = original
-    for start, end in reversed(known_spans):
-        output = output[:start] + output[end:]
+    for start, end, _, _, replacement, match_mode in sorted(known, reverse=True):
+        if replacement and match_mode == "exact-line" and output[start:end].endswith("\n"):
+            replacement = replacement + "\n"
+        output = output[:start] + replacement + output[end:]
     migrations = [
         {"id": fragment_id, "line": line}
-        for _, _, fragment_id, line in known
+        for _, _, fragment_id, line, _, _ in known
     ]
     if official_body_hash:
         migrations.append({"id": f"official-body:{official_body_hash}", "line": 1})
@@ -1353,7 +1364,56 @@ def _workflow_policy_plans(repo: Path, policy: Optional[dict] = None) -> list[di
     ]
 
 
-def _workflow_policy_issues(repo: Path) -> list[str]:
+def _workflow_scan_candidates(text: str) -> list[tuple[str, int]]:
+    lines = text.split("\n")
+    candidates: list[tuple[str, int]] = [(line, index + 1) for index, line in enumerate(lines)]
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if re.match(r"^\s*(?:[-+*]|\d+\.)\s+", line):
+            end = index + 1
+            while end < len(lines) and re.match(r"^\s{2,}\S", lines[end]) and not re.match(
+                r"^\s*(?:[-+*]|\d+\.)\s+", lines[end]
+            ):
+                end += 1
+            if end > index + 1:
+                candidates.append((" ".join(lines[index:end]), index + 1))
+            continue
+        if re.match(r"^\s*(?:#|\||```|~~~)", line):
+            continue
+        end = index + 1
+        while end < len(lines) and lines[end].strip() and not re.match(
+            r"^\s*(?:#|\||```|~~~|[-+*]|\d+\.)\s*", lines[end]
+        ):
+            end += 1
+        if end > index + 1:
+            candidates.append((" ".join(lines[index:end]), index + 1))
+    return candidates
+
+
+def _legacy_gate_config_issues(cfg: dict) -> list[str]:
+    issues: list[str] = []
+    gate_cfg = cfg.get("gate") or {}
+    if not isinstance(gate_cfg, dict):
+        return ["docs/ENGINEERING.md frontmatter gate must be a mapping"]
+    if "full_on" in gate_cfg:
+        issues.append("docs/ENGINEERING.md frontmatter gate.full_on is legacy automatic full escalation; run ap.py upgrade")
+    if _bool_config(gate_cfg.get("full_on_unknown"), False):
+        issues.append("docs/ENGINEERING.md frontmatter gate.full_on_unknown=true is legacy automatic full escalation; run ap.py upgrade")
+    rules = gate_cfg.get("rules") or []
+    if isinstance(rules, list):
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            for key in ["scope", "commands"]:
+                if key in rule:
+                    issues.append(
+                        f"docs/ENGINEERING.md frontmatter gate.rules[{index}].{key} is legacy automatic gate escalation; run ap.py upgrade"
+                    )
+    return issues
+
+
+def _workflow_policy_issues(repo: Path, cfg: Optional[dict] = None) -> list[str]:
     issues: list[str] = []
     for plan in _workflow_policy_plans(repo):
         issues.extend(plan["issues"])
@@ -1362,11 +1422,12 @@ def _workflow_policy_issues(repo: Path) -> list[str]:
                 f"{plan['path']}:{migration['line']} [{migration['id']}] known legacy workflow rule; "
                 "run `ap.py upgrade --dry-run` then `ap.py upgrade --write`"
             )
+    issues.extend(_legacy_gate_config_issues(cfg if cfg is not None else _load_cfg(repo)))
     return issues
 
 
-def _require_workflow_policy_clean(repo: Path) -> None:
-    issues = _workflow_policy_issues(repo)
+def _require_workflow_policy_clean(repo: Path, cfg: Optional[dict] = None) -> None:
+    issues = _workflow_policy_issues(repo, cfg)
     if issues:
         raise APError("Workflow policy conflicts block normal development:\n- " + "\n- ".join(issues))
 
@@ -4616,7 +4677,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     missing: List[str] = []
     validation_errors: List[str] = []
-    validation_errors.extend(_workflow_policy_issues(repo))
+    validation_errors.extend(_workflow_policy_issues(repo, cfg))
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
     profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
@@ -5926,7 +5987,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
-    _require_workflow_policy_clean(repo)
+    _require_workflow_policy_clean(repo, cfg)
     _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
@@ -6965,7 +7026,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
-    _require_workflow_policy_clean(repo)
+    _require_workflow_policy_clean(repo, cfg)
     manifest = _require_task_context(repo, cfg, args.task_id)
     _require_current_writer(manifest, args)
     lock_name = f"task-{_validate_task_id(args.task_id)}"

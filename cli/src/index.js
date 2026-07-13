@@ -501,7 +501,13 @@ function applyKnownOfficialFragments(text, documentPath, policy){
     } else {
       throw new Error(`unsupported workflow migration match '${fragment.match}' for ${fragment.id}`);
     }
-    const updated = output.replace(pattern, "");
+    const replacement = typeof fragment.replacement === "string" ? fragment.replacement : "";
+    const updated = output.replace(pattern, matched => {
+      if (!replacement) return "";
+      if (fragment.match !== "exact-line") return replacement;
+      const eol = matched.endsWith("\r\n") ? "\r\n" : (matched.endsWith("\n") ? "\n" : "");
+      return `${replacement}${eol}`;
+    });
     if (updated !== output) {
       migrations.push(fragment.id);
       output = updated;
@@ -878,6 +884,39 @@ function frontmatterPathState(text, keyPath){
   return { present: false, value: "" };
 }
 
+function legacyGateEscalationTokens(text){
+  const frontmatter = extractFrontmatter(text);
+  if (!frontmatter) return [];
+  const tokens = [];
+  let gateIndent = null;
+  let rulesIndent = null;
+  for (const rawLine of frontmatter.split(/\r?\n/)) {
+    if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue;
+    const indent = rawLine.match(/^\s*/)[0].replace(/\t/g, "  ").length;
+    const match = rawLine.trim().match(/^(?:-\s*)?([A-Za-z0-9_-]+)\s*:(.*)$/);
+    if (gateIndent === null) {
+      if (match?.[1] === "gate") gateIndent = indent;
+      continue;
+    }
+    if (indent <= gateIndent) break;
+    if (rulesIndent !== null && indent <= rulesIndent) rulesIndent = null;
+    const key = match?.[1] || "";
+    const value = match?.[2]?.trim() || "";
+    if (key === "full_on") tokens.push("gate.full_on (legacy automatic full escalation)");
+    if (key === "full_on_unknown" && /^(?:true|yes|on|1)(?:\s+#.*)?$/i.test(value)) {
+      tokens.push("gate.full_on_unknown=true (legacy automatic full escalation)");
+    }
+    if (key === "rules") {
+      rulesIndent = indent;
+      continue;
+    }
+    if (rulesIndent !== null && indent > rulesIndent && (key === "scope" || key === "commands")) {
+      tokens.push(`gate.rules[].${key} (legacy automatic gate escalation)`);
+    }
+  }
+  return [...new Set(tokens)];
+}
+
 function frontmatterValueIsFilled(raw){
   const source = String(raw || "");
   let quote = "";
@@ -1025,8 +1064,9 @@ function projectStatus(project, assetSkill, assetAgents){
       .map(({ item }) => item.label);
     const isolationState = frontmatterPathState(text, ["concurrency", "isolation"]);
     if (isolationState.present && frontmatterScalarValue(isolationState.value).toLowerCase() !== "worktree") {
-      invalidConfigTokens = ["concurrency.isolation (must be worktree)"];
+      invalidConfigTokens.push("concurrency.isolation (must be worktree)");
     }
+    invalidConfigTokens.push(...legacyGateEscalationTokens(text));
   }
   const missingConfigTokens = [...missingConfigPaths, ...unfilledConfigTokens, ...invalidConfigTokens];
   const scriptDiffs = [];

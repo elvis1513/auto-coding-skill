@@ -4,6 +4,21 @@ A generic `.agents` engineering workflow with isolated parallel worktrees, fast
 local validation, push-based completion, required access configuration, and safe
 branch cleanup.
 
+## What changed in v3.0.2
+
+- Added controlled synchronization for the root `AGENTS.md` workflow bridge as
+  well as the managed `ENGINEERING.md` workflow block.
+- Migrated known legacy rules that required full local gates, verify mode, or
+  Jenkins polling during normal development while preserving project facts and
+  unrelated custom instructions.
+- Made project status, sync, doctor, and task lifecycle commands fail closed on
+  unknown workflow instructions that conflict with the changed-scope fast gate.
+- Removed legacy YAML escalation fields during upgrade while keeping explicit
+  full-gate commands available for user-requested diagnostics.
+- Clarified that locked dependencies may be restored only when the configured
+  changed-scope gate actually needs them, after which only that same fast gate is
+  rerun.
+
 ## What changed in v3.0.1
 
 - Fixed normal development to analysis → decomposition → design → development →
@@ -74,7 +89,7 @@ branch cleanup.
   advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
   model inheritance.
 
-This section records historical v2 behavior. The v3.0.1 workflow above supersedes
+This section records historical v2 behavior. The v3.0.2 workflow above supersedes
 its full-gate and verify-mode rules for normal development.
 
 ## Install

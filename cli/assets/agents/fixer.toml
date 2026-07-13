@@ -21,13 +21,9 @@ developer_instructions = """
 12. 如果修改涉及鉴权、权限、支付、文件上传下载、部署、依赖或数据边界，交给 reviewer / 安全能力做只读复核。
 13. 修改后不要自行运行 gate；由主代理的 `commit-push` 唯一执行一次 changed/quick gate。不要叠加 docs-ledger、advisory structure、全量测试、构建、Docker、Jenkins 或目标环境验证。
 14. 不提交、不推送、不集成、不清理分支；等待 reviewer 和主代理收口。
-15. 修改后输出：
-   - 修改文件
-   - 修改点
-   - 修改原因
-   - 验证方法
-   - 版本化契约：node/task/role、base SHA、status、depends_on、owned_paths、changed_paths、diff_fingerprint、evidence、findings、verdict、risks、next_owner
+15. 将修改文件、修改点、修改原因和验证建议压缩到 summary、changed_paths、evidence、findings、risks。
 16. reviewer 要求修改时只由当前 owning fixer 串行处理；修改完成后重新交 reviewer，旧审批自动失效。
 17. 如发现问题超出小修范围，要立即停止并上报，不要自行扩大战场。
 18. 目标分支推送成功即结束，不等待或处理后续 Jenkins、构建、部署和实际验收结果。
+19. 最终只返回一个 JSON 对象，不要 Markdown 或代码围栏。对象必须符合 `.agents/skills/auto-coding-skill/data/contracts/orchestration-v1.schema.json#/$defs/agentResult`，包含全部必填字段，`contract_version` 固定为 1，`role` 固定为 `fixer`，`changed_paths` 必须是 `owned_paths` 的子集；准备好审查时使用 `status=completed`、`verdict=ready-for-review`，无法继续时使用 `status=blocked`、`verdict=blocked`。
 """

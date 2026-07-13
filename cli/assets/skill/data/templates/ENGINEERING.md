@@ -121,8 +121,12 @@ docs:
 
 # Engineering Workflow
 
-This file is the single manually maintained workflow configuration. Keep it in
-Git. Fill every access URL, username, and password during project initialization.
+<!-- auto-coding-skill:managed-workflow:start version=3.0.1 -->
+
+This file is the single project workflow configuration. Keep it in Git. Its YAML
+frontmatter and content outside these versioned markers are manually maintained;
+`autocoding sync` updates only this managed workflow block. Fill every access URL,
+username, and password during project initialization.
 
 ## Execution profiles
 
@@ -181,18 +185,39 @@ Run every write task in a registered Git worktree and task branch. Do not share
 the primary worktree between writers.
 
 ```bash
-python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> \
+  --owned-path <PATH> [--owned-path <PATH> ...] \
+  [--depends-on <TASK_ID>=<SHA> ...] [--writer <WRITER>]
 # Enter the worktree path printed by task-start.
 python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py task-review <TASK_ID> \
+  --verdict approved --diff-fingerprint <SHA256> [--reviewer <REVIEWER>]
+python3 docs/tools/autopipeline/ap.py task-handoff <TASK_ID> \
+  --from <WRITER> --to <WRITER> [--generation <N>]
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
+  --msg "<TASK_ID>: <summary>" [--writer <WRITER>]
 python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-resume <TASK_ID>
 ```
 
 `task-start` fixes the task's base revision and records its task branch and
-worktree in the repository manifest. Run `commit-push` only from that registered
-worktree. Stage only task-owned paths. If an unknown change appears, stop and
-report it; never restore, reset, stash, clean, or otherwise alter it.
+worktree, repeated `owned_paths`, dependency task/SHA pairs, and the active writer
+lease in the repository manifest. Run `commit-push` only from that registered
+worktree. Changed and staged paths must be a subset of `owned_paths`; an unknown
+change blocks the push and must never be restored, reset, stashed, cleaned, or
+otherwise altered.
+
+The lifecycle fields are runtime gates, not advisory notes. `task-review` records
+the reviewer verdict against the current diff fingerprint; any edit, rebase, or
+conflict resolution invalidates that approval. `task-handoff` is the only way to
+transfer the writer lease, and its generation check prevents stale owners from
+resuming writes. `commit-push` validates the active writer (explicit `--writer`
+or `CODEX_THREAD_ID`), path ownership, exact dependency SHAs, and an approved
+current fingerprint before it runs the single fast gate. `task-integrate` repeats
+the dependency and review checks. If integration stops on a conflict, resolve it
+inside the task worktree, run `task-resume`, obtain a fresh review, and then retry
+integration. A target rebase likewise requires a fresh review.
 
 The task commit runs project commit hooks once. The internal backup task-branch
 push skips the pre-push hook; the final target-branch push runs it once.
@@ -240,14 +265,17 @@ work concurrently.
    prerequisites are integrated into the target branch.
 5. A read-only `reviewer` checks a stable diff after implementation and binds its
    verdict to the diff fingerprint. Blocking findings return to the owning fixer;
-   any edit invalidates approval and requires re-review.
+   any edit invalidates approval and requires re-review. Record the final verdict
+   with `task-review` before handing the writer lease back to the main agent.
 6. Subagents never commit, push, integrate, clean branches, or run the project
    gate. Their versioned result contains node/task/role, base SHA, status,
    dependencies, owned and changed paths, diff fingerprint, evidence, findings,
    verdict, risks, and next owner. Read-only roles return no changed paths.
-7. After all required results return, the main agent alone runs the single fast
-   gate for each write task, commits, integrates in dependency order, pushes, and
-   cleans all temporary branches and worktrees.
+7. After all required results return, use `task-handoff` to transfer the lease to
+   the main agent. The main agent alone runs `commit-push` for each write task,
+   which validates the current review and runs the single fast gate, then
+   integrates in dependency order, pushes, and cleans all temporary branches and
+   worktrees.
 
 `classify` emits a machine-readable `agent_plan` with this stage and ownership
 contract. Micro tasks remain main-agent-only unless useful independent work
@@ -262,9 +290,10 @@ Development:
 2. Analyze and decompose the request; run or reason through `classify --scope auto`.
 3. Fan out independent discovery roles, then fan their results back into one main-agent design.
 4. Record the smallest useful design note; create DD/ADR only when indicated.
-5. Start one registered worktree per independent write unit and assign one fixer to each.
-6. Review stable diffs and return findings to their owning fixers until approved.
-7. The main agent runs `commit-push` for each write task; it executes the one changed-scope fast gate, records
+5. Start one registered worktree per independent write unit with explicit owned paths, dependency SHAs, and writer lease.
+6. Review stable diffs, record their fingerprints with `task-review`, and return findings to their owning fixers until approved.
+7. Hand the writer lease to the main agent. The main agent runs `commit-push` for each write task; it enforces ownership,
+   dependency, lease, and current-review gates, executes the one changed-scope fast gate, records
    `DEV-CLOSED`, commits, and pushes the task branch.
 8. The main agent runs `task-integrate` in dependency order to push the target branch and clean the task worktree and
    merged task branches. This completes the push stage and ends the coding task.
@@ -317,8 +346,11 @@ python3 docs/tools/autopipeline/ap.py structure-check --scope auto
 python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-review <TASK_ID> --verdict approved --diff-fingerprint <SHA256>
+python3 docs/tools/autopipeline/ap.py task-handoff <TASK_ID> --from <WRITER> --to <WRITER>
 python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
 python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-resume <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-finish <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-prune
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
@@ -330,3 +362,5 @@ before normal `commit-push`; `commit-push` owns the single automatic gate.
 
 The launcher under `docs/tools/autopipeline` delegates to the single runtime in
 `.agents/skills/auto-coding-skill/scripts`; do not duplicate that runtime.
+
+<!-- auto-coding-skill:managed-workflow:end -->

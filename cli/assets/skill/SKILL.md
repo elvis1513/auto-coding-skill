@@ -61,6 +61,8 @@ Run the configuration and impact preflight:
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
+# Before development, add repeatable --planned-path values and either --intent
+# or --intent-file when the working tree does not yet describe the task.
 ```
 
 `light-gate` remains available for an explicit gate-diagnostic task. Do not run
@@ -74,19 +76,39 @@ worktree has exactly one writer. The main agent and other fixers must not edit i
 while its owning fixer is active.
 
 ```bash
-python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> \
+  --owned-path <PATH> --depends-on <TASK_ID=SHA> --writer <WRITER>
 # Continue in the worktree path printed by task-start.
 python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py task-review <TASK_ID> \
+  --verdict approved --diff-fingerprint <SHA256> --reviewer <REVIEWER>
+python3 docs/tools/autopipeline/ap.py task-handoff <TASK_ID> \
+  --from <WRITER> --to <WRITER> [--generation <N>]
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> \
+  --msg "<TASK_ID>: <summary>" [--writer <WRITER>]
 python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+# After resolving an integration rebase conflict:
+python3 docs/tools/autopipeline/ap.py task-resume <TASK_ID>
 ```
 
-`task-start` records the base revision, target branch, task branch, and worktree
-in the repository manifest. `commit-push` is valid only inside that task's
-registered worktree and may stage only changes owned by that task. If unknown
-changes appear, stop and report them. Never restore, reset, stash, clean, or
-otherwise modify another task's or the user's changes.
+`task-start` records the base revision, target branch, task branch, worktree,
+owned paths, prerequisite task SHAs, and writer lease in the repository manifest.
+Pass one `--owned-path` per owned path and one `--depends-on TASK_ID=SHA` per
+prerequisite. The writer defaults to `CODEX_THREAD_ID`; pass `--writer` only when
+an explicit stable identity is needed. Use `task-handoff` for an intentional
+lease transfer; its generation check prevents a stale writer from reclaiming the
+task. `commit-push` is valid only for the active writer inside the registered
+worktree and may stage only owned paths. If unknown changes appear, stop and
+report them. Never restore, reset, stash, clean, or otherwise modify another
+task's or the user's changes.
+
+After a reviewer returns, the main agent records the verdict and exact 64-character
+diff fingerprint with `task-review`. Any content change invalidates that review.
+`commit-push` and `task-integrate` require a current approval for the current
+fingerprint and verify prerequisite SHAs. If integration enters a rebase conflict,
+resolve it in the registered worktree, continue or abort the rebase as instructed,
+then run `task-resume`; do not bypass the conflicted manifest state.
 
 Treat `commit-push` plus `task-integrate` as one push stage. Run the fast gate
 only in `commit-push`; integration fetches/rebases, safely pushes the target, and
@@ -134,7 +156,9 @@ explicitly recovered.
    deliver implementation → review → gate/integration in dependency waves, and
    start the next wave only after its prerequisites are integrated.
 5. Review each stable diff with a read-only reviewer. Route blocking findings to
-   the owning fixer and re-review after any change.
+   the owning fixer and re-review after any change. The main agent records the
+   current verdict with `task-review`, then hands the writer lease back before Git
+   closure when required.
 6. After all agents have returned, the main agent runs `commit-push` for each
    write task; it executes the changed-scope fast gate once, records
    `DEV-CLOSED`, commits, and pushes the task branch.
@@ -181,9 +205,11 @@ For standard and high-risk write tasks, use the following fan-out/fan-in contrac
    run the project gate.
 4. Each reviewer receives a stable diff and binds approved or changes-requested
    to its fingerprint. Changes go back to the same fixer and invalidate approval.
-5. Every subagent returns the versioned contract fields, including node/task/role,
-   base SHA, dependencies, owned and changed paths, diff fingerprint, evidence,
-   findings, verdict, risks, and next owner. Read-only roles return no changed paths.
+5. Every subagent returns exactly one JSON object conforming to
+   `data/contracts/orchestration-v1.schema.json#/$defs/agentResult`, with integer
+   `contract_version: 1`. It includes node/task/role, base SHA, dependencies,
+   owned and changed paths, diff fingerprint, evidence, findings, verdict, risks,
+   and next owner. Read-only roles return no changed paths.
 6. The main agent alone owns architecture decisions, the single fast gate per
    write task, closure records, commits, integration, push, and branch cleanup.
 
@@ -210,11 +236,14 @@ python3 docs/tools/autopipeline/ap.py scaffold all --write
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py docs-ledger-archive --plan
 python3 docs/tools/autopipeline/ap.py gate-profile
-python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> --owned-path <PATH> [--depends-on <TASK_ID=SHA>] [--writer <WRITER>]
 python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
-python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>"
+python3 docs/tools/autopipeline/ap.py task-review <TASK_ID> --verdict <VERDICT> --diff-fingerprint <SHA256> [--reviewer <REVIEWER>]
+python3 docs/tools/autopipeline/ap.py task-handoff <TASK_ID> --from <WRITER> --to <WRITER> [--generation <N>]
+python3 docs/tools/autopipeline/ap.py commit-push <TASK_ID> --msg "<TASK_ID>: <summary>" [--writer <WRITER>]
 python3 docs/tools/autopipeline/ap.py task-integrate <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-resume <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-finish <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-prune
 ```

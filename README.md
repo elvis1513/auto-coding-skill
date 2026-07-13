@@ -4,7 +4,7 @@ A generic `.agents` engineering workflow with isolated parallel worktrees, fast
 local validation, push-based completion, required access configuration, and safe
 branch cleanup.
 
-## What changed in v4.0.0
+## What changed in v3.0.1
 
 - Fixed normal development to analysis → decomposition → design → development →
   one changed-scope fast gate → push.
@@ -20,6 +20,13 @@ branch cleanup.
   mandatory for every write task.
 - Added a structured subagent plan with parallel discovery, one-writer worktree
   ownership, reviewer feedback loops, and main-agent Git lifecycle ownership.
+- Enforced task-owned paths, dependency revisions, writer leases, and
+  fingerprint-bound review approvals in the task runtime.
+- Added review, writer handoff, and conflicted-rebase resume lifecycle commands.
+- Added planned paths and task intent to pre-development classification and
+  published a stable orchestration contract.
+- Added controlled `ENGINEERING.md` workflow synchronization while preserving
+  project configuration and custom content.
 
 ## What changed in v3.0.0
 
@@ -34,7 +41,7 @@ branch cleanup.
   updating to the latest remote target.
 - Automatically removed integrated worktrees and local task branches, with safe
   lease-based remote task-branch cleanup and merged-branch pruning.
-- Initially kept a `legacy` compatibility escape hatch; v4 removes that path and
+- Initially kept a `legacy` compatibility escape hatch; v3.0.1 removes that path and
   migrates existing configuration to mandatory worktree isolation.
 
 ## What changed in v2.2.1
@@ -67,7 +74,7 @@ branch cleanup.
   advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
   model inheritance.
 
-This section records historical v2 behavior. The v4 workflow above supersedes
+This section records historical v2 behavior. The v3.0.1 workflow above supersedes
 its full-gate and verify-mode rules for normal development.
 
 ## Install
@@ -347,8 +354,8 @@ npm test
 npm run release:check
 ```
 
-Use `release:check` only when preparing a package release. It synchronizes source
-assets, validates Python 3.11 grammar and TOML, runs the broader regressions, and
-performs `npm pack --dry-run`.
+Run `npm run sync-assets` explicitly after source changes. `release:check` is a
+read-only release gate: it rejects asset drift, validates Python 3.11 grammar and
+TOML, runs the broader regressions, and performs `npm pack --dry-run`.
 
 License: MIT.

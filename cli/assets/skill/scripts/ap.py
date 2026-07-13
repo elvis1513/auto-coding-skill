@@ -44,6 +44,8 @@ _GENERATED_NOISE_PATTERNS = [
     ".DS_Store",
     "**/.DS_Store",
 ]
+_AGENT_CONTRACT_VERSION = 1
+_AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _DEFAULT_DISPOSABLE_IGNORED_PATTERNS = [
     ".local/auto-coding-skill",
     ".local/auto-coding-skill/**",
@@ -1258,6 +1260,33 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         raise APError(
             f"Task worktree must be outside its control checkout for {task_id}: {worktree}"
         )
+    owned_paths = manifest.get("owned_paths")
+    if not isinstance(owned_paths, list) or not owned_paths or not all(
+        isinstance(item, str) and item for item in owned_paths
+    ):
+        raise APError(f"Task {task_id} has no valid owned_paths; refusing lifecycle operations.")
+    depends_on = manifest.get("depends_on")
+    prerequisite_shas = manifest.get("prerequisite_shas")
+    if not isinstance(depends_on, list) or not isinstance(prerequisite_shas, dict):
+        raise APError(f"Task {task_id} has an invalid dependency contract.")
+    if set(depends_on) != set(prerequisite_shas):
+        raise APError(f"Task {task_id} dependency IDs and prerequisite SHAs do not match.")
+    for dependency, sha in prerequisite_shas.items():
+        _validate_task_id(str(dependency))
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", _text(sha)):
+            raise APError(f"Task {task_id} has an invalid prerequisite SHA for {dependency}.")
+    lease = manifest.get("writer_lease")
+    if not isinstance(lease, dict) or not _text(lease.get("holder")):
+        raise APError(f"Task {task_id} has an invalid writer lease.")
+    if int(lease.get("generation") or 0) < 1 or _text(lease.get("state")) != "active":
+        raise APError(f"Task {task_id} writer lease is not active.")
+    review = manifest.get("review")
+    if not isinstance(review, dict) or _text(review.get("verdict")) not in {
+        "pending",
+        "approved",
+        "changes-requested",
+    }:
+        raise APError(f"Task {task_id} has an invalid review contract.")
     return manifest
 
 
@@ -1456,6 +1485,160 @@ def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
 
 def _task_commit_paths(repo: Path) -> list[str]:
     return [path for path in _working_tree_paths(repo) if not _is_generated_noise_path(path)]
+
+
+def _normalize_owned_path(value: object) -> str:
+    raw = _text(value).replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    normalized = posixpath.normpath(raw)
+    if (
+        not raw
+        or raw.startswith("/")
+        or normalized == ".."
+        or normalized.startswith("../")
+        or normalized == ".git"
+        or normalized.startswith(".git/")
+    ):
+        raise APError(f"Owned paths must be safe repository-relative paths: {value!r}")
+    return normalized
+
+
+def _path_is_owned(path: str, owned_paths: list[str]) -> bool:
+    normalized = _normalize_owned_path(path)
+    return any(
+        owner == "." or normalized == owner or normalized.startswith(owner.rstrip("/") + "/")
+        for owner in owned_paths
+    )
+
+
+def _task_managed_paths(cfg: dict, manifest: dict) -> list[str]:
+    docs_cfg = cfg.get("docs") or {}
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    return sorted(
+        {
+            f"{(_text(docs_cfg.get('active_task_dir')) or 'docs/tasks/active').rstrip('/')}/{task_id}.md",
+            f"{(_text(docs_cfg.get('task_closure_dir')) or 'docs/tasks/closures').rstrip('/')}/{task_id}.md",
+            f"{(_text(docs_cfg.get('task_evidence_dir')) or 'docs/tasks/evidence').rstrip('/')}/{task_id}.jsonl",
+        }
+    )
+
+
+def _task_changed_paths_from_base(repo: Path, base_sha: str) -> list[str]:
+    paths = set(
+        _checked_git_z_paths(
+            repo,
+            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base_sha, "--"],
+            "task diff paths",
+        )
+    )
+    paths.update(
+        _checked_git_z_paths(
+            repo,
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            "task untracked paths",
+        )
+    )
+    return sorted(path.replace("\\", "/") for path in paths if not _is_generated_noise_path(path))
+
+
+def _task_unowned_paths(repo: Path, cfg: dict, manifest: dict) -> list[str]:
+    owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
+    managed = set(_task_managed_paths(cfg, manifest))
+    return [
+        path
+        for path in _task_changed_paths_from_base(repo, _text(manifest.get("base_sha")))
+        if path not in managed and not _path_is_owned(path, owned)
+    ]
+
+
+def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> str:
+    base_sha = _text(manifest.get("base_sha"))
+    owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
+    managed = set(_task_managed_paths(cfg or _load_cfg(repo), manifest))
+    paths = [
+        path
+        for path in _task_changed_paths_from_base(repo, base_sha)
+        if path not in managed and _path_is_owned(path, owned)
+    ]
+    digest = hashlib.sha256()
+    digest.update(f"contract:{_AGENT_CONTRACT_VERSION}\nbase:{base_sha}\n".encode("utf-8"))
+    for rel in paths:
+        digest.update(f"path:{rel}\0".encode("utf-8", errors="surrogateescape"))
+        path = repo / rel
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            digest.update(b"missing\0")
+            continue
+        digest.update(f"mode:{mode:o}\0".encode("ascii"))
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+        elif path.is_file():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"non-file")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _invalidate_task_review(manifest: dict, reason: str) -> None:
+    manifest["review"] = {
+        "verdict": "pending",
+        "diff_base": _text(manifest.get("base_sha")),
+        "diff_head": "",
+        "diff_fingerprint": "",
+        "reviewer": "",
+        "reviewed_at": "",
+        "reason": reason,
+    }
+
+
+def _actor_id(args: argparse.Namespace, field: str = "writer") -> str:
+    actor = _text(getattr(args, field, "")) or _text(os.environ.get("CODEX_THREAD_ID"))
+    if not actor:
+        raise APError(f"A stable --{field.replace('_', '-')} or CODEX_THREAD_ID is required.")
+    if any(char in actor for char in "\0\r\n"):
+        raise APError("Actor identity contains invalid characters.")
+    return actor
+
+
+def _require_current_writer(manifest: dict, args: argparse.Namespace) -> str:
+    actor = _actor_id(args, "writer")
+    lease = manifest.get("writer_lease") or {}
+    if _text(lease.get("state")) != "active" or actor != _text(lease.get("holder")):
+        raise APError(
+            f"Writer lease mismatch: current={actor}, holder={_text(lease.get('holder')) or '(missing)'}."
+        )
+    return actor
+
+
+def _require_dependencies(repo: Path, manifest: dict, ancestor_ref: str) -> None:
+    for dependency in manifest.get("depends_on") or []:
+        sha = _text((manifest.get("prerequisite_shas") or {}).get(dependency))
+        if run(
+            ["git", "merge-base", "--is-ancestor", sha, ancestor_ref],
+            cwd=repo,
+            check=False,
+        ).returncode != 0:
+            raise APError(
+                f"Prerequisite {dependency} at {sha} is not integrated into {ancestor_ref}."
+            )
+
+
+def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
+    unowned = _task_unowned_paths(repo, cfg, manifest)
+    if unowned:
+        raise APError("Changes outside task owned_paths:\n- " + "\n- ".join(unowned))
+    fingerprint = _task_review_fingerprint(repo, manifest)
+    review = manifest.get("review") or {}
+    if _text(review.get("verdict")) != "approved":
+        raise APError("Task review must be approved before commit-push or integration.")
+    if _text(review.get("diff_fingerprint")) != fingerprint:
+        raise APError("Approved review fingerprint is stale for the current owned diff.")
+    if _text(review.get("diff_base")) != _text(manifest.get("base_sha")):
+        raise APError("Approved review base is stale for the current task base.")
+    return fingerprint
 
 
 def _unstaged_task_paths(repo: Path) -> list[str]:
@@ -3422,13 +3605,17 @@ def _classify_paths(paths: list[str]) -> dict:
             categories.add("docs")
         if any(token in lower for token in ["domain", "service", "usecase", "repository", "infrastructure", "adapter", "shared", "utils"]):
             categories.add("structure")
+    return _classification_for_categories(categories, len(paths))
+
+
+def _classification_for_categories(categories: set[str], file_count: int) -> dict:
     return {
         "categories": sorted(categories),
         "needs_dd": bool(
             categories
             & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config", "release_or_tooling"}
         )
-        or len(paths) > 12,
+        or file_count > 12,
         "needs_adr": bool(categories & {"structure", "release_or_tooling"}) and not categories <= {"docs"},
         "needs_browser": "ui" in categories,
         "needs_jenkins": bool(
@@ -3438,6 +3625,29 @@ def _classify_paths(paths: list[str]) -> dict:
             categories & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config", "ui"}
         ),
     }
+
+
+def _classify_intent(intent: str) -> list[str]:
+    value = _text(intent).lower()
+    keyword_categories = {
+        "db": ["database", "migration", "schema", "sql", "数据库", "数据迁移", "表结构"],
+        "api": ["api", "controller", "endpoint", "接口", "控制器"],
+        "auth": ["auth", "permission", "security", "登录", "认证", "鉴权", "权限", "安全"],
+        "payment": ["payment", "billing", "checkout", "支付", "账单", "结算"],
+        "file_transfer": ["upload", "download", "上传", "下载", "附件"],
+        "gateway": ["gateway", "ingress", "nginx", "网关", "反向代理"],
+        "prod_config": ["production config", "prod config", "生产配置"],
+        "release_or_tooling": ["release", "deploy", "jenkins", "nexus", "发布", "部署", "构建"],
+        "ui": ["frontend", "page", "component", "ui", "前端", "页面", "组件", "界面"],
+        "test": ["test", "spec", "测试"],
+        "docs": ["documentation", "docs", "文档"],
+        "structure": ["refactor", "architecture", "重构", "架构", "分层"],
+    }
+    return sorted(
+        category
+        for category, keywords in keyword_categories.items()
+        if any(keyword in value for keyword in keywords)
+    )
 
 
 def _normalize_workflow_profile(value: object, default: str = "auto") -> str:
@@ -3460,42 +3670,9 @@ def _recommended_agents(profile: str, categories: set[str], classification: dict
     return roles
 
 
-def _agent_execution_plan(profile: str, categories: set[str], classification: dict) -> dict:
-    if profile == "micro":
-        return {
-            "strategy": "main-only",
-            "stages": [
-                {
-                    "id": "delivery",
-                    "mode": "serial",
-                    "roles": ["main"],
-                    "depends_on": [],
-                }
-            ],
-            "constraints": [
-                "Do not create subagents when the task has no independent work worth delegating.",
-                "The main agent owns the fast gate, Git integration, push, and cleanup.",
-            ],
-        }
-
-    discovery_roles = ["explorer"]
-    if categories & {"api", "release_or_tooling"}:
-        discovery_roles.append("docs_researcher")
-    if classification.get("needs_browser"):
-        discovery_roles.append("browser_debugger")
-
-    return {
-        "strategy": "orchestrated-subagents",
-        "policies": {
-            "one_writer_per_worktree": True,
-            "path_ownership": "explicit-non-overlapping",
-            "dependency_policy": "integrate-before-dependent-start",
-            "review_feedback_owner": "owning-fixer",
-            "review_binding": "diff-fingerprint",
-            "lifecycle_owner": "main",
-            "gate_owner": "main",
-        },
-        "assignment_contract": {
+def _agent_contract_shape() -> tuple[dict, list[str]]:
+    return (
+        {
             "common": [
                 "contract_version",
                 "node_id",
@@ -3515,7 +3692,7 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
                 "owning_fixer",
             ],
         },
-        "result_contract": [
+        [
             "contract_version",
             "node_id",
             "role",
@@ -3533,6 +3710,87 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
             "risks",
             "next_owner",
         ],
+    )
+
+
+def _validate_agent_plan(plan: dict) -> dict:
+    required = {
+        "contract_version",
+        "contract_schema",
+        "strategy",
+        "policies",
+        "assignment_contract",
+        "result_contract",
+        "stages",
+        "constraints",
+    }
+    missing = sorted(required - set(plan))
+    if missing or plan.get("contract_version") != _AGENT_CONTRACT_VERSION:
+        raise APError("Invalid agent plan contract: " + (", ".join(missing) or "version"))
+    if plan.get("contract_schema") != _AGENT_CONTRACT_SCHEMA:
+        raise APError("Invalid agent plan schema path.")
+    if not all(
+        isinstance(stage, dict)
+        and {"id", "mode", "roles", "depends_on"} <= set(stage)
+        for stage in plan.get("stages") or []
+    ):
+        raise APError("Invalid agent plan stage contract.")
+    return plan
+
+
+def _agent_execution_plan(profile: str, categories: set[str], classification: dict) -> dict:
+    assignment_contract, result_contract = _agent_contract_shape()
+    if profile == "micro":
+        return _validate_agent_plan({
+            "contract_version": _AGENT_CONTRACT_VERSION,
+            "contract_schema": _AGENT_CONTRACT_SCHEMA,
+            "strategy": "main-only",
+            "policies": {
+                "one_writer_per_worktree": True,
+                "path_ownership": "explicit-non-overlapping",
+                "dependency_policy": "integrate-before-dependent-start",
+                "review_feedback_owner": "main",
+                "review_binding": "diff-fingerprint",
+                "lifecycle_owner": "main",
+                "gate_owner": "main",
+            },
+            "assignment_contract": assignment_contract,
+            "result_contract": result_contract,
+            "stages": [
+                {
+                    "id": "delivery",
+                    "mode": "serial",
+                    "roles": ["main"],
+                    "depends_on": [],
+                }
+            ],
+            "constraints": [
+                "Do not create subagents when the task has no independent work worth delegating.",
+                "The main agent owns the fast gate, Git integration, push, and cleanup.",
+            ],
+        })
+
+    discovery_roles = ["explorer"]
+    if categories & {"api", "release_or_tooling"}:
+        discovery_roles.append("docs_researcher")
+    if classification.get("needs_browser"):
+        discovery_roles.append("browser_debugger")
+
+    return _validate_agent_plan({
+        "contract_version": _AGENT_CONTRACT_VERSION,
+        "contract_schema": _AGENT_CONTRACT_SCHEMA,
+        "strategy": "orchestrated-subagents",
+        "policies": {
+            "one_writer_per_worktree": True,
+            "path_ownership": "explicit-non-overlapping",
+            "dependency_policy": "integrate-before-dependent-start",
+            "review_feedback_owner": "owning-fixer",
+            "review_binding": "diff-fingerprint",
+            "lifecycle_owner": "main",
+            "gate_owner": "main",
+        },
+        "assignment_contract": assignment_contract,
+        "result_contract": result_contract,
         "stages": [
             {
                 "id": "decomposition",
@@ -3594,7 +3852,7 @@ def _agent_execution_plan(profile: str, categories: set[str], classification: di
             "Reviewers inspect a stable diff; changes-requested returns to the owning fixer and any edit requires re-review.",
             "The main agent routes review feedback, runs the single fast gate for each write task, integrates in dependency order, pushes, and cleans branches.",
         ],
-    }
+    })
 
 
 def _resolve_execution_plan(
@@ -3606,6 +3864,8 @@ def _resolve_execution_plan(
     requested_mode: str = "",
     base_ref: str = "",
     changed_paths: Optional[list[str]] = None,
+    planned_paths: Optional[list[str]] = None,
+    intent: str = "",
 ) -> dict:
     impact = _impact_summary(
         cfg,
@@ -3615,9 +3875,16 @@ def _resolve_execution_plan(
         changed_paths=changed_paths,
     )
     paths = list(impact.get("changed_files") or [])
-    classification = _classify_paths(paths)
+    normalized_planned_paths = sorted(
+        {_normalize_owned_path(item) for item in (planned_paths or []) if _text(item)}
+    )
+    classification_inputs = [*paths, *normalized_planned_paths]
+    classification = _classify_paths(classification_inputs)
+    intent_categories = _classify_intent(intent)
+    merged_categories = set(classification["categories"]) | set(intent_categories)
+    classification = _classification_for_categories(merged_categories, len(classification_inputs))
     categories = set(classification["categories"])
-    matching_rules = _matching_gate_rules(paths, _gate_cfg(cfg))
+    matching_rules = _matching_gate_rules(classification_inputs, _gate_cfg(cfg))
     configured_profile = _configured_workflow_profile(cfg)
     requested_profile_value = _normalize_workflow_profile(requested_profile) if requested_profile else ""
     configured_mode = _workflow_mode(cfg)
@@ -3627,9 +3894,10 @@ def _resolve_execution_plan(
 
     detected_profile = "standard"
     profile_reasons: list[str] = []
-    docs_only_paths = _docs_only(paths)
-    docs_or_tests_only = bool(paths) and (
-        (docs_only_paths and str(impact["selected_scope"]) != "full") or _tests_only(paths)
+    docs_only_paths = _docs_only(classification_inputs)
+    docs_or_tests_only = bool(classification_inputs) and (
+        (docs_only_paths and str(impact["selected_scope"]) != "full")
+        or _tests_only(classification_inputs)
     )
     if docs_or_tests_only and str(impact["selected_scope"]) != "full":
         detected_profile = "micro"
@@ -3663,7 +3931,7 @@ def _resolve_execution_plan(
         high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
     if "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
-    if len(paths) > 12 and not docs_or_tests_only:
+    if len(classification_inputs) > 12 and not docs_or_tests_only:
         high_signals.append("change spans more than 12 files")
 
     if high_signals:
@@ -3701,6 +3969,12 @@ def _resolve_execution_plan(
     agent_plan = _agent_execution_plan(effective_profile, categories, classification)
     return {
         **impact,
+        "contract_version": _AGENT_CONTRACT_VERSION,
+        "contract_schema": _AGENT_CONTRACT_SCHEMA,
+        "planned_files": normalized_planned_paths,
+        "classification_files": classification_inputs,
+        "intent_provided": bool(_text(intent)),
+        "intent_categories": intent_categories,
         "reasons": execution_reasons,
         "configured_profile": configured_profile,
         "requested_profile": requested_profile_value or None,
@@ -3724,6 +3998,18 @@ def _resolve_execution_plan(
 def cmd_classify(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
+    intent_parts = [_text(getattr(args, "intent", ""))]
+    intent_file = _text(getattr(args, "intent_file", ""))
+    if intent_file:
+        path = Path(intent_file)
+        if not path.is_absolute():
+            path = repo / path
+        try:
+            if path.stat().st_size > 65536:
+                raise APError("--intent-file is limited to 64 KiB.")
+            intent_parts.append(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise APError(f"Cannot read --intent-file: {path}: {exc}") from exc
     plan = _resolve_execution_plan(
         cfg,
         repo,
@@ -3731,6 +4017,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
         requested_profile=_text(getattr(args, "profile", "")).lower(),
         requested_mode=_text(getattr(args, "mode", "")).lower(),
         base_ref=_text(getattr(args, "base", "")),
+        planned_paths=list(getattr(args, "planned_path", []) or []),
+        intent="\n".join(part for part in intent_parts if part),
     )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands: list[str] = []
@@ -5244,9 +5532,16 @@ def _create_active_task_doc(repo: Path, cfg: dict, manifest: dict) -> None:
                 f"- Branch: `{manifest['task_branch']}`",
                 f"- Worktree: `{manifest['worktree_path']}`",
                 f"- Orchestrator: {manifest.get('owner') or 'TODO'}",
-                "- Owning fixer: TODO",
-                "- Owned paths: TODO (explicit and non-overlapping)",
-                "- Depends on integrated tasks: none",
+                f"- Owning fixer: {(manifest.get('writer_lease') or {}).get('holder') or 'TODO'}",
+                "- Owned paths: " + ", ".join(f"`{item}`" for item in manifest.get("owned_paths") or []),
+                "- Depends on integrated tasks: "
+                + (
+                    ", ".join(
+                        f"`{item}`@`{(manifest.get('prerequisite_shas') or {}).get(item, '')[:12]}`"
+                        for item in manifest.get("depends_on") or []
+                    )
+                    or "none"
+                ),
                 "- Reviewer / stable diff: TODO",
                 "- Review verdict: pending",
                 "- Scope: TODO",
@@ -5322,6 +5617,30 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         if not getattr(args, "no_fetch", False) and base_ref.startswith(f"{remote}/"):
             _fetch_target(repo, remote, target_branch)
         base_sha = _resolve_commit(repo, base_ref)
+        owned_paths = sorted({_normalize_owned_path(item) for item in (args.owned_path or [])})
+        if not owned_paths:
+            raise APError("task-start requires at least one --owned-path.")
+        depends_on: list[str] = []
+        prerequisite_shas: dict[str, str] = {}
+        for raw_dependency in args.depends_on or []:
+            dependency, separator, sha = _text(raw_dependency).partition("=")
+            dependency = _validate_task_id(dependency)
+            if not separator or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha):
+                raise APError("--depends-on must use TASK_ID=full_commit_SHA.")
+            if dependency in prerequisite_shas and prerequisite_shas[dependency] != sha:
+                raise APError(f"Conflicting prerequisite SHAs for {dependency}.")
+            depends_on.append(dependency)
+            prerequisite_shas[dependency] = sha
+        depends_on = sorted(set(depends_on))
+        dependency_contract = {
+            "depends_on": depends_on,
+            "prerequisite_shas": prerequisite_shas,
+        }
+        _require_dependencies(repo, dependency_contract, base_sha)
+        owner = _text(getattr(args, "owner", "")) or _text(os.environ.get("CODEX_THREAD_ID"))
+        if not owner:
+            raise APError("task-start requires --owner or CODEX_THREAD_ID.")
+        writer = _text(getattr(args, "writer", "")) or owner
         prefix = _task_branch_prefix(cfg)
         task_branch = f"{prefix}{task_id}"
         check_ref = run(["git", "check-ref-format", "--branch", task_branch], cwd=repo, check=False)
@@ -5351,10 +5670,10 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             cwd=repo,
         )
         manifest = {
-            "schema": 1,
+            "schema": 2,
             "task_id": task_id,
             "task_uuid": task_uuid,
-            "owner": _text(getattr(args, "owner", "")) or os.environ.get("CODEX_THREAD_ID", "") or f"{socket.gethostname()}:{os.getpid()}",
+            "owner": owner,
             "base_ref": base_ref,
             "base_sha": base_sha,
             "remote": remote,
@@ -5366,6 +5685,24 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "state": "active",
             "created_at": _now_iso(),
             "initial_untracked": [],
+            "owned_paths": owned_paths,
+            "depends_on": depends_on,
+            "prerequisite_shas": prerequisite_shas,
+            "writer_lease": {
+                "holder": writer,
+                "generation": 1,
+                "state": "active",
+                "acquired_at": _now_iso(),
+            },
+            "review": {
+                "verdict": "pending",
+                "diff_base": base_sha,
+                "diff_head": "",
+                "diff_fingerprint": "",
+                "reviewer": "",
+                "reviewed_at": "",
+                "reason": "task started",
+            },
             "claimed_paths": [],
             "remote_task_tip": "",
             "common_submodule_config": common_submodule_config,
@@ -5434,6 +5771,9 @@ def _task_status_payload(repo: Path, manifest: dict) -> dict:
         "local_branch_exists": bool(tip),
         "tip": tip,
         "merged_into_target": merged,
+        "current_diff_fingerprint": _task_review_fingerprint(worktree, manifest)
+        if worktree.exists()
+        else "",
     }
 
 
@@ -5463,6 +5803,135 @@ def cmd_task_status(args: argparse.Namespace) -> None:
             f"branch={status.get('task_branch')} worktree={status.get('worktree_path')} "
             f"dirty={str(status['dirty']).lower()} merged={str(status['merged_into_target']).lower()}"
         )
+
+
+def _task_lifecycle_context(repo: Path, cfg: dict, task_id: str) -> tuple[Path, Path, dict]:
+    active = _active_task_manifest(repo)
+    if active:
+        manifest = _require_task_context(repo, cfg, task_id)
+        return Path(_text(manifest.get("control_worktree_path"))).resolve(), repo, manifest
+    manifest = _load_task_manifest(repo, task_id)
+    _require_control_checkout(repo, manifest)
+    return repo, Path(_text(manifest.get("worktree_path"))).resolve(), manifest
+
+
+def cmd_task_review(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        if _text(manifest.get("state")) not in {"active", "pushed", "integration-raced"}:
+            raise APError(f"Task {task_id} is not reviewable in state={manifest.get('state')}.")
+        if not worktree.exists():
+            raise APError(f"Task worktree is missing: {worktree}")
+        worktree_cfg = _load_cfg(worktree)
+        unowned = _task_unowned_paths(worktree, worktree_cfg, manifest)
+        if unowned:
+            raise APError("Changes outside task owned_paths:\n- " + "\n- ".join(unowned))
+        fingerprint = _task_review_fingerprint(worktree, manifest)
+        supplied = _text(args.diff_fingerprint)
+        if supplied != fingerprint:
+            raise APError(
+                f"Review fingerprint mismatch: supplied={supplied or '(missing)'}, current={fingerprint}."
+            )
+        reviewer = _text(getattr(args, "reviewer", "")) or _text(os.environ.get("CODEX_THREAD_ID"))
+        if not reviewer:
+            raise APError("task-review requires --reviewer or CODEX_THREAD_ID.")
+        manifest["review"] = {
+            "verdict": args.verdict,
+            "diff_base": _text(manifest.get("base_sha")),
+            "diff_head": _resolve_commit(worktree, "HEAD"),
+            "diff_fingerprint": fingerprint,
+            "reviewer": reviewer,
+            "reviewed_at": _now_iso(),
+            "reason": "",
+        }
+        _save_task_manifest(control_repo, manifest)
+    print(f"[task-review] task={task_id} verdict={args.verdict} fingerprint={fingerprint}")
+
+
+def cmd_task_handoff(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    control_repo, _, _ = _task_lifecycle_context(repo, cfg, task_id)
+    actor = _text(os.environ.get("CODEX_THREAD_ID"))
+    if not actor:
+        raise APError("task-handoff requires CODEX_THREAD_ID for the current writer.")
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        if _text(manifest.get("state")) in {"integrated", "cleanup-pending"}:
+            raise APError(f"Task {task_id} no longer accepts writer handoff.")
+        lease = manifest.get("writer_lease") or {}
+        generation = int(lease.get("generation") or 0)
+        if _text(lease.get("holder")) != args.from_writer:
+            raise APError("--from must match the current writer lease holder.")
+        if actor not in {args.from_writer, _text(manifest.get("owner"))}:
+            raise APError("Only the current writer or task lifecycle owner may hand off the task.")
+        if args.generation is not None and args.generation != generation:
+            raise APError(f"Writer lease generation changed: expected={args.generation}, current={generation}.")
+        lease.update(
+            {
+                "holder": args.to_writer,
+                "generation": generation + 1,
+                "state": "active",
+                "acquired_at": _now_iso(),
+            }
+        )
+        manifest["writer_lease"] = lease
+        _save_task_manifest(control_repo, manifest)
+    print(f"[task-handoff] task={task_id} writer={args.to_writer} generation={generation + 1}")
+
+
+def cmd_task_resume(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    manifest = _load_task_manifest(repo, task_id)
+    _require_control_checkout(repo, manifest)
+    _require_current_writer(manifest, args)
+    worktree = Path(_text(manifest.get("worktree_path"))).resolve()
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with (
+        _repo_lock(repo, "integration", timeout_s=timeout_s),
+        _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s),
+    ):
+        manifest = _load_task_manifest(repo, task_id)
+        _require_current_writer(manifest, args)
+        if _text(manifest.get("state")) != "conflicted":
+            raise APError(f"Task {task_id} is not awaiting conflict resume.")
+        for marker in ("rebase-merge", "rebase-apply"):
+            path = Path(run(["git", "rev-parse", "--git-path", marker], cwd=worktree).stdout.strip())
+            if not path.is_absolute():
+                path = worktree / path
+            if path.exists():
+                raise APError("Rebase is still in progress; resolve conflicts and run git rebase --continue first.")
+        if _git_status(worktree):
+            raise APError("Task worktree must be clean before task-resume.")
+        target_sha = _text(manifest.get("rebase_target_sha"))
+        if not target_sha or run(
+            ["git", "merge-base", "--is-ancestor", target_sha, "HEAD"],
+            cwd=worktree,
+            check=False,
+        ).returncode != 0:
+            raise APError("Resolved task HEAD does not contain the recorded rebase target.")
+        manifest["base_sha"] = target_sha
+        manifest["base_ref"] = target_sha
+        unowned = _task_unowned_paths(worktree, _load_cfg(worktree), manifest)
+        if unowned:
+            raise APError("Resolved rebase changed paths outside owned_paths:\n- " + "\n- ".join(unowned))
+        _invalidate_task_review(manifest, "rebase conflict resolved; review again")
+        manifest["state"] = "active"
+        _save_task_manifest(repo, manifest)
+        _push_current_task(worktree, manifest)
+    print(f"[task-resume] task={task_id} state=pushed review=pending")
 
 
 def cmd_task_submodule_sync(args: argparse.Namespace) -> None:
@@ -5684,6 +6153,7 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
     task_id = _validate_task_id(args.task_id)
     manifest = _load_task_manifest(repo, task_id)
     _require_control_checkout(repo, manifest)
+    _require_current_writer(manifest, args)
     worktree = Path(_text(manifest.get("worktree_path")))
     if repo.resolve() == worktree.resolve():
         raise APError("Run task-integrate from the primary/control checkout, not from the task worktree.")
@@ -5694,6 +6164,7 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
         _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s),
     ):
         manifest = _load_task_manifest(repo, task_id)
+        _require_current_writer(manifest, args)
         worktree = Path(_text(manifest.get("worktree_path")))
         if not worktree.exists():
             raise APError(f"Task worktree is missing: {worktree}")
@@ -5718,13 +6189,32 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
         target = _text(manifest.get("target_branch"))
         task_cfg = _load_cfg(worktree)
         target_sha = _fetch_target(worktree, remote, target)
-        rebase = run(["git", "rebase", target_sha], cwd=worktree, check=False)
-        if rebase.returncode != 0:
+        _require_dependencies(worktree, manifest, target_sha)
+        _require_approved_review(worktree, task_cfg, manifest)
+        if target_sha == _text(manifest.get("base_sha")):
+            rebase = None
+        else:
+            rebase = run(["git", "rebase", target_sha], cwd=worktree, check=False)
+        if rebase is not None and rebase.returncode != 0:
             manifest["state"] = "conflicted"
+            manifest["rebase_target_sha"] = target_sha
+            _invalidate_task_review(manifest, "integration rebase conflicted")
             _save_task_manifest(repo, manifest)
             raise APError(
                 f"Task integration rebase conflicted for {task_id}; resolve it only in {worktree}.\n"
                 f"{rebase.stdout}\n{rebase.stderr}"
+            )
+        if rebase is not None:
+            manifest["base_sha"] = target_sha
+            manifest["base_ref"] = target_sha
+            manifest["rebase_target_sha"] = ""
+            _invalidate_task_review(manifest, "target changed and task was rebased; review again")
+            manifest["state"] = "active"
+            _save_task_manifest(repo, manifest)
+            _push_current_task(worktree, manifest)
+            raise APError(
+                f"Task {task_id} was rebased onto {target_sha}; the task backup branch was updated. "
+                "Run task-review again before final integration."
             )
 
         _sync_task_submodule_config(
@@ -5737,6 +6227,8 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
         _save_task_manifest(repo, manifest)
 
         manifest = _require_task_context(worktree, task_cfg, task_id) or manifest
+        _require_current_writer(manifest, args)
+        _require_approved_review(worktree, task_cfg, manifest)
         task_tip = _resolve_commit(worktree, "HEAD")
         if _resolve_commit(worktree, "HEAD") != task_tip:
             raise APError("HEAD moved before the target push; refusing to push.")
@@ -6010,6 +6502,11 @@ def _push_current_task(repo: Path, manifest: dict, expected_commit: str = "") ->
     manifest["remote_task_tip"] = commit_sha
     manifest["last_commit"] = commit_sha
     manifest["claimed_paths"] = _changed_files(repo, _text(manifest.get("base_sha")))
+    review = manifest.get("review") or {}
+    if _text(review.get("verdict")) == "approved":
+        review["diff_head"] = commit_sha
+        review["diff_fingerprint"] = _task_review_fingerprint(repo, manifest)
+        manifest["review"] = review
     _save_task_manifest(repo, manifest)
     return commit_sha
 
@@ -6029,6 +6526,9 @@ def _cmd_commit_push_locked(
         check_common=False,
     )
     _save_task_manifest(repo, manifest)
+    _require_current_writer(manifest, args)
+    _require_dependencies(repo, manifest, _text(manifest.get("base_sha")))
+    _require_approved_review(repo, cfg, manifest)
     cmd_doctor(
         argparse.Namespace(
             repo=str(repo),
@@ -6072,6 +6572,8 @@ def _cmd_commit_push_locked(
             "Review the changes and rerun commit-push; no files were staged or restored."
         )
     manifest = _require_task_context(repo, cfg, args.task_id)
+    _require_current_writer(manifest, args)
+    _require_approved_review(repo, cfg, manifest)
 
     if _task_content_fingerprint(repo, cfg, manifest) != after_gate:
         raise APError(
@@ -6099,6 +6601,8 @@ def _cmd_commit_push_locked(
     _cleanup_generated_noise(repo, protected_paths=protected)
     pre_stage_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
     manifest = _require_task_context(repo, cfg, args.task_id)
+    _require_current_writer(manifest, args)
+    _require_approved_review(repo, cfg, manifest)
     if _task_content_fingerprint(repo, cfg, manifest) != pre_stage_fingerprint:
         raise APError("Task-owned files changed immediately before staging; refusing to commit.")
     task_paths = _task_commit_paths(repo)
@@ -6122,6 +6626,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     manifest = _require_task_context(repo, cfg, args.task_id)
+    _require_current_writer(manifest, args)
     lock_name = f"task-{_validate_task_id(args.task_id)}"
     timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
     with _repo_lock(repo, lock_name, timeout_s=timeout_s):
@@ -6187,6 +6692,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--profile", choices=sorted(_WORKFLOW_PROFILES), default="")
     s.add_argument("--mode", choices=["dev"], default="")
     s.add_argument("--base")
+    s.add_argument("--planned-path", action="append")
+    s.add_argument("--intent")
+    s.add_argument("--intent-file")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
 
@@ -6283,6 +6791,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--remote")
     s.add_argument("--worktree-root")
     s.add_argument("--owner")
+    s.add_argument("--writer")
+    s.add_argument("--owned-path", action="append")
+    s.add_argument("--depends-on", action="append", metavar="TASK_ID=SHA")
     s.add_argument("--no-fetch", action="store_true")
     s.set_defaults(func=cmd_task_start)
 
@@ -6295,10 +6806,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("task_id")
     s.set_defaults(func=cmd_task_submodule_sync)
 
+    s = sp.add_parser("task-review")
+    s.add_argument("task_id")
+    s.add_argument("--verdict", choices=["approved", "changes-requested"], required=True)
+    s.add_argument("--diff-fingerprint", required=True)
+    s.add_argument("--reviewer")
+    s.set_defaults(func=cmd_task_review)
+
+    s = sp.add_parser("task-handoff")
+    s.add_argument("task_id")
+    s.add_argument("--from", dest="from_writer", required=True)
+    s.add_argument("--to", dest="to_writer", required=True)
+    s.add_argument("--generation", type=int)
+    s.set_defaults(func=cmd_task_handoff)
+
+    s = sp.add_parser("task-resume")
+    s.add_argument("task_id")
+    s.add_argument("--writer")
+    s.set_defaults(func=cmd_task_resume)
+
     s = sp.add_parser("task-integrate")
     s.add_argument("task_id")
     s.add_argument("--keep-worktree", action="store_true")
     s.add_argument("--keep-remote", action="store_true")
+    s.add_argument("--writer")
     s.set_defaults(func=cmd_task_integrate)
 
     s = sp.add_parser("task-finish")
@@ -6323,6 +6854,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--initial-commit")
     s.add_argument("--ci-failure", "--jenkins-failure", dest="jenkins_failure", metavar="CI_FAILURE")
     s.add_argument("--fix-commit")
+    s.add_argument("--writer")
     s.set_defaults(func=cmd_commit_push)
 
     try:

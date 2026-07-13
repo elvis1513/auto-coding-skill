@@ -157,17 +157,24 @@ concurrency:
 ```
 
 ```bash
-python3 docs/tools/autopipeline/ap.py task-start T0001
+python3 docs/tools/autopipeline/ap.py task-start T0001 --owned-path src --writer "$FIXER"
 # Continue in the worktree path printed by task-start.
 python3 docs/tools/autopipeline/ap.py task-status T0001
 python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
-python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
-python3 docs/tools/autopipeline/ap.py task-integrate T0001
+python3 docs/tools/autopipeline/ap.py task-review T0001 --verdict approved --diff-fingerprint "$SHA256"
+python3 docs/tools/autopipeline/ap.py task-handoff T0001 --from "$FIXER" --to "$CODEX_THREAD_ID" --generation 1
+python3 docs/tools/autopipeline/ap.py commit-push T0001 --writer "$CODEX_THREAD_ID" --msg "T0001: summary"
+python3 docs/tools/autopipeline/ap.py task-integrate T0001 --writer "$CODEX_THREAD_ID"
 ```
 
 `commit-push` runs only inside the task worktree recorded in the repository
 manifest and stages only that task's changes. Unknown changes stop the command;
 the workflow never restores, resets, stashes, or cleans them.
+
+Before upgrading a v3.0.0 project, finish and clean every registered in-flight
+task with its currently installed runtime. `autocoding sync` refuses to replace
+that runtime while a schema-1 task remains, because 3.0.1 cannot safely infer
+its path ownership, dependencies, writer lease, or review state.
 
 `commit-push` runs the only local gate. `task-integrate` is the rest of the same
 push stage: it fetches/rebases, CAS-pushes the configured target, confirms the
@@ -313,13 +320,15 @@ python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
-python3 docs/tools/autopipeline/ap.py task-start T0001
+python3 docs/tools/autopipeline/ap.py task-start T0001 --owned-path src --writer "$FIXER"
 python3 docs/tools/autopipeline/ap.py task-status T0001
 python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
+python3 docs/tools/autopipeline/ap.py task-review T0001 --verdict approved --diff-fingerprint "$SHA256"
+python3 docs/tools/autopipeline/ap.py task-handoff T0001 --from "$FIXER" --to "$CODEX_THREAD_ID" --generation 1
 python3 docs/tools/autopipeline/ap.py docs-ledger-check
 python3 docs/tools/autopipeline/ap.py gate-profile
-python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
-python3 docs/tools/autopipeline/ap.py task-integrate T0001
+python3 docs/tools/autopipeline/ap.py commit-push T0001 --writer "$CODEX_THREAD_ID" --msg "T0001: summary"
+python3 docs/tools/autopipeline/ap.py task-integrate T0001 --writer "$CODEX_THREAD_ID"
 python3 docs/tools/autopipeline/ap.py task-finish T0001
 python3 docs/tools/autopipeline/ap.py task-prune
 ```

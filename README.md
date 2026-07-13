@@ -16,6 +16,10 @@ branch cleanup.
   polling from `commit-push`.
 - Required all project/Jenkins/GitLab/Nexus URLs, usernames, and direct passwords
   under `access.*` during project initialization.
+- Removed the shared-checkout `legacy` escape hatch; worktree isolation is now
+  mandatory for every write task.
+- Added a structured subagent plan with parallel discovery, one-writer worktree
+  ownership, reviewer feedback loops, and main-agent Git lifecycle ownership.
 
 ## What changed in v3.0.0
 
@@ -30,8 +34,8 @@ branch cleanup.
   updating to the latest remote target.
 - Automatically removed integrated worktrees and local task branches, with safe
   lease-based remote task-branch cleanup and merged-branch pruning.
-- Kept `concurrency.isolation: legacy` only as an explicit compatibility escape
-  hatch; missing configuration now defaults to worktree isolation.
+- Initially kept a `legacy` compatibility escape hatch; v4 removes that path and
+  migrates existing configuration to mandatory worktree isolation.
 
 ## What changed in v2.2.1
 
@@ -122,13 +126,16 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py impact --scope auto --json
 ```
 
-Each result includes the effective profile, fixed fast gate scope, reasons, and
-recommended Agent roles.
+Each result includes the effective profile, fixed fast gate scope, reasons,
+recommended Agent roles, and a machine-readable `agent_plan` describing stages,
+dependencies, assignment/result contracts, and lifecycle ownership.
 
 ## Parallel write isolation
 
 Each task that may write files runs in its own registered Git worktree and
-`codex/` task branch. Read-only discovery may remain in the primary worktree.
+`codex/` task branch. `worktree` is the only supported isolation value. Each
+worktree has exactly one writer; read-only discovery may remain in the primary
+worktree.
 
 ```yaml
 concurrency:
@@ -265,11 +272,18 @@ Existing project-local `model = "..."` lines are treated as explicit overrides:
   client inheritance.
 - Custom Agent files are always preserved byte-for-byte.
 
-The effective profile recommends roles dynamically:
+The effective profile emits an executable collaboration shape:
 
-- micro: main Agent only by default
-- standard: explorer → fixer, plus browser/docs roles when indicated
-- high-risk: explorer/docs as indicated → fixer → browser as indicated → reviewer
+- micro: main Agent only unless useful independent work exceeds dispatch overhead
+- standard/high-risk: main decomposition → parallel justified explorer/docs/browser
+  discovery → main design → dependency waves of isolated fixers → read-only
+  reviewers → main fast gate/integration, followed by final push/cleanup
+
+Only dependency-free fixer units with explicitly non-overlapping paths may run
+in parallel. A dependent writer starts after its prerequisite is integrated.
+Subagents do not commit, push, integrate, clean branches, or run the project gate.
+Reviewer findings return to the owning fixer. Verdicts bind to a diff fingerprint,
+so any edit requires re-review before the main Agent may run the gate.
 
 ## Required access configuration
 

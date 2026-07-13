@@ -263,6 +263,19 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             ),
             "task-start must persist a task manifest in the Git common directory",
         )
+        active_task = (worktree / "docs" / "tasks" / "active" / "START-1.md").read_text(
+            encoding="utf-8"
+        )
+        for field in [
+            "Worktree:",
+            "Orchestrator:",
+            "Owning fixer:",
+            "Owned paths:",
+            "Depends on integrated tasks:",
+            "Reviewer / stable diff:",
+            "Review verdict:",
+        ]:
+            self.assertIn(field, active_task)
 
     def test_task_start_rolls_back_checkout_hook_side_effects(self) -> None:
         hook_bodies = {
@@ -331,8 +344,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 }
                 self.assertEqual(before, after)
 
-    def test_missing_task_manifest_cannot_fall_back_to_legacy_in_linked_worktree(self) -> None:
-        _, repo, remote = self.make_repo("legacy")
+    def test_missing_task_manifest_is_rejected_in_linked_worktree(self) -> None:
+        _, repo, remote = self.make_repo("worktree")
         worktree = self.start_task(repo, "NO-MANIFEST")
         git_dir = Path(git_output(worktree, "rev-parse", "--git-dir"))
         if not git_dir.is_absolute():
@@ -1290,7 +1303,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertEqual("hook mutation\n", (worktree / "hook-after.txt").read_text(encoding="utf-8"))
         self.assert_remote_branch(remote, "codex/COMMIT-HOOK", False)
 
-    def test_missing_config_defaults_to_worktree_and_legacy_is_explicit(self) -> None:
+    def test_missing_config_defaults_to_worktree_and_legacy_is_rejected(self) -> None:
         _, default_repo, _ = self.make_repo(_MISSING)
         (default_repo / "shared.txt").write_text("must stay isolated\n", encoding="utf-8")
         default_commit = self.assert_rejected_without_mutation(
@@ -1305,16 +1318,21 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.start_task(default_repo, "DEFAULT-1")
 
         _, legacy_repo, legacy_remote = self.make_repo("legacy")
+        before = git_output(legacy_repo, "rev-parse", "HEAD")
         (legacy_repo / "shared.txt").write_text("legacy shared checkout\n", encoding="utf-8")
-        self.ap(
+        result = self.ap(
             legacy_repo,
             "commit-push",
             "LEGACY-1",
             "--msg",
-            "LEGACY-1: legacy compatibility",
+            "LEGACY-1: must be rejected",
+            check=False,
         )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("must be worktree", result.stdout + result.stderr)
+        self.assertEqual(before, git_output(legacy_repo, "rev-parse", "HEAD"))
         self.assertEqual(
-            "legacy shared checkout",
+            "baseline",
             git_output(legacy_remote, "show", "refs/heads/dev:shared.txt"),
         )
 

@@ -208,6 +208,15 @@ function testMinimalSyncConvergesWithinBudget() {
   assert(engineering.includes('completion: "push"'), "engineering should complete normal development at push");
   assert(engineering.includes('gate_changed: "git diff --check"'), "generic projects should receive the fast diff gate");
   assert(engineering.includes(`name: "${path.basename(repo)}"`), "project name should be initialized automatically");
+  assert(engineering.includes("## Subagent orchestration"), "engineering should install the orchestration contract");
+  assert(engineering.includes("Never run two writers in one worktree"), "engineering should enforce one writer per worktree");
+  const fixer = fs.readFileSync(path.join(repo, ".agents", "agents", "fixer.toml"), "utf8");
+  const reviewer = fs.readFileSync(path.join(repo, ".agents", "agents", "reviewer.toml"), "utf8");
+  const browserDebugger = fs.readFileSync(path.join(repo, ".agents", "agents", "browser-debugger.toml"), "utf8");
+  assert(fixer.includes("owned_paths"), "fixer should receive explicit path ownership");
+  assert(fixer.includes("不提交、不推送、不集成"), "fixer should leave Git lifecycle to the main agent");
+  assert(reviewer.includes("diff_fingerprint"), "reviewer verdict should bind to a stable diff");
+  assert(browserDebugger.includes('sandbox_mode = "read-only"'), "browser discovery should be read-only");
 
   const incomplete = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
   assert(incomplete.status !== 0, "status should require access values after scaffold creation");
@@ -232,6 +241,28 @@ function testMinimalSyncConvergesWithinBudget() {
   for (const unexpected of ["target_env.name", "backend_root", "jenkins.base_url", "docs.api_doc", "gate_full"]) {
     assert(!doctorOutput.includes(unexpected), `default doctor should not require optional field: ${unexpected}`);
   }
+}
+
+function testStatusRejectsLegacyIsolation() {
+  const repo = tmpdir("legacy-isolation-status");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  fillRequiredAccess(repo);
+  const engineeringPath = path.join(repo, "docs", "ENGINEERING.md");
+  const engineering = fs.readFileSync(engineeringPath, "utf8").replace(
+    'isolation: "worktree"',
+    'isolation: "legacy"',
+  );
+  fs.writeFileSync(engineeringPath, engineering);
+
+  const result = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(result.status !== 0, "status must reject legacy isolation");
+  const parsed = JSON.parse(result.stdout).results[0];
+  assert(
+    parsed.invalidConfigTokens.includes("concurrency.isolation (must be worktree)"),
+    `status should identify the invalid isolation value: ${result.stdout}`,
+  );
+  assert(parsed.next.includes("upgrade --write"), "status should direct legacy projects through upgrade");
 }
 
 function testOrdinaryNodeTestIsNotPromotedToAutomaticGate() {
@@ -414,6 +445,9 @@ function testBridgeIsGeneric() {
   run("node", [cli, "init", "--force"], { cwd: repo });
   run("python3", [assetAp, "--repo", repo, "install", "--bridges"]);
   assert(exists(path.join(repo, "AGENTS.md")), "generic bridge should be created");
+  const bridge = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
+  assert(bridge.includes("Never run two writers in one worktree"), "bridge should expose writer isolation");
+  assert(bridge.includes("integrated"), "bridge should expose dependency ordering");
   for (const filename of [`CO${"DEX.md"}`, `CLA${"UDE.md"}`]) {
     assert(!exists(path.join(repo, filename)), "client-named bridge should not be created");
   }
@@ -554,6 +588,10 @@ function testUpgradeMigratesLegacyAutomaticGateToFastDefault() {
     "  profile: auto",
     "project:",
     '  name: "legacy"',
+    "concurrency:",
+    "  isolation: legacy",
+    "  base_ref: origin/dev",
+    "  target_branch: dev",
     "commands:",
     '  gate_changed: "npm test"',
     '  gate_standard: "npm test"',
@@ -574,6 +612,7 @@ function testUpgradeMigratesLegacyAutomaticGateToFastDefault() {
   assert(engineering.includes("gate_changed: git diff --check"), "upgrade should replace the v3 auto-seeded npm test gate");
   assert(engineering.includes("mode: dev"), "upgrade should migrate verify mode to fast development mode");
   assert(engineering.includes("completion: push"), "upgrade should add push completion");
+  assert(engineering.includes("isolation: worktree"), "upgrade should migrate legacy isolation to worktree");
   for (const key of ["default_scope", "fallback_scope", "no_change_scope"]) {
     assert(engineering.includes(`${key}: changed`), `upgrade should migrate gate.${key} to changed`);
   }
@@ -653,6 +692,7 @@ testPreflightAvoidsPartialInstall();
 testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
 testMinimalSyncConvergesWithinBudget();
+testStatusRejectsLegacyIsolation();
 testOrdinaryNodeTestIsNotPromotedToAutomaticGate();
 testAccessPasswordsAreRequiredButNeverPrintedByStatus();
 testManagedAgentModelsInheritAndOverridesSurvive();

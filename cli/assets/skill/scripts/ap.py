@@ -139,11 +139,7 @@ def _evidence_log_path(repo: Path, cfg: dict) -> Path:
         docs_cfg = cfg.get("docs") or {}
         task_dir = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
         return Path(repo, task_dir, f"{manifest['task_id']}.jsonl")
-    if _task_isolation(cfg) == "worktree":
-        return Path(repo, ".local/auto-coding-skill/evidence.jsonl")
-    docs_cfg = cfg.get("docs") or {}
-    rel = _text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl"
-    return Path(repo, rel)
+    return Path(repo, ".local/auto-coding-skill/evidence.jsonl")
 
 
 def _gate_profile_path(repo: Path, cfg: dict) -> Path:
@@ -627,6 +623,14 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _bool_config(gate_cfg.get("full_on_unknown"), False):
         gate_cfg["full_on_unknown"] = False
         changed.append("gate.full_on_unknown")
+
+    concurrency_cfg = cfg.setdefault("concurrency", {})
+    if not isinstance(concurrency_cfg, dict):
+        concurrency_cfg = {}
+        cfg["concurrency"] = concurrency_cfg
+    if _text(concurrency_cfg.get("isolation")).lower() != "worktree":
+        concurrency_cfg["isolation"] = "worktree"
+        changed.append("concurrency.isolation")
 
     return changed
 
@@ -1123,8 +1127,10 @@ def _concurrency_cfg(cfg: dict) -> dict:
 
 def _task_isolation(cfg: dict) -> str:
     isolation = _text(_concurrency_cfg(cfg).get("isolation")).lower() or "worktree"
-    if isolation not in {"worktree", "legacy"}:
-        raise APError("concurrency.isolation must be worktree or legacy")
+    if isolation != "worktree":
+        raise APError(
+            "concurrency.isolation must be worktree; shared-checkout/legacy writes are no longer supported"
+        )
     return isolation
 
 
@@ -1470,16 +1476,15 @@ def _unstaged_task_paths(repo: Path) -> list[str]:
     return sorted(path for path in paths if not _is_generated_noise_path(path))
 
 
-def _require_task_context(repo: Path, cfg: dict, task_id: str) -> Optional[dict]:
+def _require_task_context(repo: Path, cfg: dict, task_id: str) -> dict:
+    _task_isolation(cfg)
     manifest = _active_task_manifest(repo)
     if not manifest:
         if _git_dir(repo) != _git_common_dir(repo):
             raise APError(
-                "This linked worktree has no registered task manifest. Refusing legacy fallback; "
+                "This linked worktree has no registered task manifest. "
                 "return to the primary checkout and create or recover the task with task-start."
             )
-        if _task_isolation(cfg) == "legacy":
-            return None
         raise APError(
             "This project requires an isolated task worktree. "
             f"Run `python3 docs/tools/autopipeline/ap.py task-start {task_id}` from the main checkout, "
@@ -3447,17 +3452,149 @@ def _configured_workflow_profile(cfg: dict) -> str:
 
 
 def _recommended_agents(profile: str, categories: set[str], classification: dict) -> list[str]:
-    if profile == "micro":
-        return []
-    roles = ["explorer"]
-    if categories & {"api", "release_or_tooling"}:
-        roles.append("docs_researcher")
-    roles.append("fixer")
-    if classification.get("needs_browser"):
-        roles.append("browser_debugger")
-    if profile == "high-risk":
-        roles.append("reviewer")
+    roles: list[str] = []
+    for stage in _agent_execution_plan(profile, categories, classification)["stages"]:
+        for role in stage["roles"]:
+            if role != "main" and role not in roles:
+                roles.append(role)
     return roles
+
+
+def _agent_execution_plan(profile: str, categories: set[str], classification: dict) -> dict:
+    if profile == "micro":
+        return {
+            "strategy": "main-only",
+            "stages": [
+                {
+                    "id": "delivery",
+                    "mode": "serial",
+                    "roles": ["main"],
+                    "depends_on": [],
+                }
+            ],
+            "constraints": [
+                "Do not create subagents when the task has no independent work worth delegating.",
+                "The main agent owns the fast gate, Git integration, push, and cleanup.",
+            ],
+        }
+
+    discovery_roles = ["explorer"]
+    if categories & {"api", "release_or_tooling"}:
+        discovery_roles.append("docs_researcher")
+    if classification.get("needs_browser"):
+        discovery_roles.append("browser_debugger")
+
+    return {
+        "strategy": "orchestrated-subagents",
+        "policies": {
+            "one_writer_per_worktree": True,
+            "path_ownership": "explicit-non-overlapping",
+            "dependency_policy": "integrate-before-dependent-start",
+            "review_feedback_owner": "owning-fixer",
+            "review_binding": "diff-fingerprint",
+            "lifecycle_owner": "main",
+            "gate_owner": "main",
+        },
+        "assignment_contract": {
+            "common": [
+                "contract_version",
+                "node_id",
+                "task_id",
+                "role",
+                "base_sha",
+                "scope",
+                "depends_on",
+                "acceptance",
+            ],
+            "writer": ["task_branch", "worktree_path", "owned_paths"],
+            "reviewer": [
+                "task_id",
+                "diff_base",
+                "diff_head",
+                "diff_fingerprint",
+                "owning_fixer",
+            ],
+        },
+        "result_contract": [
+            "contract_version",
+            "node_id",
+            "role",
+            "task_id",
+            "base_sha",
+            "status",
+            "summary",
+            "depends_on",
+            "owned_paths",
+            "changed_paths",
+            "diff_fingerprint",
+            "evidence",
+            "findings",
+            "verdict",
+            "risks",
+            "next_owner",
+        ],
+        "stages": [
+            {
+                "id": "decomposition",
+                "mode": "serial",
+                "roles": ["main"],
+                "depends_on": [],
+            },
+            {
+                "id": "discovery",
+                "mode": "parallel",
+                "roles": discovery_roles,
+                "depends_on": ["decomposition"],
+            },
+            {
+                "id": "design",
+                "mode": "serial",
+                "roles": ["main"],
+                "depends_on": ["discovery"],
+            },
+            {
+                "id": "delivery",
+                "mode": "dependency-waves",
+                "roles": ["fixer", "reviewer", "main"],
+                "depends_on": ["design"],
+                "scale": "one fixer per independent development unit in the current dependency layer",
+                "wave_phases": [
+                    {
+                        "id": "implementation",
+                        "mode": "parallel-isolated",
+                        "roles": ["fixer"],
+                    },
+                    {
+                        "id": "review",
+                        "mode": "parallel-read-only",
+                        "roles": ["reviewer"],
+                        "feedback_to": "owning fixer",
+                    },
+                    {
+                        "id": "gate-integrate",
+                        "mode": "serial",
+                        "roles": ["main"],
+                    },
+                ],
+                "next_wave": "start only after every prerequisite in the next layer is integrated",
+            },
+            {
+                "id": "closure",
+                "mode": "serial",
+                "roles": ["main"],
+                "depends_on": ["delivery"],
+            },
+        ],
+        "constraints": [
+            "Delegate only independent bounded work and declare dependencies before dispatch.",
+            "Every fixer owns exactly one registered task branch/worktree and an explicit path scope.",
+            "Never run two writers in one worktree or let the main agent edit a fixer-owned worktree concurrently.",
+            "Start a dependent write task only after its prerequisite has been integrated into the target branch.",
+            "Subagents do not commit, push, integrate, or clean task branches.",
+            "Reviewers inspect a stable diff; changes-requested returns to the owning fixer and any edit requires re-review.",
+            "The main agent routes review feedback, runs the single fast gate for each write task, integrates in dependency order, pushes, and cleans branches.",
+        ],
+    }
 
 
 def _resolve_execution_plan(
@@ -3561,6 +3698,7 @@ def _resolve_execution_plan(
     needs_target = False
     needs_dd = bool(classification["needs_dd"] or effective_profile == "high-risk")
 
+    agent_plan = _agent_execution_plan(effective_profile, categories, classification)
     return {
         **impact,
         "reasons": execution_reasons,
@@ -3579,6 +3717,7 @@ def _resolve_execution_plan(
         "needs_jenkins": needs_jenkins,
         "needs_target": needs_target,
         "recommended_agents": _recommended_agents(effective_profile, categories, classification),
+        "agent_plan": agent_plan,
     }
 
 
@@ -3611,6 +3750,13 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"[classify] selected_scope={result['selected_scope']}")
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
         print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
+        print(f"[classify] agent_strategy={result['agent_plan']['strategy']}")
+        for stage in result["agent_plan"]["stages"]:
+            print(
+                "[classify] agent_stage="
+                f"{stage['id']} mode={stage['mode']} roles={','.join(stage['roles'])} "
+                f"depends_on={','.join(stage['depends_on']) or '-'}"
+            )
         for key in ["needs_dd", "needs_adr", "needs_browser", "needs_jenkins", "needs_target"]:
             print(f"[classify] {key}={result[key]}")
         for command in commands:
@@ -3865,8 +4011,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if completion != "push":
         missing.append("workflow.completion (must be push)")
     isolation = _text(concurrency_cfg.get("isolation")).lower() or "worktree"
-    if isolation not in {"worktree", "legacy"}:
-        validation_errors.append("concurrency.isolation must be worktree or legacy")
+    if isolation != "worktree":
+        validation_errors.append(
+            "concurrency.isolation must be worktree; shared-checkout/legacy writes are no longer supported"
+        )
     branch_prefix = _text(concurrency_cfg.get("branch_prefix")) or "codex/"
     if not branch_prefix.endswith("/"):
         validation_errors.append("concurrency.branch_prefix must end with '/'")
@@ -5094,6 +5242,13 @@ def _create_active_task_doc(repo: Path, cfg: dict, manifest: dict) -> None:
                 f"- Base: `{manifest['base_ref']}` (`{manifest['base_sha'][:12]}`)",
                 f"- Target: `{manifest['remote']}/{manifest['target_branch']}`",
                 f"- Branch: `{manifest['task_branch']}`",
+                f"- Worktree: `{manifest['worktree_path']}`",
+                f"- Orchestrator: {manifest.get('owner') or 'TODO'}",
+                "- Owning fixer: TODO",
+                "- Owned paths: TODO (explicit and non-overlapping)",
+                "- Depends on integrated tasks: none",
+                "- Reviewer / stable diff: TODO",
+                "- Review verdict: pending",
                 "- Scope: TODO",
                 "- Development acceptance: TODO",
                 "",
@@ -5140,6 +5295,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
         raise APError(
@@ -5818,46 +5974,43 @@ def _commit_exact_index(repo: Path, message: str) -> str:
     return commit_sha
 
 
-def _push_current_task(repo: Path, manifest: Optional[dict], expected_commit: str = "") -> str:
+def _push_current_task(repo: Path, manifest: dict, expected_commit: str = "") -> str:
     commit_sha = expected_commit or _resolve_commit(repo, "HEAD")
     if _resolve_commit(repo, "HEAD") != commit_sha:
         raise APError("HEAD moved after the verified commit; refusing to push.")
-    if manifest:
-        remote = _text(manifest.get("remote")) or "origin"
-        task_branch = _text(manifest.get("task_branch"))
-        remote_tip = _remote_branch_tip(repo, remote, task_branch)
-        command = ["git", "push", "--set-upstream"]
-        # This is an internal backup branch, not the final project push. The
-        # configured pre-push hook runs once later for the target-branch push.
-        command.append("--no-verify")
-        if remote_tip and run(
-            ["git", "merge-base", "--is-ancestor", remote_tip, "HEAD"],
-            cwd=repo,
-            check=False,
-        ).returncode != 0:
-            expected_tip = _text(manifest.get("remote_task_tip"))
-            if not expected_tip or expected_tip != remote_tip:
-                raise APError(
-                    f"Remote task branch moved unexpectedly: {remote}/{task_branch}. "
-                    "No force push was attempted."
-                )
-            command.append(f"--force-with-lease=refs/heads/{task_branch}:{expected_tip}")
-        command.extend([remote, f"{commit_sha}:refs/heads/{task_branch}"])
-        run(command, cwd=repo)
-        if _resolve_commit(repo, "HEAD") != commit_sha:
-            raise APError("A push hook changed HEAD. The verified task commit was pushed, but local state needs review.")
-        pushed_tip = _remote_branch_tip(repo, remote, task_branch)
-        if pushed_tip != commit_sha:
+    remote = _text(manifest.get("remote")) or "origin"
+    task_branch = _text(manifest.get("task_branch"))
+    remote_tip = _remote_branch_tip(repo, remote, task_branch)
+    command = ["git", "push", "--set-upstream"]
+    # This is an internal backup branch, not the final project push. The
+    # configured pre-push hook runs once later for the target-branch push.
+    command.append("--no-verify")
+    if remote_tip and run(
+        ["git", "merge-base", "--is-ancestor", remote_tip, "HEAD"],
+        cwd=repo,
+        check=False,
+    ).returncode != 0:
+        expected_tip = _text(manifest.get("remote_task_tip"))
+        if not expected_tip or expected_tip != remote_tip:
             raise APError(
-                f"Remote task branch verification failed: expected {commit_sha}, got {pushed_tip or '(missing)'}."
+                f"Remote task branch moved unexpectedly: {remote}/{task_branch}. "
+                "No force push was attempted."
             )
-        manifest["state"] = "pushed"
-        manifest["remote_task_tip"] = commit_sha
-        manifest["last_commit"] = commit_sha
-        manifest["claimed_paths"] = _changed_files(repo, _text(manifest.get("base_sha")))
-        _save_task_manifest(repo, manifest)
-    else:
-        run(["git", "push"], cwd=repo)
+        command.append(f"--force-with-lease=refs/heads/{task_branch}:{expected_tip}")
+    command.extend([remote, f"{commit_sha}:refs/heads/{task_branch}"])
+    run(command, cwd=repo)
+    if _resolve_commit(repo, "HEAD") != commit_sha:
+        raise APError("A push hook changed HEAD. The verified task commit was pushed, but local state needs review.")
+    pushed_tip = _remote_branch_tip(repo, remote, task_branch)
+    if pushed_tip != commit_sha:
+        raise APError(
+            f"Remote task branch verification failed: expected {commit_sha}, got {pushed_tip or '(missing)'}."
+        )
+    manifest["state"] = "pushed"
+    manifest["remote_task_tip"] = commit_sha
+    manifest["last_commit"] = commit_sha
+    manifest["claimed_paths"] = _changed_files(repo, _text(manifest.get("base_sha")))
+    _save_task_manifest(repo, manifest)
     return commit_sha
 
 
@@ -5865,18 +6018,17 @@ def _cmd_commit_push_locked(
     args: argparse.Namespace,
     repo: Path,
     cfg: dict,
-    manifest: Optional[dict],
+    manifest: dict,
 ) -> None:
-    if manifest:
-        control_repo = Path(_text(manifest.get("control_worktree_path"))).resolve()
-        _sync_task_submodule_config(
-            control_repo,
-            repo,
-            manifest,
-            initial=False,
-            check_common=False,
-        )
-        _save_task_manifest(repo, manifest)
+    control_repo = Path(_text(manifest.get("control_worktree_path"))).resolve()
+    _sync_task_submodule_config(
+        control_repo,
+        repo,
+        manifest,
+        initial=False,
+        check_common=False,
+    )
+    _save_task_manifest(repo, manifest)
     cmd_doctor(
         argparse.Namespace(
             repo=str(repo),
@@ -5884,7 +6036,7 @@ def _cmd_commit_push_locked(
             mode=_text(getattr(args, "mode", "")).lower(),
         )
     )
-    base_ref = _text(manifest.get("base_sha")) if manifest else ""
+    base_ref = _text(manifest.get("base_sha"))
     plan = _resolve_execution_plan(
         cfg,
         repo,
@@ -5919,8 +6071,7 @@ def _cmd_commit_push_locked(
             "The gate changed task-owned files or another writer modified this worktree. "
             "Review the changes and rerun commit-push; no files were staged or restored."
         )
-    if manifest:
-        manifest = _require_task_context(repo, cfg, args.task_id)
+    manifest = _require_task_context(repo, cfg, args.task_id)
 
     if _task_content_fingerprint(repo, cfg, manifest) != after_gate:
         raise APError(
@@ -5944,12 +6095,10 @@ def _cmd_commit_push_locked(
         structure_check=args.structure_check or structure_check_status,
     )
 
-    protected = set(manifest.get("initial_untracked") or []) if manifest else set()
-    if manifest:
-        _cleanup_generated_noise(repo, protected_paths=protected)
+    protected = set(manifest.get("initial_untracked") or [])
+    _cleanup_generated_noise(repo, protected_paths=protected)
     pre_stage_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
-    if manifest:
-        manifest = _require_task_context(repo, cfg, args.task_id)
+    manifest = _require_task_context(repo, cfg, args.task_id)
     if _task_content_fingerprint(repo, cfg, manifest) != pre_stage_fingerprint:
         raise APError("Task-owned files changed immediately before staging; refusing to commit.")
     task_paths = _task_commit_paths(repo)
@@ -5961,8 +6110,7 @@ def _cmd_commit_push_locked(
         raise APError(
             "Task-owned files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged)
         )
-    if manifest:
-        manifest = _require_task_context(repo, cfg, args.task_id)
+    manifest = _require_task_context(repo, cfg, args.task_id)
 
     committed_sha = _commit_exact_index(repo, msg)
     _push_current_task(repo, manifest, committed_sha)
@@ -5974,7 +6122,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     manifest = _require_task_context(repo, cfg, args.task_id)
-    lock_name = f"task-{_validate_task_id(args.task_id)}" if manifest else "legacy-commit"
+    lock_name = f"task-{_validate_task_id(args.task_id)}"
     timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
     with _repo_lock(repo, lock_name, timeout_s=timeout_s):
         _cmd_commit_push_locked(args, repo, cfg, manifest)

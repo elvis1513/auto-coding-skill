@@ -477,6 +477,35 @@ function frontmatterValueIsFilled(raw){
     && !upper.startsWith("YOUR_");
 }
 
+function frontmatterScalarValue(raw){
+  const source = String(raw || "");
+  let quote = "";
+  let escaped = false;
+  let commentAt = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote === '"' && char === "\\" && !escaped) {
+      escaped = true;
+      continue;
+    }
+    if ((char === '"' || char === "'") && !escaped) {
+      quote = quote === char ? "" : (quote || char);
+    } else if (char === "#" && !quote && (index === 0 || /\s/.test(source[index - 1]))) {
+      commentAt = index;
+      break;
+    }
+    escaped = false;
+  }
+  const value = (commentAt >= 0 ? source.slice(0, commentAt) : source).trim();
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try { return JSON.parse(value).trim(); } catch { return ""; }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'").trim();
+  }
+  return value;
+}
+
 function projectStatus(project, assetSkill, assetAgents){
   const root = path.resolve(project);
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
@@ -523,6 +552,7 @@ function projectStatus(project, assetSkill, assetAgents){
   ];
   let missingConfigPaths = requiredConfigPaths.map(item => item.label);
   let unfilledConfigTokens = [];
+  let invalidConfigTokens = [];
   if (!engineeringMissing) {
     const text = fs.readFileSync(engineering, "utf8");
     const states = requiredConfigPaths.map(item => ({ item, state: frontmatterPathState(text, item.path) }));
@@ -530,8 +560,12 @@ function projectStatus(project, assetSkill, assetAgents){
     unfilledConfigTokens = states
       .filter(({ item, state }) => state.present && item.filled === true && !frontmatterValueIsFilled(state.value))
       .map(({ item }) => item.label);
+    const isolationState = frontmatterPathState(text, ["concurrency", "isolation"]);
+    if (isolationState.present && frontmatterScalarValue(isolationState.value).toLowerCase() !== "worktree") {
+      invalidConfigTokens = ["concurrency.isolation (must be worktree)"];
+    }
   }
-  const missingConfigTokens = [...missingConfigPaths, ...unfilledConfigTokens];
+  const missingConfigTokens = [...missingConfigPaths, ...unfilledConfigTokens, ...invalidConfigTokens];
   const scriptDiffs = [];
   const launcherSrc = path.join(assetSkill, "data", "templates", "tools", "ap.py");
   const launcherDst = path.join(toolDir, "ap.py");
@@ -559,6 +593,8 @@ function projectStatus(project, assetSkill, assetAgents){
     next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
   } else if (missingConfigPaths.length) {
     next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
+  } else if (invalidConfigTokens.length) {
+    next = "run project-local ap.py upgrade --write to migrate concurrency.isolation to worktree, then run doctor";
   } else if (unfilledConfigTokens.length) {
     next = "fill every required value in docs/ENGINEERING.md, then run project-local ap.py doctor";
   }
@@ -573,6 +609,7 @@ function projectStatus(project, assetSkill, assetAgents){
     missingConfigTokens,
     missingConfigPaths,
     unfilledConfigTokens,
+    invalidConfigTokens,
     next,
   };
 }

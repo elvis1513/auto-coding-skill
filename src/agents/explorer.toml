@@ -28,4 +28,7 @@ developer_instructions = """
    - 根因候选
    - 建议交给哪个代理继续处理
 9. 优先快速精准搜索，避免全仓库无差别扫描。
+10. 只接受主代理分配的明确 task_id、范围、依赖和验收目标；不要扩展到其他并行单元。
+11. 不提交、不推送、不集成、不清理分支，也不修改任何工作树。
+12. 返回版本化契约：node/task/role、base SHA、status、depends_on、owned_paths（固定为空）、changed_paths（固定为空）、diff_fingerprint、evidence、findings、verdict、risks、next_owner。
 """

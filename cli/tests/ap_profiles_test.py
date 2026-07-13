@@ -27,7 +27,7 @@ def run(repo: Path, *args: str) -> None:
 def base_config() -> dict:
     return {
         "workflow": {"mode": "dev", "profile": "auto", "completion": "push"},
-        "concurrency": {"isolation": "legacy"},
+        "concurrency": {"isolation": "worktree"},
         "project": {"name": "profile-test"},
         "access": {
             "project": {
@@ -169,6 +169,12 @@ class AutoCodingProfileTests(unittest.TestCase):
             fix_commit=None,
         )
 
+    @staticmethod
+    def record_closure(repo: Path, args: argparse.Namespace) -> Path:
+        with mock.patch.object(ap, "_require_task_context", return_value={"task_id": args.task_id}):
+            ap.cmd_record_closure(args)
+        return repo / "docs" / "tasks" / "closures" / f"{args.task_id}.md"
+
     def test_docs_only_resolves_micro(self) -> None:
         repo, cfg = self.make_repo("docs/security-auth-notes.md")
         plan = self.plan(repo, cfg)
@@ -176,6 +182,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
         self.assertEqual([], plan["recommended_agents"])
+        self.assertEqual("main-only", plan["agent_plan"]["strategy"])
 
     def test_ordinary_code_resolves_standard(self) -> None:
         repo, cfg = self.make_repo("src/widget.py")
@@ -184,7 +191,32 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("standard", plan["profile"])
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
-        self.assertEqual(["explorer", "fixer"], plan["recommended_agents"])
+        self.assertEqual(["explorer", "fixer", "reviewer"], plan["recommended_agents"])
+        agent_plan = plan["agent_plan"]
+        self.assertEqual("orchestrated-subagents", agent_plan["strategy"])
+        self.assertEqual(
+            ["decomposition", "discovery", "design", "delivery", "closure"],
+            [stage["id"] for stage in agent_plan["stages"]],
+        )
+        self.assertTrue(agent_plan["policies"]["one_writer_per_worktree"])
+        self.assertEqual("explicit-non-overlapping", agent_plan["policies"]["path_ownership"])
+        self.assertEqual(
+            "integrate-before-dependent-start",
+            agent_plan["policies"]["dependency_policy"],
+        )
+        self.assertEqual("owning-fixer", agent_plan["policies"]["review_feedback_owner"])
+        self.assertEqual("diff-fingerprint", agent_plan["policies"]["review_binding"])
+        self.assertEqual("main", agent_plan["policies"]["lifecycle_owner"])
+        self.assertIn("owned_paths", agent_plan["assignment_contract"]["writer"])
+        self.assertIn("diff_fingerprint", agent_plan["assignment_contract"]["reviewer"])
+        self.assertIn("diff_fingerprint", agent_plan["result_contract"])
+        delivery = next(stage for stage in agent_plan["stages"] if stage["id"] == "delivery")
+        self.assertEqual("dependency-waves", delivery["mode"])
+        self.assertEqual(
+            ["implementation", "review", "gate-integrate"],
+            [phase["id"] for phase in delivery["wave_phases"]],
+        )
+        self.assertIn("integrated", delivery["next_wave"])
 
     def test_test_only_change_resolves_micro(self) -> None:
         repo, cfg = self.make_repo("tests/widget_test.py")
@@ -212,6 +244,23 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertIn("reviewer", plan["recommended_agents"])
         self.assertFalse(plan["needs_jenkins"])
         self.assertFalse(plan["needs_target"])
+
+    def test_ui_api_discovery_roles_run_in_one_parallel_stage(self) -> None:
+        repo, cfg = self.make_repo("src/api/settings-page.tsx")
+        plan = self.plan(repo, cfg)
+        discovery = next(stage for stage in plan["agent_plan"]["stages"] if stage["id"] == "discovery")
+        self.assertEqual("parallel", discovery["mode"])
+        self.assertEqual(
+            ["explorer", "docs_researcher", "browser_debugger"],
+            discovery["roles"],
+        )
+        flattened = [
+            role
+            for stage in plan["agent_plan"]["stages"]
+            for role in stage["roles"]
+            if role != "main"
+        ]
+        self.assertEqual(list(dict.fromkeys(flattened)), plan["recommended_agents"])
 
     def test_requested_verify_mode_is_rejected(self) -> None:
         repo, cfg = self.make_repo("src/widget.py")
@@ -376,6 +425,14 @@ class AutoCodingProfileTests(unittest.TestCase):
             ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         self.assertIn("gate.rules[0].scope", str(context.exception))
 
+    def test_doctor_rejects_legacy_isolation(self) -> None:
+        cfg = base_config()
+        cfg["concurrency"]["isolation"] = "legacy"
+        repo, _ = self.make_repo(config=cfg)
+        with self.assertRaises(APError) as context:
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn("must be worktree", str(context.exception))
+
     def test_doctor_requires_one_fast_gate_for_every_profile(self) -> None:
         for profile in ["micro", "standard", "high-risk", "auto"]:
             with self.subTest(profile=profile):
@@ -440,48 +497,28 @@ class AutoCodingProfileTests(unittest.TestCase):
         ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         ap.cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
 
-    def test_commit_push_rejects_result_incompatible_with_effective_mode(self) -> None:
-        cases = [("micro", "dev", "PASS")]
-        for profile, mode, result in cases:
-            with self.subTest(profile=profile, mode=mode, result=result):
-                repo, cfg = self.make_repo("src/widget.py")
-                plan = {
-                    "profile": profile,
-                    "effective_mode": mode,
-                    "selected_scope": "changed",
-                }
-                fake_run_result = subprocess.CompletedProcess([], 0, stdout="changed\n", stderr="")
-                with (
-                    mock.patch.object(ap, "ensure_git_repo"),
-                    mock.patch.object(ap, "cmd_doctor"),
-                    mock.patch.object(ap, "_load_cfg", return_value=cfg),
-                    mock.patch.object(ap, "_resolve_execution_plan", return_value=plan),
-                    mock.patch.object(ap, "cmd_light_gate"),
-                    mock.patch.object(ap, "_cleanup_generated_noise"),
-                    mock.patch.object(ap, "run", return_value=fake_run_result),
-                ):
-                    with self.assertRaises(APError):
-                        ap.cmd_commit_push(
-                            self.commit_args(repo, profile=profile, mode=mode, result=result)
-                        )
+    def test_dev_closure_rejects_owner_acceptance_pass(self) -> None:
+        with self.assertRaises(APError):
+            ap._validate_closure_result("dev", "PASS")
 
     def test_manual_closure_infers_one_of_the_three_effective_profiles(self) -> None:
         repo, _ = self.make_repo("src/widget.py")
-        ap.cmd_record_closure(self.closure_args(repo, result="DEV-CLOSED"))
-        closure = (repo / "docs" / "tasks" / "closure-log.md").read_text(encoding="utf-8")
+        closure_path = self.record_closure(repo, self.closure_args(repo, result="DEV-CLOSED"))
+        closure = closure_path.read_text(encoding="utf-8")
         self.assertIn("- Effective Profile: standard", closure)
         self.assertNotIn("(not recorded)", closure)
 
     def test_manual_closure_uses_dev_closed_for_high_risk_work(self) -> None:
         repo, _ = self.make_repo("migrations/001.sql")
-        ap.cmd_record_closure(self.closure_args(repo, result="DEV-CLOSED"))
-        closure = (repo / "docs" / "tasks" / "closure-log.md").read_text(encoding="utf-8")
+        closure_path = self.record_closure(repo, self.closure_args(repo, result="DEV-CLOSED"))
+        closure = closure_path.read_text(encoding="utf-8")
         self.assertIn("- Effective Profile: high-risk", closure)
 
     def test_manual_pass_is_outside_automatic_coding_closure(self) -> None:
         repo, _ = self.make_repo("src/widget.py")
         with self.assertRaises(APError) as context:
-            ap.cmd_record_closure(
+            self.record_closure(
+                repo,
                 self.closure_args(repo, result="PASS", profile="high-risk", verification=[])
             )
         self.assertIn("owner acceptance", str(context.exception))
@@ -491,14 +528,15 @@ class AutoCodingProfileTests(unittest.TestCase):
         run(repo, "git", "add", "-A")
         run(repo, "git", "commit", "-qm", "database migration")
 
-        ap.cmd_record_closure(
+        closure_path = self.record_closure(
+            repo,
             self.closure_args(
                 repo,
                 result="DEV-CLOSED",
                 verification=["fast changed gate passed"],
             )
         )
-        closure = (repo / "docs" / "tasks" / "closure-log.md").read_text(encoding="utf-8")
+        closure = closure_path.read_text(encoding="utf-8")
         self.assertIn("- Effective Profile: high-risk", closure)
 
 

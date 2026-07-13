@@ -158,7 +158,8 @@ Required for normal development:
   initialization incomplete and block `doctor`; keep each value as an inline
   YAML string, quoting values that resemble numbers, dates, booleans, or YAML
   collections
-- `concurrency.isolation`: keep `worktree` for every task that may write files
+- `concurrency.isolation`: the only supported value is `worktree`; shared-checkout
+  and legacy write modes are rejected
 - `concurrency.base_ref` and `target_branch`: leave blank to derive the current
   upstream, or set them explicitly for a fixed integration branch
 - `concurrency.branch_prefix` and `worktree_root`
@@ -218,18 +219,54 @@ reinitialized or recovered.
 Integration must not update the primary checkout; pull it explicitly only when
 its user-owned state is ready.
 
+## Subagent orchestration
+
+The main agent owns the task graph and Git lifecycle. Before dispatch, decompose
+the request into bounded units and record for each unit its task ID, role, scope,
+dependencies, acceptance criteria, and expected result. Run only independent
+work concurrently.
+
+1. Run justified `explorer`, `docs_researcher`, and `browser_debugger` roles in
+   parallel for read-only discovery. Browser work collects reproduction evidence;
+   it is not post-push acceptance.
+2. The main agent merges discovery evidence and decides the design, dependency
+   graph, and non-overlapping path ownership.
+3. Assign each independent write unit to exactly one `fixer`, one registered task
+   branch, and one worktree. Never run two writers in one worktree, and do not let
+   the main agent edit a fixer-owned worktree concurrently.
+4. Parallelize fixer units only when they are dependency-free and their owned
+   paths do not overlap. Complete implementation → review → gate/integration for
+   the current dependency wave, then start the next wave only after its
+   prerequisites are integrated into the target branch.
+5. A read-only `reviewer` checks a stable diff after implementation and binds its
+   verdict to the diff fingerprint. Blocking findings return to the owning fixer;
+   any edit invalidates approval and requires re-review.
+6. Subagents never commit, push, integrate, clean branches, or run the project
+   gate. Their versioned result contains node/task/role, base SHA, status,
+   dependencies, owned and changed paths, diff fingerprint, evidence, findings,
+   verdict, risks, and next owner. Read-only roles return no changed paths.
+7. After all required results return, the main agent alone runs the single fast
+   gate for each write task, commits, integrates in dependency order, pushes, and
+   cleans all temporary branches and worktrees.
+
+`classify` emits a machine-readable `agent_plan` with this stage and ownership
+contract. Micro tasks remain main-agent-only unless useful independent work
+clearly exceeds delegation overhead. If the client cannot run subagents, execute
+the same stages sequentially without weakening worktree isolation.
+
 ## Default workflow
 
 Development:
 
 1. Read this file and the active task entry.
-2. Start the write task with `task-start` and enter its registered worktree.
-3. Run or reason through `classify --scope auto`.
+2. Analyze and decompose the request; run or reason through `classify --scope auto`.
+3. Fan out independent discovery roles, then fan their results back into one main-agent design.
 4. Record the smallest useful design note; create DD/ADR only when indicated.
-5. Implement the necessary change using existing project structure and reuse points.
-6. Run `commit-push`; it executes the one changed-scope fast gate, records
+5. Start one registered worktree per independent write unit and assign one fixer to each.
+6. Review stable diffs and return findings to their owning fixers until approved.
+7. The main agent runs `commit-push` for each write task; it executes the one changed-scope fast gate, records
    `DEV-CLOSED`, commits, and pushes the task branch.
-7. Run `task-integrate` to push the target branch and clean the task worktree and
+8. The main agent runs `task-integrate` in dependency order to push the target branch and clean the task worktree and
    merged task branches. This completes the push stage and ends the coding task.
 
 Do not wait for, poll, diagnose, or record Jenkins/build/deploy results after the

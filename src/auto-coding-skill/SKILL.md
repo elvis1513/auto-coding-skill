@@ -11,7 +11,10 @@ gate → push workflow. The project keeps one manual configuration source:
 
 At task start, inventory installed skills, MCP servers, connectors, browser
 tools, and repository scripts. Prefer the most direct authoritative capability.
-Use subagents only when work is independent and the runtime supports them.
+The main agent decomposes the task before dispatch. Run independent read-only
+discovery roles in parallel when the runtime supports them. Assign each
+independent write unit to exactly one fixer in its own registered worktree;
+never share a write worktree between agents.
 
 ## Install and upgrade
 
@@ -66,7 +69,9 @@ it before normal `commit-push`; `commit-push` owns the single automatic gate.
 ## Parallel write isolation
 
 Every task that may write files must use its own registered Git worktree and
-task branch. Read-only discovery may stay in the primary worktree.
+task branch. Read-only discovery may stay in the primary worktree. A registered
+worktree has exactly one writer. The main agent and other fixers must not edit it
+while its owning fixer is active.
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
@@ -118,17 +123,23 @@ explicitly recovered.
 
 ## Development closure
 
-1. Start the write task with `task-start` and enter its registered worktree.
-2. Locate the real entry point, call chain, existing owner module, tests, and
-   reusable helpers.
-3. Update the active task with the smallest useful design note.
-4. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
+1. The main agent analyzes and decomposes the request into bounded units with
+   explicit dependencies, acceptance criteria, and owned paths.
+2. Run justified `explorer`, `docs_researcher`, and `browser_debugger` discovery
+   in parallel, then let the main agent merge their evidence into one design.
+3. Create DD/ADR only for cross-module, API, DB, deployment/CI, security, key UI
    flow, or lasting structural decisions.
-5. Implement only necessary changes.
-6. Run `commit-push`; it executes the changed-scope fast gate once, records
+4. Start one registered task worktree per independent write unit and assign one
+   fixer to it. Parallelize only dependency-free units with non-overlapping paths;
+   deliver implementation → review → gate/integration in dependency waves, and
+   start the next wave only after its prerequisites are integrated.
+5. Review each stable diff with a read-only reviewer. Route blocking findings to
+   the owning fixer and re-review after any change.
+6. After all agents have returned, the main agent runs `commit-push` for each
+   write task; it executes the changed-scope fast gate once, records
    `DEV-CLOSED`, commits, and pushes the task branch.
-7. Run `task-integrate` to push the target branch and clean the task worktree and
-   merged task branches.
+7. The main agent runs `task-integrate` in dependency order to push the target
+   branch and clean every task worktree and merged task branch.
 8. Stop. Jenkins owns later build/deploy work and the project owner owns actual
    acceptance. Ignore later external failures unless the user opens a diagnostic task.
 
@@ -151,7 +162,7 @@ python3 docs/tools/autopipeline/ap.py baseline init --write --update-config
 
 Role templates provide behavior and permission boundaries, while the active
 client supplies the available model unless a project keeps an explicit override.
-`classify` recommends only roles justified by the effective profile:
+`classify` returns both justified roles and a structured `agent_plan`:
 
 - `explorer`: read-only repository discovery and root-cause tracing.
 - `docs_researcher`: current official API/version research.
@@ -159,8 +170,26 @@ client supplies the available model unless a project keeps an explicit override.
 - `fixer`: bounded implementation after scope is clear.
 - `reviewer`: correctness, security, regression, and evidence review.
 
-The main agent owns framing, architecture decisions, the fast gate, integration,
-closure records, and Git state through successful push.
+For standard and high-risk write tasks, use the following fan-out/fan-in contract:
+
+1. The main agent owns decomposition and supplies every subagent with `task_id`,
+   role, scope, dependencies, acceptance criteria, and expected output.
+2. Discovery roles are read-only and may run in parallel. Browser work is limited
+   to requested reproduction/evidence; it does not replace owner acceptance.
+3. Each fixer receives a task branch, absolute worktree path, and owned paths.
+   It may edit only that worktree and must not commit, push, integrate, clean, or
+   run the project gate.
+4. Each reviewer receives a stable diff and binds approved or changes-requested
+   to its fingerprint. Changes go back to the same fixer and invalidate approval.
+5. Every subagent returns the versioned contract fields, including node/task/role,
+   base SHA, dependencies, owned and changed paths, diff fingerprint, evidence,
+   findings, verdict, risks, and next owner. Read-only roles return no changed paths.
+6. The main agent alone owns architecture decisions, the single fast gate per
+   write task, closure records, commits, integration, push, and branch cleanup.
+
+Micro tasks stay main-agent-only unless they contain genuinely independent work
+whose benefit exceeds delegation overhead. If subagents are unavailable, the
+main agent executes the same stages sequentially without weakening isolation.
 
 ## Tool routing
 

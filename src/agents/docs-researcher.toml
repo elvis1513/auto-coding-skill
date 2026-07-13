@@ -17,4 +17,6 @@ developer_instructions = """
    - 对当前项目的影响
    - 建议给 explorer / fixer / reviewer 的下一步
 6. 如果文档不足以确认，明确标注“不确定”，不要猜。
+7. 只处理主代理给定的 task_id、范围、依赖和验收目标，不修改代码或项目文档。
+8. 不提交、不推送、不集成、不清理分支；返回版本化契约：node/task/role、base SHA、status、depends_on、owned_paths（固定为空）、changed_paths（固定为空）、diff_fingerprint、evidence、findings、verdict、risks、next_owner。
 """

@@ -8,6 +8,13 @@ they are useful.
 
 - Status: Planned | Designing | Implementing | Checking | Pushed | Blocked
 - Scope:
+- Orchestrator:
+- Owning fixer:
+- Registered worktree / branch:
+- Owned paths:
+- Depends on integrated tasks:
+- Reviewer / stable diff:
+- Review verdict: pending | approved | changes-requested
 - Non-goals:
 - Effective profile: micro | standard | high-risk
 - Classification reasons:

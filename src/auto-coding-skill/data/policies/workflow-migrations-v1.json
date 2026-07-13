@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "managed_versions": {
+    "agents": "3.0.2",
+    "engineering": "3.0.2"
+  },
+  "known_official_agents_sha256": [
+    "ebaaadab60327b3a4852948443d7191a4d48cb00bf4910038ab78c9149089373"
+  ],
+  "known_official_engineering_body_sha256": [
+    "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
+    "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
+    "198d675361337bc272880154266b3eb1f50e3f82f3c6ab04b2e559cd18d8c7b4"
+  ],
+  "known_official_fragments": [
+    {
+      "id": "agents-v22-autovpn-high-risk",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `high-risk` is mandatory for migrations, auth/access, billing/orders, Jenkins, container or production deployment work. It cannot be downgraded and must run the real `gate_full`, then use `verify` for Jenkins and target-environment evidence."
+    },
+    {
+      "id": "agents-v22-autovpn-resolved-gate",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "7. Run the resolved changed/standard/full gate. High-risk work must use the configured real full command and then verify Jenkins/target surfaces before `PASS`."
+    },
+    {
+      "id": "agents-v22-autovpn-version",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- Version 2.2 resolves `auto` to micro/standard/high-risk, enforces a strict real full gate for high-risk work, and selects roles dynamically."
+    },
+    {
+      "id": "agents-v22-geemanage-profile",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- The repo-local auto-coding-skill 2.2 workflow resolves `auto` into `micro`, `standard`, or `high-risk`; high-risk always uses a real full gate and verify-style closure."
+    },
+    {
+      "id": "agents-v22-geemanage-gate",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `high-risk`: configured full gate; changed/standard fallback is invalid."
+    },
+    {
+      "id": "agents-v22-geemill-profile",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `docs/ENGINEERING.md` uses auto-coding-skill 2.2 profiles: `micro`, `standard`, and `high-risk`. `auto` selects one profile; high-risk always requires a real full gate and verify closure."
+    },
+    {
+      "id": "agents-v22-geemill-gate",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `high-risk`: the real `gate_full`; changed/standard fallback is forbidden"
+    },
+    {
+      "id": "agents-v22-geemill-verify",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "7. For high-risk, pass full locally, commit/push, verify configured Jenkins and target surfaces, then record `PASS`, `FAIL`, or `PARTIAL` from actual evidence."
+    },
+    {
+      "id": "agents-v22-geestack-profile",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- Let `workflow.profile: auto` resolve the effective `micro`, `standard`, or `high-risk` path. High-risk signals force a real full gate and verified closure even when the configured baseline mode is `dev`."
+    },
+    {
+      "id": "agents-v22-geestack-gate",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `micro` uses the changed gate, `standard` uses the standard gate, and `high-risk` must execute `commands.gate_full`; a light or standard fallback never counts as full verification."
+    },
+    {
+      "id": "agents-v22-geestack-verify",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- After push, verify Jenkins build and production target health when the effective profile is high-risk, the configured mode is `verify`, or the user explicitly requests it. Use `--allow-no-deploy` only for docs-only sync verification."
+    },
+    {
+      "id": "agents-v22-geestack-path",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- Dockerfiles, compose, Jenkins, workflow tooling, auth/payment, and database changes automatically enter the high-risk/full path."
+    },
+    {
+      "id": "agents-v22-geestock-full",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- Runtime/config/schema changes require the full gate declared in `docs/ENGINEERING.md`."
+    },
+    {
+      "id": "agents-v22-govchain-full",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `high-risk` cannot be downgraded and must execute `commands.gate_full`; changed or standard fallbacks do not count. Use `PASS / FAIL / PARTIAL` only from the required executed evidence."
+    },
+    {
+      "id": "agents-v22-geesight-flow",
+      "paths": ["AGENTS.md"],
+      "match": "exact-block",
+      "text": "- Micro work uses the changed gate and dev closure; ordinary product work uses the\n  standard three-stack gate and dev closure; DB, auth, dependency, deployment,\n  Jenkins, Docker, Compose, or MediaMTX changes use the real full gate and verify closure.\n- High-risk signals cannot be downgraded. Jenkins and target verification run only\n  after commit/push when the effective profile is high-risk or verification is explicit."
+    },
+    {
+      "id": "agents-v22-xjmate-version",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- For any non-trivial code, config, deployment, database, UI, or docs change, follow the repo-local auto-coding-skill 2.2 workflow."
+    },
+    {
+      "id": "agents-v22-xjmate-high-risk",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- `high-risk`: DB, auth/access/account, content security, files/object storage, client contracts, gateway/deployment/build/tooling, or explicit verify work; run the real `gate_full`, commit/push, verify Jenkins and target surfaces, then record `PASS`, `FAIL`, or `PARTIAL`."
+    },
+    {
+      "id": "agents-v22-xjmate-fallback",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- High-risk signals cannot be downgraded. A changed/standard gate cannot substitute for full."
+    },
+    {
+      "id": "agents-v22-xjmate-local-full",
+      "paths": ["AGENTS.md"],
+      "match": "exact-line",
+      "text": "- Local Docker startup/runtime checks remain opt-in by task scope; high-risk local full still requires all configured non-runtime build/test/static checks."
+    },
+    {
+      "id": "engineering-v22-table-high-risk-en",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "| `high-risk` | DB/auth/payment/deploy/build config or declared high risk | full | verify |"
+    },
+    {
+      "id": "engineering-v22-autovpn-table-high-risk",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "| `high-risk` | migration、auth/access、billing/order、Jenkins、容器与生产部署 | real full | verify |"
+    },
+    {
+      "id": "engineering-v22-geemanage-high-risk",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "- `high-risk` 用于数据库迁移、认证权限、安全、依赖/构建、Jenkins、Compose、运行时配置或显式 verify 工作；必须执行真正的 `commands.gate_full`，不得降级为 changed/standard。"
+    },
+    {
+      "id": "engineering-v22-geemanage-flow",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "5. 执行解析后的 gate；high-risk 必须 full。\n6. micro/standard 记录 `DEV-CLOSED`；high-risk/verify 在真实验证后记录 `PASS`、`FAIL` 或 `PARTIAL`。"
+    },
+    {
+      "id": "engineering-v22-geemill-high-risk",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "- `high-risk`：数据库迁移、认证/RBAC、MOM/ICS envelope 与 inbox/outbox/replay、排产与仓储锁、生产状态流转、Jenkins/Compose/部署、依赖及工作流工具变更；必须执行真实 `commands.gate_full`，并进入 `verify`。"
+    },
+    {
+      "id": "engineering-v22-xjmate-high-risk",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "- `high-risk`：数据库迁移、认证/访问控制/账号、管理员写操作与审计、内容安全、文件与对象存储、客户端契约、网关/部署/依赖/构建或工作流工具变更；必须执行真实 `commands.gate_full`，并进入 `verify`。"
+    },
+    {
+      "id": "engineering-v22-full-fallback-zh",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "高风险信号不可由 CLI、规则或手工 scope 降级。full 只能由 `gate_full`（或兼容的 `full_gate`）满足，不能回退到 changed/standard。"
+    },
+    {
+      "id": "engineering-v22-geesight-table",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "| `high-risk` | DB migration、OpenAPI/依赖锁、身份权限、Docker/Compose、MediaMTX、Jenkins | 真实 `gate_full` | `verify` |"
+    },
+    {
+      "id": "engineering-v22-verify-zh",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "本项目要求 Jenkins 和目标环境验证。high-risk 本地 full 通过后提交推送，再以真实 Jenkins、健康检查、API、页面或业务路径证据记录 `PASS`、`FAIL` 或 `PARTIAL`。未执行的验证不得写成通过。"
+    },
+    {
+      "id": "engineering-v22-xjmate-verify-zh",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "本项目要求 Jenkins 和目标环境验证。high-risk 本地 full 通过后提交推送，再以真实 Jenkins、目标健康、API、小程序/管理端或业务路径证据记录 `PASS`、`FAIL` 或 `PARTIAL`。未执行的验证不得写成通过。"
+    },
+    {
+      "id": "engineering-v22-autovpn-full-contract",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "`workflow.profile: auto` 只负责选择最终档位。高风险路径、声明为\n`profile: high-risk` 的规则、显式 full 或 verify 都不可被命令行降级。\n高风险任务必须执行 `commands.gate_full`；changed、standard、light gate\n或单项测试不能冒充 full gate。"
+    },
+    {
+      "id": "engineering-v22-autovpn-closure",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "6. micro/standard 写 `DEV-CLOSED` 后 commit + push；high-risk 先完成 real\n   full，再 commit + push，并继续 Jenkins/目标环境验证后记录\n   `PASS`、`FAIL` 或 `PARTIAL`。"
+    },
+    {
+      "id": "engineering-v22-geemanage-external-gate",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "- `verification.jenkins_required` 和 `verification.target_env_required` 分别要求外部 Jenkins 和目标环境证据。T0012 已修复 GeeManage SCM，Jenkins #16 从 `dev` 精确提交构建、发布并部署成功，因此两项均为强制门禁；不能用本地结果替代外部证据。"
+    },
+    {
+      "id": "engineering-v22-geemanage-auto-full",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "- PostgreSQL schema 只通过 `backend/migrations` 变更；迁移、认证和运行时配置自动进入 high-risk/full。"
+    },
+    {
+      "id": "engineering-v22-geemill-version",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "本仓库使用 auto-coding-skill 2.2 的自适应开发工作流。Frontmatter 是唯一的手工工作流配置源；项目事实、任务、接口和历史证据继续保存在对应文档中。"
+    },
+    {
+      "id": "engineering-v22-xjmate-version",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "本仓库使用 auto-coding-skill 2.2 的自适应开发工作流。Frontmatter 是唯一的手工工作流配置源；产品决策、任务、接口和历史证据继续保存在项目文档中。"
+    },
+    {
+      "id": "engineering-v22-geestack-heading",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "# GeeStack Engineering Workflow (auto-coding-skill 2.2)"
+    },
+    {
+      "id": "engineering-v22-geestack-full-contract",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "- `high-risk`: authentication, payment, database, gateway, deployment, build\n  configuration, or workflow tooling. Run the real `gate_full` and use verified\n  closure.\n\nA high-risk signal cannot be downgraded by a CLI flag. The full path must execute\n`commands.gate_full`; a light or standard fallback is not equivalent."
+    },
+    {
+      "id": "engineering-v22-geestack-verification",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "Jenkins and target verification are enabled for this repository. High-risk work\ntherefore requires the full local gate, push-triggered Jenkins evidence, and the\nconfigured target health/business checks before a PASS closure. Do not claim a\nmatrix or deployment result from a command that did not run."
+    },
+    {
+      "id": "engineering-v22-geestock-selector",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "`auto` is only a selector. The effective profile is always `micro`, `standard`,\nor `high-risk`. A high-risk signal cannot be downgraded with a CLI flag or a\nproject rule. An explicit non-auto profile replaces auto's low/normal baseline.\n`workflow.mode: verify` also requires the full gate.\n\nProject `gate.rules` may declare `paths`, `commands`, `scope`, and an optional\n`profile`. Configure `commands.gate_full` (or legacy `commands.full_gate`) for\nhigh-risk work; a light or standard command does not count as a full gate."
+    },
+    {
+      "id": "engineering-v22-geestock-verified-flow",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "High-risk or explicit verification:\n\n1. Run the real full gate.\n2. Commit and push.\n3. Verify enabled CI/Jenkins and target-environment surfaces.\n4. Record `PASS`, `FAIL`, or `PARTIAL` from actual evidence."
+    },
+    {
+      "id": "engineering-v22-govchain-heading",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "# GovChain Engineering Workflow (auto-coding-skill 2.2)"
+    },
+    {
+      "id": "engineering-v22-govchain-full-contract",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "- `high-risk`: database, authentication, file transfer, gateway, deployment,\n  build configuration, or workflow tooling; run the real full gate and use\n  verified closure.\n\nHigh-risk signals cannot be downgraded. A full result is valid only when\n`commands.gate_full` executes; changed/standard fallbacks do not count."
+    },
+    {
+      "id": "engineering-v22-govchain-full-closure",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "high-risk work uses `PASS`, `FAIL`, or `PARTIAL` after its full gate."
+    },
+    {
+      "id": "engineering-v22-govchain-disabled-external",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "- Jenkins and target verification are currently disabled in configuration.\n  High-risk work still requires the real local full gate; disabled external\n  surfaces must be reported as skipped, never as passed."
+    },
+    {
+      "id": "engineering-v22-geesight-profile",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "高风险信号不能被命令行或项目规则降级。只有 high-risk 才自动进入 verify；普通开发不因\n项目具备 Jenkins 和目标环境而被迫执行完整部署闭环。"
+    },
+    {
+      "id": "engineering-v22-geesight-full-command",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-line",
+      "text": "python3 docs/tools/autopipeline/ap.py light-gate --scope full --profile high-risk --mode verify --explain"
+    },
+    {
+      "id": "engineering-v22-geesight-verified-closure",
+      "paths": ["docs/ENGINEERING.md"],
+      "match": "exact-block",
+      "text": "high-risk 工作必须先通过本地 full gate，再提交推送，随后验证启用的 Jenkins 与目标环境，\n最后依据真实证据记录 PASS、FAIL 或 PARTIAL。Jenkins/目标配置、账号和明文密码直接维护在\nfrontmatter 的 `access.*`；兼容凭据环境变量可继续保留。本地审计或升级不得自行触发构建、部署或目标探测。"
+    }
+  ],
+  "conflict_rules": [
+    {
+      "id": "stale-workflow-version",
+      "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+      "pattern": "auto-coding-skill\\s+2\\.2",
+      "flags": "i",
+      "message": "stale 2.2 workflow authority remains outside the managed block"
+    },
+    {
+      "id": "expanded-full-gate-en",
+      "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+      "pattern": "(?:high[- ]risk|normal development|runtime/config/schema)[^\\n]*(?:must|always|requires?|force|cannot|forbidden|invalid|still requires)[^\\n]*(?:gate_full|full gate|real full|full path|full verification)|(?:gate_full|full gate|real full|full path)[^\\n]*(?:must|requires?|cannot|forbidden|invalid)",
+      "flags": "i",
+      "message": "normal development is required to run an expanded full gate"
+    },
+    {
+      "id": "expanded-profile-table",
+      "paths": ["docs/ENGINEERING.md"],
+      "pattern": "^\\s*\\|\\s*`?high[- ]risk`?\\s*\\|[^\\n]*\\|\\s*(?:real\\s+)?`?(?:gate_)?full`?\\s*\\|",
+      "flags": "i",
+      "message": "profile table still maps high-risk work to a full gate"
+    },
+    {
+      "id": "expanded-full-gate-zh",
+      "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+      "pattern": "(?:high-risk|高风险)[^\\n]*(?:必须|不得|不能|不可|要求)[^\\n]*(?:gate_full|full|完整门禁|verify|Jenkins|目标环境)|(?:必须|要求)[^\\n]*(?:gate_full|full)[^\\n]*(?:high-risk|高风险)",
+      "flags": "i",
+      "message": "正常开发被要求执行 full/verify 外部门禁"
+    },
+    {
+      "id": "post-push-external-verification",
+      "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+      "pattern": "(?:after (?:commit/)?push|push-triggered|提交推送后|推送后)[^\\n]*(?:verify|verification|验证)[^\\n]*(?:Jenkins|target|目标)|(?:Jenkins|target|目标)[^\\n]*(?:verify|verification|验证)[^\\n]*(?:after (?:commit/)?push|提交推送后|推送后)",
+      "flags": "i",
+      "message": "coding closure still requires post-push Jenkins or target verification"
+    }
+  ],
+  "dependency_recovery": {
+    "allowed_gate": "gate_changed",
+    "requires_locked_dependency": true,
+    "retry_same_gate_only": true,
+    "forbid_full_gate_recovery": true
+  }
+}

@@ -121,7 +121,7 @@ docs:
 
 # Engineering Workflow
 
-<!-- auto-coding-skill:managed-workflow:start version=3.0.1 -->
+<!-- auto-coding-skill:managed-workflow:start version=3.0.2 -->
 
 This file is the single project workflow configuration. Keep it in Git. Its YAML
 frontmatter and content outside these versioned markers are manually maintained;
@@ -178,6 +178,13 @@ Legacy command keys such as `commands.light_gate`, `test`, and `build` remain
 callable explicitly with `ap.py run <name>` but never replace the automatic
 changed gate. `quick_test` remains the only fallback when `gate_changed` is
 absent. Run `doctor` for exact missing-field diagnostics.
+
+If the actual changed gate fails only because a dependency already declared in
+the repository lockfile is not installed in the task worktree, restore that
+locked dependency locally (for example with `npm ci`) and rerun the same changed
+gate once. Do not install dependencies or restart a standard/full diagnostic
+that was invoked outside the normal development gate, and never promote this
+recovery into a full-gate run.
 
 ## Concurrent write tasks
 

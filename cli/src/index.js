@@ -402,29 +402,27 @@ const MANAGED_WORKFLOW_START_TOKEN = "auto-coding-skill:managed-workflow:start";
 const MANAGED_WORKFLOW_END_TOKEN = "auto-coding-skill:managed-workflow:end";
 const MANAGED_WORKFLOW_START_RE = /<!--\s*auto-coding-skill:managed-workflow:start\s+version=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/g;
 const MANAGED_WORKFLOW_END_RE = /<!--\s*auto-coding-skill:managed-workflow:end\s*-->/g;
-const KNOWN_OFFICIAL_LEGACY_BODY_HASHES = new Set([
-  // v2.2.0, v3.0.0, and origin/dev@c532734 respectively. Frontmatter is excluded.
-  "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
-  "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
-  "198d675361337bc272880154266b3eb1f50e3f82f3c6ab04b2e559cd18d8c7b4",
-]);
+const MANAGED_AGENTS_START_TOKEN = "auto-coding-skill:managed-agents:start";
+const MANAGED_AGENTS_END_TOKEN = "auto-coding-skill:managed-agents:end";
+const MANAGED_AGENTS_START_RE = /<!--\s*auto-coding-skill:managed-agents:start\s+version=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/g;
+const MANAGED_AGENTS_END_RE = /<!--\s*auto-coding-skill:managed-agents:end\s*-->/g;
 
 function tokenCount(text, token){
   return text.split(token).length - 1;
 }
 
-function inspectManagedWorkflow(text){
-  const rawStarts = tokenCount(text, MANAGED_WORKFLOW_START_TOKEN);
-  const rawEnds = tokenCount(text, MANAGED_WORKFLOW_END_TOKEN);
+function inspectManagedRegion(text, startToken, endToken, startPattern, endPattern, label){
+  const rawStarts = tokenCount(text, startToken);
+  const rawEnds = tokenCount(text, endToken);
   if (rawStarts === 0 && rawEnds === 0) return { state: "absent" };
 
-  const starts = [...text.matchAll(MANAGED_WORKFLOW_START_RE)];
-  const ends = [...text.matchAll(MANAGED_WORKFLOW_END_RE)];
+  const starts = [...text.matchAll(startPattern)];
+  const ends = [...text.matchAll(endPattern)];
   if (rawStarts !== starts.length || rawEnds !== ends.length) {
-    return { state: "invalid", detail: "managed workflow marker is malformed" };
+    return { state: "invalid", detail: `managed ${label} marker is malformed` };
   }
   if (starts.length !== 1 || ends.length !== 1) {
-    return { state: "invalid", detail: "managed workflow markers must contain exactly one start/end pair" };
+    return { state: "invalid", detail: `managed ${label} markers must contain exactly one start/end pair` };
   }
   const start = starts[0].index;
   const end = ends[0].index;
@@ -439,6 +437,139 @@ function inspectManagedWorkflow(text){
     endExclusive,
     block: text.slice(start, endExclusive),
   };
+}
+
+function inspectManagedWorkflow(text){
+  return inspectManagedRegion(
+    text,
+    MANAGED_WORKFLOW_START_TOKEN,
+    MANAGED_WORKFLOW_END_TOKEN,
+    MANAGED_WORKFLOW_START_RE,
+    MANAGED_WORKFLOW_END_RE,
+    "workflow",
+  );
+}
+
+function inspectManagedAgentsDocument(text){
+  return inspectManagedRegion(
+    text,
+    MANAGED_AGENTS_START_TOKEN,
+    MANAGED_AGENTS_END_TOKEN,
+    MANAGED_AGENTS_START_RE,
+    MANAGED_AGENTS_END_RE,
+    "agents",
+  );
+}
+
+function loadWorkflowMigrationPolicy(assetSkill){
+  const policyPath = path.join(assetSkill, "data", "policies", "workflow-migrations-v1.json");
+  let policy;
+  try {
+    policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
+  } catch (error) {
+    throw new Error(`invalid workflow migration policy ${policyPath}: ${error.message}`);
+  }
+  if (
+    policy?.schema_version !== 1
+    || !policy.managed_versions?.agents
+    || !policy.managed_versions?.engineering
+    || !Array.isArray(policy.known_official_agents_sha256)
+    || !Array.isArray(policy.known_official_engineering_body_sha256)
+    || !Array.isArray(policy.known_official_fragments)
+    || !Array.isArray(policy.conflict_rules)
+  ) {
+    throw new Error(`invalid workflow migration policy schema: ${policyPath}`);
+  }
+  return policy;
+}
+
+function escapeRegExp(text){
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applyKnownOfficialFragments(text, documentPath, policy){
+  let output = text;
+  const migrations = [];
+  for (const fragment of policy.known_official_fragments) {
+    if (!fragment.paths?.includes(documentPath) || !fragment.text) continue;
+    let pattern;
+    if (fragment.match === "exact-line") {
+      pattern = new RegExp(`^[\\t ]*${escapeRegExp(fragment.text.trim())}[\\t ]*(?:\\r?\\n|$)`, "gm");
+    } else if (fragment.match === "exact-block") {
+      const source = fragment.text.split("\n").map(escapeRegExp).join("\\r?\\n");
+      pattern = new RegExp(source, "g");
+    } else {
+      throw new Error(`unsupported workflow migration match '${fragment.match}' for ${fragment.id}`);
+    }
+    const updated = output.replace(pattern, "");
+    if (updated !== output) {
+      migrations.push(fragment.id);
+      output = updated;
+    }
+  }
+  return { output, migrations };
+}
+
+function scanWorkflowConflicts(text, documentPath, policy){
+  const conflicts = [];
+  const seen = new Set();
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const candidates = lines.map((line, index) => ({ text: line, line: index + 1 }));
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+    if (/^\s*(?:[-+*]|\d+\.)\s+/.test(line)) {
+      let end = index + 1;
+      while (end < lines.length && /^\s{2,}\S/.test(lines[end]) && !/^\s*(?:[-+*]|\d+\.)\s+/.test(lines[end])) end += 1;
+      if (end > index + 1) candidates.push({ text: lines.slice(index, end).join(" "), line: index + 1 });
+      continue;
+    }
+    if (/^\s*(?:#|\||```|~~~)/.test(line)) continue;
+    let end = index + 1;
+    while (end < lines.length && lines[end].trim() && !/^\s*(?:#|\||```|~~~|[-+*]|\d+\.)\s*/.test(lines[end])) end += 1;
+    if (end > index + 1) candidates.push({ text: lines.slice(index, end).join(" "), line: index + 1 });
+  }
+  for (const rule of policy.conflict_rules) {
+    if (!rule.paths?.includes(documentPath)) continue;
+    let pattern;
+    try {
+      pattern = new RegExp(rule.pattern, String(rule.flags || "").replaceAll("g", ""));
+    } catch (error) {
+      throw new Error(`invalid workflow conflict rule ${rule.id}: ${error.message}`);
+    }
+    for (const candidate of candidates) {
+      if (!pattern.test(candidate.text)) continue;
+      const key = `${rule.id}:${candidate.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      conflicts.push({
+        file: documentPath,
+        line: candidate.line,
+        ruleId: rule.id,
+        message: rule.message,
+        excerpt: candidate.text.trim().slice(0, 240),
+      });
+    }
+  }
+  return conflicts;
+}
+
+function migrateDocumentText(text, documentPath, policy){
+  const migrated = applyKnownOfficialFragments(text, documentPath, policy);
+  return {
+    output: migrated.output,
+    migrations: migrated.migrations,
+    conflicts: scanWorkflowConflicts(migrated.output, documentPath, policy),
+  };
+}
+
+function replaceManagedBlock(text, region, block){
+  let before = text.slice(0, region.start);
+  let after = text.slice(region.endExclusive);
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  if (before && !/(?:\r?\n)$/.test(before)) before += eol;
+  if (after && !/^(?:\r?\n)/.test(after)) after = `${eol}${after}`;
+  return `${before}${block}${after}`;
 }
 
 function splitEngineeringDocument(text){
@@ -459,10 +590,21 @@ function insertManagedWorkflow(text, block){
   const insertion = heading ? bodyStart + heading.index + heading[0].length : bodyStart;
   const before = text.slice(0, insertion);
   const after = text.slice(insertion);
-  return `${before}${block}${after}`;
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const left = before && !/(?:\r?\n)$/.test(before) ? `${before}${eol}` : before;
+  const right = after && !/^(?:\r?\n)/.test(after) ? `${eol}${after}` : after;
+  return `${left}${block}${right}`;
 }
 
-function planEngineeringSync(project, assetSkill){
+function lineCount(text){
+  return text ? text.replace(/\r\n/g, "\n").split("\n").length - 1 : 0;
+}
+
+function offsetConflicts(conflicts, offset){
+  return conflicts.map(conflict => ({ ...conflict, line: conflict.line + offset }));
+}
+
+function planEngineeringSync(project, assetSkill, policy = loadWorkflowMigrationPolicy(assetSkill)){
   const root = path.resolve(project);
   const engineering = path.join(root, "docs", "ENGINEERING.md");
   const templatePath = path.join(assetSkill, "data", "templates", "ENGINEERING.md");
@@ -471,8 +613,11 @@ function planEngineeringSync(project, assetSkill){
   if (templateRegion.state !== "present") {
     return { state: "invalid", detail: `packaged ENGINEERING template: ${templateRegion.detail || "managed workflow markers are missing"}` };
   }
+  if (templateRegion.version !== policy.managed_versions.engineering) {
+    return { state: "invalid", detail: `packaged ENGINEERING version ${templateRegion.version} does not match migration policy ${policy.managed_versions.engineering}` };
+  }
   if (!exists(engineering)) {
-    return { state: "missing", version: templateRegion.version, output: renderedTemplate, engineering };
+    return { state: "missing", version: templateRegion.version, output: renderedTemplate, engineering, migrations: [], conflicts: [] };
   }
 
   const current = fs.readFileSync(engineering, "utf8");
@@ -482,32 +627,160 @@ function planEngineeringSync(project, assetSkill){
     const currentParts = splitEngineeringDocument(current);
     const templateParts = splitEngineeringDocument(renderedTemplate);
     const legacyHash = engineeringBodyHash(currentParts.body);
-    if (KNOWN_OFFICIAL_LEGACY_BODY_HASHES.has(legacyHash)) {
+    if (policy.known_official_engineering_body_sha256.includes(legacyHash)) {
       return {
         state: "legacy-official",
         version: templateRegion.version,
         previousBodyHash: legacyHash,
         output: `${currentParts.frontmatter}${templateParts.body}`,
         engineering,
+        migrations: [`engineering-body-sha256:${legacyHash}`],
+        conflicts: [],
+      };
+    }
+    const migrated = migrateDocumentText(currentParts.body, "docs/ENGINEERING.md", policy);
+    const conflicts = offsetConflicts(migrated.conflicts, lineCount(currentParts.frontmatter));
+    if (conflicts.length) {
+      return {
+        state: "conflict",
+        version: templateRegion.version,
+        engineering,
+        migrations: migrated.migrations,
+        conflicts,
+        detail: "unknown workflow directives conflict with the managed fast-gate policy",
       };
     }
     return {
       state: "legacy-custom",
       version: templateRegion.version,
       preservedCustom: true,
-      output: insertManagedWorkflow(current, templateRegion.block),
+      output: insertManagedWorkflow(`${currentParts.frontmatter}${migrated.output}`, templateRegion.block),
       engineering,
+      migrations: migrated.migrations,
+      conflicts: [],
     };
   }
-  if (currentRegion.block === templateRegion.block) {
-    return { state: "current", version: templateRegion.version, output: current, engineering };
+  const beforeParts = splitEngineeringDocument(current.slice(0, currentRegion.start));
+  const migratedBefore = migrateDocumentText(beforeParts.body, "docs/ENGINEERING.md", policy);
+  const migratedAfter = migrateDocumentText(current.slice(currentRegion.endExclusive), "docs/ENGINEERING.md", policy);
+  const conflicts = [
+    ...offsetConflicts(migratedBefore.conflicts, lineCount(beforeParts.frontmatter)),
+    ...offsetConflicts(migratedAfter.conflicts, lineCount(current.slice(0, currentRegion.endExclusive))),
+  ];
+  const migrations = [...migratedBefore.migrations, ...migratedAfter.migrations];
+  if (conflicts.length) {
+    return {
+      state: "conflict",
+      version: templateRegion.version,
+      previousVersion: currentRegion.version,
+      engineering,
+      migrations,
+      conflicts,
+      detail: "unknown workflow directives conflict with the managed fast-gate policy",
+    };
   }
+  const migratedCurrent = `${beforeParts.frontmatter}${migratedBefore.output}${currentRegion.block}${migratedAfter.output}`;
+  const migratedRegion = inspectManagedWorkflow(migratedCurrent);
+  const output = replaceManagedBlock(migratedCurrent, migratedRegion, templateRegion.block);
+  if (current === output) return { state: "current", version: templateRegion.version, output, engineering, migrations: [], conflicts: [] };
   return {
     state: "stale",
     version: templateRegion.version,
     previousVersion: currentRegion.version,
-    output: `${current.slice(0, currentRegion.start)}${templateRegion.block}${current.slice(currentRegion.endExclusive)}`,
+    output,
     engineering,
+    migrations,
+    conflicts: [],
+  };
+}
+
+function planAgentsDocumentSync(project, assetSkill, policy = loadWorkflowMigrationPolicy(assetSkill)){
+  const root = path.resolve(project);
+  const agentsDocument = path.join(root, "AGENTS.md");
+  const templatePath = path.join(assetSkill, "data", "templates", "bridges", "AGENTS.md");
+  const template = fs.readFileSync(templatePath, "utf8");
+  const templateRegion = inspectManagedAgentsDocument(template);
+  if (templateRegion.state !== "present" || templateRegion.version !== policy.managed_versions.agents) {
+    return { state: "invalid", detail: "packaged AGENTS template markers/version do not match the migration policy", agentsDocument };
+  }
+  if (!exists(agentsDocument)) {
+    return { state: "missing", version: templateRegion.version, output: template, agentsDocument, migrations: [], conflicts: [] };
+  }
+  const current = fs.readFileSync(agentsDocument, "utf8");
+  const currentHash = engineeringBodyHash(current);
+  if (policy.known_official_agents_sha256.includes(currentHash)) {
+    return {
+      state: "legacy-official",
+      version: templateRegion.version,
+      output: template,
+      agentsDocument,
+      migrations: [`agents-sha256:${currentHash}`],
+      conflicts: [],
+    };
+  }
+  const currentRegion = inspectManagedAgentsDocument(current);
+  if (currentRegion.state === "invalid") return { ...currentRegion, agentsDocument };
+  if (currentRegion.state === "absent") {
+    const migrated = migrateDocumentText(current, "AGENTS.md", policy);
+    if (migrated.conflicts.length) {
+      return {
+        state: "conflict",
+        version: templateRegion.version,
+        agentsDocument,
+        migrations: migrated.migrations,
+        conflicts: migrated.conflicts,
+        detail: "unknown workflow directives conflict with the managed fast-gate policy",
+      };
+    }
+    const separator = migrated.output ? (migrated.output.startsWith("\n") ? "" : "\n") : "";
+    return {
+      state: "legacy-custom",
+      version: templateRegion.version,
+      preservedCustom: true,
+      output: `${templateRegion.block}${separator}${migrated.output}`,
+      agentsDocument,
+      migrations: migrated.migrations,
+      conflicts: [],
+    };
+  }
+  const migratedBefore = migrateDocumentText(current.slice(0, currentRegion.start), "AGENTS.md", policy);
+  const migratedAfter = migrateDocumentText(current.slice(currentRegion.endExclusive), "AGENTS.md", policy);
+  const conflicts = [
+    ...migratedBefore.conflicts,
+    ...offsetConflicts(migratedAfter.conflicts, lineCount(current.slice(0, currentRegion.endExclusive))),
+  ];
+  const migrations = [...migratedBefore.migrations, ...migratedAfter.migrations];
+  if (conflicts.length) {
+    return {
+      state: "conflict",
+      version: templateRegion.version,
+      previousVersion: currentRegion.version,
+      agentsDocument,
+      migrations,
+      conflicts,
+      detail: "unknown workflow directives conflict with the managed fast-gate policy",
+    };
+  }
+  const migratedCurrent = `${migratedBefore.output}${currentRegion.block}${migratedAfter.output}`;
+  const migratedRegion = inspectManagedAgentsDocument(migratedCurrent);
+  const output = replaceManagedBlock(migratedCurrent, migratedRegion, templateRegion.block);
+  if (current === output) return { state: "current", version: templateRegion.version, output, agentsDocument, migrations: [], conflicts: [] };
+  return {
+    state: "stale",
+    version: templateRegion.version,
+    previousVersion: currentRegion.version,
+    output,
+    agentsDocument,
+    migrations,
+    conflicts: [],
+  };
+}
+
+function planControlledDocuments(project, assetSkill){
+  const policy = loadWorkflowMigrationPolicy(assetSkill);
+  return {
+    engineering: planEngineeringSync(project, assetSkill, policy),
+    agents: planAgentsDocumentSync(project, assetSkill, policy),
   };
 }
 
@@ -518,6 +791,8 @@ function publicEngineeringPlan(plan){
     ...(plan.previousVersion ? { previousVersion: plan.previousVersion } : {}),
     ...(plan.previousBodyHash ? { previousBodyHash: plan.previousBodyHash } : {}),
     ...(plan.preservedCustom ? { preservedCustom: true } : {}),
+    ...(plan.migrations?.length ? { migrations: plan.migrations } : {}),
+    ...(plan.conflicts?.length ? { conflicts: plan.conflicts } : {}),
     ...(plan.detail ? { detail: plan.detail } : {}),
   };
 }
@@ -696,8 +971,11 @@ function projectStatus(project, assetSkill, assetAgents){
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
   const engineering = path.join(root, "docs", "ENGINEERING.md");
   const engineeringMissing = !exists(engineering);
-  const engineeringPlan = planEngineeringSync(root, assetSkill);
+  const controlledPlans = planControlledDocuments(root, assetSkill);
+  const engineeringPlan = controlledPlans.engineering;
+  const agentsDocumentPlan = controlledPlans.agents;
   const managedWorkflow = publicEngineeringPlan(engineeringPlan);
+  const managedAgentsDocument = publicEngineeringPlan(agentsDocumentPlan);
   const requiredConfigPaths = [
     { label: "workflow.mode", path: ["workflow", "mode"] },
     { label: "workflow.profile", path: ["workflow", "profile"] },
@@ -768,13 +1046,13 @@ function projectStatus(project, assetSkill, assetAgents){
     ? compareManagedAgents(assetAgents, agentsDir)
     : { diffs: [{ path: ".agents/agents", status: "missing" }], bindings: [] };
   const agentDiffs = agentStatus.diffs;
-  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current";
+  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current" && managedAgentsDocument.state === "current";
   let next = "";
   if (!exists(skillDir) || !exists(agentsDir)) {
     next = "run autocoding init --force";
   } else if (skillDiffs.length || agentDiffs.length) {
     next = "run autocoding sync --projects <repo>";
-  } else if (engineeringMissing || managedWorkflow.state !== "current" || scriptDiffs.length || missingDocs.length) {
+  } else if (engineeringMissing || managedWorkflow.state !== "current" || managedAgentsDocument.state !== "current" || scriptDiffs.length || missingDocs.length) {
     next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
   } else if (missingConfigPaths.length) {
     next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
@@ -796,6 +1074,7 @@ function projectStatus(project, assetSkill, assetAgents){
     unfilledConfigTokens,
     invalidConfigTokens,
     managedWorkflow,
+    managedAgentsDocument,
     next,
   };
 }
@@ -815,6 +1094,10 @@ function printProjectStatus(result){
     const detail = result.managedWorkflow?.detail ? ` - ${result.managedWorkflow.detail}` : "";
     console.log(`[autocoding] engineering managed-workflow: ${result.managedWorkflow?.state || "unknown"} target=${result.managedWorkflow?.version || "unknown"}${detail}`);
   }
+  if (result.managedAgentsDocument?.state !== "current") {
+    const detail = result.managedAgentsDocument?.detail ? ` - ${result.managedAgentsDocument.detail}` : "";
+    console.log(`[autocoding] agents managed-document: ${result.managedAgentsDocument?.state || "unknown"} target=${result.managedAgentsDocument?.version || "unknown"}${detail}`);
+  }
   for (const item of result.agentBindings || []) console.log(`[autocoding] agent model: ${item.agent} -> ${item.model}`);
   if (result.next) console.log(`[autocoding] next: ${result.next}`);
 }
@@ -825,7 +1108,7 @@ function engineeringPlanDetail(plan){
   return `managed workflow ${plan.state} -> ${plan.version}`;
 }
 
-function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels = false, components = "all", engineeringPlan = null){
+function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels = false, components = "all", controlledPlans = null){
   const root = path.resolve(project);
   const actions = [];
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
@@ -839,7 +1122,9 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
 
   const agentsDir = path.join(root, ".agents", "agents");
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
-  const plan = engineeringPlan || planEngineeringSync(root, assetSkill);
+  const plans = controlledPlans || planControlledDocuments(root, assetSkill);
+  const plan = plans.engineering;
+  const agentsDocumentPlan = plans.agents;
   actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, agentsDir) });
   actions.push({ action: dryRun ? "would-sync" : "sync", path: "docs/tools/autopipeline/ap.py" });
   if (!dryRun) {
@@ -856,6 +1141,14 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
         detail: engineeringPlanDetail(plan),
       });
     }
+    if (agentsDocumentPlan.state !== "current") {
+      fs.writeFileSync(agentsDocumentPlan.agentsDocument, agentsDocumentPlan.output);
+      actions.push({
+        action: agentsDocumentPlan.state === "missing" ? "create" : "update",
+        path: "AGENTS.md",
+        detail: `managed agents ${agentsDocumentPlan.state} -> ${agentsDocumentPlan.version}`,
+      });
+    }
   } else {
     for (const rel of CORE_DOCS) {
       if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
@@ -867,8 +1160,22 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
         detail: engineeringPlanDetail(plan),
       });
     }
+    if (agentsDocumentPlan.state !== "current") {
+      actions.push({
+        action: agentsDocumentPlan.state === "missing" ? "would-create" : "would-update",
+        path: "AGENTS.md",
+        detail: `managed agents ${agentsDocumentPlan.state} -> ${agentsDocumentPlan.version}`,
+      });
+    }
   }
-  return { project: root, dryRun, components, managedWorkflow: publicEngineeringPlan(plan), actions };
+  return {
+    project: root,
+    dryRun,
+    components,
+    managedWorkflow: publicEngineeringPlan(plan),
+    managedAgentsDocument: publicEngineeringPlan(agentsDocumentPlan),
+    actions,
+  };
 }
 
 function projectRoot(){ return process.cwd(); }
@@ -969,16 +1276,19 @@ Compatibility:
   if (args.cmd === "sync") {
     const projects = args.projects.length ? args.projects : [projectRoot()];
     assertNoLegacyRegisteredTasks(projects);
-    const engineeringPlans = new Map();
-    if (args.components === "all") {
-      for (const project of projects) {
-        const root = path.resolve(project);
-        const plan = planEngineeringSync(root, assetSkill);
-        if (plan.state === "invalid") {
-          die(`refusing to sync ${root}: ${plan.detail}`);
+    const controlledPlans = new Map();
+    for (const project of projects) {
+      const root = path.resolve(project);
+      const plans = planControlledDocuments(root, assetSkill);
+      for (const [document, plan] of Object.entries(plans)) {
+        if (plan.state === "invalid" || plan.state === "conflict") {
+          const conflicts = (plan.conflicts || [])
+            .map(item => `${item.file}:${item.line} [${item.ruleId}] ${item.message}`)
+            .join("; ");
+          die(`refusing the entire sync batch before writes: ${root} ${document}: ${plan.detail || "invalid managed document"}${conflicts ? `; ${conflicts}` : ""}`);
         }
-        engineeringPlans.set(root, plan);
       }
+      controlledPlans.set(root, plans);
     }
     const results = projects.map(project => {
       const root = path.resolve(project);
@@ -989,7 +1299,7 @@ Compatibility:
         args.dryRun,
         args.resetAgentModels,
         args.components,
-        engineeringPlans.get(root) || null,
+        controlledPlans.get(root) || null,
       );
     });
     if (args.json) console.log(JSON.stringify({ version: readPackageVersion(), results }, null, 2));

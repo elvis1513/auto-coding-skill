@@ -206,8 +206,8 @@ function testMinimalSyncConvergesWithinBudget() {
 
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
-  assert(files.length <= 21, `minimal scaffold file budget exceeded: ${files.length}`);
-  assert(lines <= 9100, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(files.length <= 23, `minimal scaffold file budget exceeded: ${files.length}`);
+  assert(lines <= 9500, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: \"worktree\""), "engineering should require task worktree isolation");
@@ -701,7 +701,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=3\.0\.1 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=3\.0\.2 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -720,7 +720,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "3.0.1", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "3.0.2", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
@@ -730,14 +730,14 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
   assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
   assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
-  assert(updated.includes("version=3.0.1"), "sync should install the current managed workflow version");
+  assert(updated.includes("version=3.0.2"), "sync should install the current managed workflow version");
   assert(updated.includes("## Execution profiles"), "sync should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "3.0.1", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "3.0.2", "status should expose the installed managed workflow version");
 
   const beforeSecondSync = fs.readFileSync(engineering, "utf8");
   const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
@@ -765,7 +765,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=3.0.1"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=3.0.2"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
   const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
   const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
@@ -824,7 +824,7 @@ function testMalformedManagedMarkersFailClosed() {
     const before = fs.readFileSync(engineering, "utf8");
 
     const result = run("node", [cli, "sync", "--projects", repo], { check: false });
-    assert(result.status !== 0 && result.stderr.includes("refusing to sync"), `${name}: malformed markers should reject sync`);
+    assert(result.status !== 0 && result.stderr.includes("refusing"), `${name}: malformed markers should reject sync`);
     assert(fs.readFileSync(engineering, "utf8") === before, `${name}: rejected sync must not touch ENGINEERING.md`);
     assert(fs.readFileSync(skill, "utf8") === `user-sentinel-${name}\n`, `${name}: preflight must reject before writing the skill`);
   }
@@ -891,6 +891,74 @@ function testLegacyTaskPreflightRejectsWholeBatchAtomically() {
   assert(fs.readFileSync(secondAgent).equals(secondAgentBefore), "batch preflight must not write the project containing the legacy task");
 }
 
+function testManagedAgentsMigrationPreservesCustomRules() {
+  const repo = tmpdir("managed-agents-document");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const agents = path.join(repo, "AGENTS.md");
+  const initial = fs.readFileSync(agents, "utf8");
+  assert(initial.includes("managed-agents:start version=3.0.2"), "new projects should receive the versioned root AGENTS block");
+
+  const custom = [
+    "# Project rules",
+    "",
+    "- Preserve this repository-specific rule exactly.",
+    "- `high-risk` cannot be downgraded and must execute `commands.gate_full`; changed or standard fallbacks do not count. Use `PASS / FAIL / PARTIAL` only from the required executed evidence.",
+    "",
+  ].join("\n");
+  writeFile(agents, custom);
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const plan = JSON.parse(dryRun.stdout).results[0].managedAgentsDocument;
+  assert(plan.state === "legacy-custom", `unmarked custom AGENTS should be migrated: ${dryRun.stdout}`);
+  assert(plan.migrations.includes("agents-v22-govchain-full"), "known official full-gate rule should be selected by exact migration id");
+
+  run("node", [cli, "sync", "--projects", repo]);
+  const migrated = fs.readFileSync(agents, "utf8");
+  assert(migrated.includes("managed-agents:start version=3.0.2"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("Preserve this repository-specific rule exactly."), "AGENTS migration must preserve unrelated custom rules");
+  assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
+  const stable = fs.readFileSync(agents);
+  run("node", [cli, "sync", "--projects", repo]);
+  assert(fs.readFileSync(agents).equals(stable), "managed AGENTS sync should be idempotent");
+}
+
+function testUnknownWorkflowConflictFailsWholeBatchBeforeWrites() {
+  const first = tmpdir("workflow-conflict-first");
+  const second = tmpdir("workflow-conflict-second");
+  for (const repo of [first, second]) {
+    run("git", ["init", "-q"], { cwd: repo });
+    run("node", [cli, "init"], { cwd: repo });
+    run("node", [cli, "sync", "--projects", repo]);
+  }
+  const firstSkill = path.join(first, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+  writeFile(firstSkill, "batch-sentinel\n");
+  const secondAgents = path.join(second, "AGENTS.md");
+  fs.appendFileSync(secondAgents, "\n- High-risk changes must run the real full gate before push.\n");
+
+  const status = run("node", [cli, "status", "--projects", second, "--json"], { check: false });
+  assert(status.status !== 0, "status must be non-ok for an unknown conflicting workflow rule");
+  const statusPlan = JSON.parse(status.stdout).results[0].managedAgentsDocument;
+  assert(statusPlan.state === "conflict", `status should expose the document conflict: ${status.stdout}`);
+  assert(statusPlan.conflicts[0].file === "AGENTS.md" && statusPlan.conflicts[0].line > 0, "status conflict should include file and line");
+
+  const sync = run("node", [cli, "sync", "--projects", `${first},${second}`], { check: false });
+  assert(sync.status !== 0 && sync.stderr.includes("entire sync batch before writes"), "one unknown conflict must reject the complete batch");
+  assert(fs.readFileSync(firstSkill, "utf8") === "batch-sentinel\n", "batch conflict preflight must run before an earlier project's skill write");
+}
+
+function testEngineeringMarkerBoundaryIsNormalized() {
+  const repo = tmpdir("engineering-marker-boundary");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const marker = "<!-- auto-coding-skill:managed-workflow:end -->";
+  const current = fs.readFileSync(engineering, "utf8");
+  writeFile(engineering, current.replace(`${marker}\n`, `${marker}# Project-specific workflow\n`));
+  run("node", [cli, "sync", "--projects", repo]);
+  const normalized = fs.readFileSync(engineering, "utf8");
+  assert(normalized.includes(`${marker}\n# Project-specific workflow\n`), "sync should normalize a heading glued to the managed end marker");
+}
+
 testPreflightAvoidsPartialInstall();
 testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
@@ -922,5 +990,8 @@ testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication();
 testMalformedManagedMarkersFailClosed();
 testSkillOnlySyncTouchesOnlySkill();
 testLegacyTaskPreflightRejectsWholeBatchAtomically();
+testManagedAgentsMigrationPreservesCustomRules();
+testUnknownWorkflowConflictFailsWholeBatchBeforeWrites();
+testEngineeringMarkerBoundaryIsNormalized();
 
 console.log("cli-installer-regression-ok");

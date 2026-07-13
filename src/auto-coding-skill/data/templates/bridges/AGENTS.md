@@ -1,3 +1,5 @@
+<!-- auto-coding-skill:managed-agents:start version=3.0.2 -->
+
 Follow `docs/ENGINEERING.md` strictly. Source of truth: `docs/ENGINEERING.md`.
 At task start, use `ap.py classify --scope auto` when changed-file impact is not obvious.
 Before code changes, read the configured structure standard and place new code in the correct layer; do not add new responsibilities to already-large files.
@@ -10,3 +12,5 @@ Keep active docs ledgers small: `taskbook.md`, `closure-log.md`, and top-level `
 Keep `docs/tasks/evidence.jsonl` and closure Markdown aligned with actual executed checks.
 Treat target-branch push as coding completion. Do not wait for, poll, diagnose, or fix Jenkins/build/deploy results unless the user starts a separate diagnostic task; the project owner performs acceptance.
 Use the direct URL, username, and password values configured under `access.*` in `docs/ENGINEERING.md`; do not invent credentials.
+
+<!-- auto-coding-skill:managed-agents:end -->

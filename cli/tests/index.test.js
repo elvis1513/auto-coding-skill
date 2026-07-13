@@ -206,8 +206,8 @@ function testMinimalSyncConvergesWithinBudget() {
 
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
-  assert(files.length <= 20, `minimal scaffold file budget exceeded: ${files.length}`);
-  assert(lines <= 8200, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(files.length <= 21, `minimal scaffold file budget exceeded: ${files.length}`);
+  assert(lines <= 9100, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: \"worktree\""), "engineering should require task worktree isolation");

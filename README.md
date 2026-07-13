@@ -4,6 +4,11 @@ A generic `.agents` engineering workflow with isolated parallel worktrees, fast
 local validation, push-based completion, required access configuration, and safe
 branch cleanup.
 
+## What changed in v3.0.4
+
+- Fixed the GeeSight legacy workflow replacement so the migrated owner-managed
+  diagnostic wording does not trigger its own post-push conflict rule.
+
 ## What changed in v3.0.3
 
 - Made workspace isolation adaptive: one serial task uses a clean current branch;

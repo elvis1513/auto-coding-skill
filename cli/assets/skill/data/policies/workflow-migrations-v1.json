@@ -109,7 +109,7 @@
       "paths": ["AGENTS.md"],
       "match": "exact-block",
       "text": "- Micro work uses the changed gate and dev closure; ordinary product work uses the\n  standard three-stack gate and dev closure; DB, auth, dependency, deployment,\n  Jenkins, Docker, Compose, or MediaMTX changes use the real full gate and verify closure.\n- High-risk signals cannot be downgraded. Jenkins and target verification run only\n  after commit/push when the effective profile is high-risk or verification is explicit.",
-      "replacement": "- DB, auth, dependency, deployment, Jenkins, Docker, Compose, and MediaMTX changes are high-risk for analysis, design, and review; every normal task still uses one changed-scope fast gate and push closure.\n- Jenkins and target verification are owner-managed after push and run only in a separately requested diagnostic task."
+      "replacement": "- DB, auth, dependency, deployment, Jenkins, Docker, Compose, and MediaMTX changes are high-risk for analysis, design, and review; every normal task still uses one changed-scope fast gate and push closure.\n- Jenkins and target verification run only in a separately requested owner-managed diagnostic task."
     },
     {
       "id": "agents-v22-xjmate-version",

@@ -306,6 +306,30 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         ]:
             self.assertIn(field, active_task)
 
+    def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
+        _, repo, _ = self.make_repo()
+        self.start_task(repo, "LEGACY-SCHEMA")
+        registry = self.registry_manifest_path(repo, "LEGACY-SCHEMA")
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+        payload["schema"] = 1
+        for field in [
+            "owned_paths",
+            "depends_on",
+            "prerequisite_shas",
+            "writer_lease",
+            "review",
+        ]:
+            payload.pop(field, None)
+        registry.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = self.ap(repo, "task-status", "LEGACY-SCHEMA", check=False)
+        rendered = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("legacy schema-1 task", rendered)
+        self.assertIn("cannot safely infer or claim owned_paths", rendered)
+        self.assertIn("previously installed runtime", rendered)
+        self.assertIn("restore the 3.0.0 runtime", rendered)
+
     def test_owned_paths_are_required_and_unowned_changes_are_rejected(self) -> None:
         _, repo, remote = self.make_repo()
         missing = self.ap(
@@ -353,6 +377,27 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         worktree = self.start_task(repo, "STALE-REVIEW")
         payload = worktree / "payload.txt"
         payload.write_text("reviewed\n", encoding="utf-8")
+        registry = self.registry_manifest_path(repo, "STALE-REVIEW")
+        manifest = json.loads(registry.read_text(encoding="utf-8"))
+        owner = manifest["owner"]
+        manifest["owner"] = "another-lifecycle-owner"
+        registry.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        status = self.ap(worktree, "task-status", "STALE-REVIEW", "--json")
+        fingerprint = json.loads(status.stdout)["tasks"][0]["current_diff_fingerprint"]
+        non_owner_review = self.ap(
+            worktree,
+            "task-review",
+            "STALE-REVIEW",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            fingerprint,
+            check=False,
+        )
+        self.assertNotEqual(0, non_owner_review.returncode)
+        self.assertIn("lifecycle owner", non_owner_review.stdout + non_owner_review.stderr)
+        manifest["owner"] = owner
+        registry.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         self.approve_task(worktree, "STALE-REVIEW")
         payload.write_text("changed after review\n", encoding="utf-8")
 
@@ -396,6 +441,19 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, mismatch.returncode)
         self.assertIn("writer lease mismatch", (mismatch.stdout + mismatch.stderr).lower())
+
+        spoofed = self.ap(
+            worktree,
+            "commit-push",
+            "LEASE-1",
+            "--msg",
+            "LEASE-1: spoofed writer",
+            "--writer",
+            "fixer-label",
+            check=False,
+        )
+        self.assertNotEqual(0, spoofed.returncode)
+        self.assertIn("actor identity cannot be overridden", spoofed.stdout + spoofed.stderr)
 
         self.ap(
             repo,

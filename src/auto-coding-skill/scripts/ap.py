@@ -1225,6 +1225,16 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         raise APError(
             f"Task registry identity mismatch: expected={expected_task_id}, manifest={task_id}"
         )
+    try:
+        schema = int(manifest.get("schema") or 1)
+    except (TypeError, ValueError) as exc:
+        raise APError(f"Task {task_id} has an invalid manifest schema.") from exc
+    if schema < 2:
+        raise APError(
+            f"Task {task_id} is a legacy schema-1 task. This runtime cannot safely infer or claim "
+            "owned_paths for an in-flight task. Finish or clean it with the previously installed "
+            "runtime before running autocoding sync, or restore the 3.0.0 runtime."
+        )
     task_uuid = _text(manifest.get("task_uuid"))
     if not re.fullmatch(r"[0-9a-f]{32}", task_uuid):
         raise APError(f"Invalid task manifest UUID for {task_id}; refusing Git operations.")
@@ -1595,7 +1605,14 @@ def _invalidate_task_review(manifest: dict, reason: str) -> None:
 
 
 def _actor_id(args: argparse.Namespace, field: str = "writer") -> str:
-    actor = _text(getattr(args, field, "")) or _text(os.environ.get("CODEX_THREAD_ID"))
+    explicit = _text(getattr(args, field, ""))
+    runtime_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+    if explicit and runtime_actor and explicit != runtime_actor:
+        raise APError(
+            f"Explicit --{field.replace('_', '-')} does not match CODEX_THREAD_ID; "
+            "actor identity cannot be overridden."
+        )
+    actor = runtime_actor or explicit
     if not actor:
         raise APError(f"A stable --{field.replace('_', '-')} or CODEX_THREAD_ID is required.")
     if any(char in actor for char in "\0\r\n"):
@@ -5824,6 +5841,9 @@ def cmd_task_review(args: argparse.Namespace) -> None:
     timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
     with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
         manifest = _load_task_manifest(control_repo, task_id)
+        lifecycle_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+        if not lifecycle_actor or lifecycle_actor != _text(manifest.get("owner")):
+            raise APError("Only the task lifecycle owner may record a review verdict.")
         if _text(manifest.get("state")) not in {"active", "pushed", "integration-raced"}:
             raise APError(f"Task {task_id} is not reviewable in state={manifest.get('state')}.")
         if not worktree.exists():

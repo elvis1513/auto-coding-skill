@@ -1,12 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const cli = path.join(repoRoot, "cli", "src", "index.js");
 const assetAp = path.join(repoRoot, "cli", "assets", "skill", "scripts", "ap.py");
+// Frozen gzip/base64 fixture of the official v2.2.0 ENGINEERING body (frontmatter excluded).
+const officialV220EngineeringBody = zlib.gunzipSync(Buffer.from(
+  "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",
+  "base64",
+)).toString("utf8");
 const managedAgentEfforts = {
   "browser-debugger.toml": "xhigh",
   "docs-researcher.toml": "medium",
@@ -688,6 +694,174 @@ function testLedgerArchiveUpdatesExistingPeriodIndex() {
   assert(index.includes("(2 files)"), `archive index should report cumulative design count: ${index}`);
 }
 
+function testManagedEngineeringSyncIsControlledAndIdempotent() {
+  const repo = tmpdir("managed-engineering");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const initial = fs.readFileSync(engineering, "utf8");
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=3\.0\.1 -->/;
+  const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
+  assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
+  assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
+
+  const customized = initial
+    .replace("workflow:\n", "# project-frontmatter-comment\nworkflow:\n")
+    .replace(startPattern, "project note before managed workflow\n<!-- auto-coding-skill:managed-workflow:start version=3.0.0 -->")
+    .replace(endMarker, `${endMarker}\nproject note after managed workflow`)
+    .replace("## Execution profiles", "## Stale managed workflow");
+  writeFile(engineering, customized);
+  const staleStart = customized.indexOf("<!-- auto-coding-skill:managed-workflow:start");
+  const staleEnd = customized.indexOf(endMarker) + endMarker.length;
+  const outsideBefore = customized.slice(0, staleStart);
+  const outsideAfter = customized.slice(staleEnd);
+
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const dryResult = JSON.parse(dryRun.stdout).results[0];
+  assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
+  assert(dryResult.managedWorkflow.version === "3.0.1", "dry-run should expose the target workflow version");
+  assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
+  assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
+
+  run("node", [cli, "sync", "--projects", repo]);
+  const updated = fs.readFileSync(engineering, "utf8");
+  const updatedStart = updated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
+  const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
+  assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
+  assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
+  assert(updated.includes("version=3.0.1"), "sync should install the current managed workflow version");
+  assert(updated.includes("## Execution profiles"), "sync should refresh stale managed workflow content");
+
+  fillRequiredAccess(repo);
+  const status = run("node", [cli, "status", "--projects", repo, "--json"]);
+  const statusResult = JSON.parse(status.stdout).results[0];
+  assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
+  assert(statusResult.managedWorkflow.version === "3.0.1", "status should expose the installed managed workflow version");
+
+  const beforeSecondSync = fs.readFileSync(engineering, "utf8");
+  const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
+  assert(!JSON.parse(second.stdout).results[0].actions.some(item => item.path === "docs/ENGINEERING.md"), "current managed workflow should be idempotent");
+  assert(fs.readFileSync(engineering, "utf8") === beforeSecondSync, "idempotent sync must not rewrite ENGINEERING.md");
+}
+
+function testLegacyEngineeringMigrationPreservesExistingBody() {
+  const repo = tmpdir("legacy-managed-engineering");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const current = fs.readFileSync(engineering, "utf8");
+  const start = current.indexOf("<!-- auto-coding-skill:managed-workflow:start");
+  const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
+  const end = current.indexOf(endMarker) + endMarker.length;
+  const legacyNote = "\n## Legacy project-specific workflow\n\nKeep this project note exactly.\n";
+  const legacy = `${current.slice(0, start)}${legacyNote}${current.slice(end)}`;
+  writeFile(engineering, legacy);
+
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const dryResult = JSON.parse(dryRun.stdout).results[0];
+  assert(dryResult.managedWorkflow.state === "legacy-custom", "unknown unmarked documents should be reported as a custom legacy migration");
+  assert(dryResult.managedWorkflow.preservedCustom === true, "custom legacy migration should expose its preservation policy");
+  assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
+  run("node", [cli, "sync", "--projects", repo]);
+  const migrated = fs.readFileSync(engineering, "utf8");
+  assert(migrated.includes("version=3.0.1"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
+  const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
+  const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
+  assert(`${migrated.slice(0, migratedStart)}${migrated.slice(migratedEnd)}` === legacy, "removing the inserted managed block should recover custom legacy content byte-for-byte");
+
+  const stable = fs.readFileSync(engineering, "utf8");
+  run("node", [cli, "sync", "--projects", repo]);
+  assert(fs.readFileSync(engineering, "utf8") === stable, "legacy migration should converge after one sync");
+}
+
+function testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication() {
+  const repo = tmpdir("official-legacy-engineering");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const current = fs.readFileSync(engineering, "utf8");
+  const frontmatter = current.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/)?.[0];
+  assert(frontmatter, "official legacy fixture requires frontmatter");
+  const customizedFrontmatter = frontmatter.replace("workflow:\n", "# keep-official-migration-config\nworkflow:\n");
+  writeFile(engineering, `${customizedFrontmatter}${officialV220EngineeringBody}`);
+
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const dryResult = JSON.parse(dryRun.stdout).results[0];
+  assert(dryResult.managedWorkflow.state === "legacy-official", `official body hash should select replacement migration: ${dryRun.stdout}`);
+  assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("official-legacy"), "official legacy action should identify replacement migration");
+  run("node", [cli, "sync", "--projects", repo]);
+  const migrated = fs.readFileSync(engineering, "utf8");
+  assert(migrated.startsWith(customizedFrontmatter), "official legacy migration must preserve YAML frontmatter byte-for-byte");
+  assert((migrated.match(/auto-coding-skill:managed-workflow:start/g) || []).length === 1, "official legacy migration should install exactly one managed workflow");
+  assert((migrated.match(/^## Execution profiles$/gm) || []).length === 1, "official legacy migration must replace rather than duplicate the old workflow body");
+
+  const stable = fs.readFileSync(engineering, "utf8");
+  run("node", [cli, "sync", "--projects", repo]);
+  assert(fs.readFileSync(engineering, "utf8") === stable, "official legacy migration should be idempotent");
+}
+
+function testMalformedManagedMarkersFailClosed() {
+  const cases = {
+    "single-start": "<!-- auto-coding-skill:managed-workflow:start version=3.0.0 -->\nold\n",
+    "single-end": "old\n<!-- auto-coding-skill:managed-workflow:end -->\n",
+    duplicate: "<!-- auto-coding-skill:managed-workflow:start version=3.0.0 -->\n<!-- auto-coding-skill:managed-workflow:start version=3.0.0 -->\n<!-- auto-coding-skill:managed-workflow:end -->\n",
+    nested: "<!-- auto-coding-skill:managed-workflow:start version=3.0.0 -->\n<!-- auto-coding-skill:managed-workflow:end -->\n<!-- auto-coding-skill:managed-workflow:end -->\n",
+  };
+  for (const [name, malformed] of Object.entries(cases)) {
+    const repo = tmpdir(`managed-marker-${name}`);
+    run("node", [cli, "init"], { cwd: repo });
+    run("node", [cli, "sync", "--projects", repo]);
+    const engineering = path.join(repo, "docs", "ENGINEERING.md");
+    const text = fs.readFileSync(engineering, "utf8");
+    const start = text.indexOf("<!-- auto-coding-skill:managed-workflow:start");
+    const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
+    const end = text.indexOf(endMarker) + endMarker.length;
+    writeFile(engineering, `${text.slice(0, start)}${malformed}${text.slice(end)}`);
+    const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+    writeFile(skill, `user-sentinel-${name}\n`);
+    const before = fs.readFileSync(engineering, "utf8");
+
+    const result = run("node", [cli, "sync", "--projects", repo], { check: false });
+    assert(result.status !== 0 && result.stderr.includes("refusing to sync"), `${name}: malformed markers should reject sync`);
+    assert(fs.readFileSync(engineering, "utf8") === before, `${name}: rejected sync must not touch ENGINEERING.md`);
+    assert(fs.readFileSync(skill, "utf8") === `user-sentinel-${name}\n`, `${name}: preflight must reject before writing the skill`);
+  }
+}
+
+function testSkillOnlySyncTouchesOnlySkill() {
+  const repo = tmpdir("skill-only-sync");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+  const agent = path.join(repo, ".agents", "agents", "explorer.toml");
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const launcher = path.join(repo, "docs", "tools", "autopipeline", "ap.py");
+  writeFile(skill, "stale skill\n");
+  writeFile(agent, `${fs.readFileSync(agent, "utf8")}\n# user-agent-sentinel\n`);
+  writeFile(engineering, `${fs.readFileSync(engineering, "utf8")}\nproject-engineering-sentinel\n`);
+  writeFile(launcher, `${fs.readFileSync(launcher, "utf8")}\n# user-launcher-sentinel\n`);
+  const untouched = new Map([[agent, fs.readFileSync(agent)], [engineering, fs.readFileSync(engineering)], [launcher, fs.readFileSync(launcher)]]);
+
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--components", "skill", "--dry-run", "--json"]);
+  const dryResult = JSON.parse(dryRun.stdout).results[0];
+  assert(dryResult.components === "skill", "skill-only dry-run should expose its component scope");
+  assert(dryResult.actions.length === 1 && dryResult.actions[0].path === ".agents/skills/auto-coding-skill", "skill-only dry-run must plan only the skill directory");
+  assert(fs.readFileSync(skill, "utf8") === "stale skill\n", "skill-only dry-run must not write the skill");
+
+  run("node", [cli, "sync", "--projects", repo, "--components", "skill"]);
+  assert(fs.readFileSync(skill, "utf8").includes("# Auto Coding Skill"), "skill-only sync should refresh the managed skill");
+  for (const [file, content] of untouched) {
+    assert(fs.readFileSync(file).equals(content), `skill-only sync must not touch ${file}`);
+  }
+
+  const invalid = run("node", [cli, "sync", "--projects", repo, "--components", "docs"], { check: false });
+  assert(invalid.status !== 0 && invalid.stderr.includes("--components"), "sync should reject unknown component scopes");
+  const conflicting = run("node", [cli, "sync", "--projects", repo, "--components", "skill", "--reset-agent-models"], { check: false });
+  assert(conflicting.status !== 0, "skill-only sync should reject irrelevant agent reset options");
+}
+
 testPreflightAvoidsPartialInstall();
 testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
@@ -713,5 +887,10 @@ testRemovedVerificationFlagsFailFast();
 testUpgradeInstallsRuntimeRequiredByLauncher();
 testLedgerArchiveRecognizesSettledStatuses();
 testLedgerArchiveUpdatesExistingPeriodIndex();
+testManagedEngineeringSyncIsControlledAndIdempotent();
+testLegacyEngineeringMigrationPreservesExistingBody();
+testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication();
+testMalformedManagedMarkersFailClosed();
+testSkillOnlySyncTouchesOnlySkill();
 
 console.log("cli-installer-regression-ok");

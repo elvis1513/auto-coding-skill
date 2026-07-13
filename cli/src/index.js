@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 function die(msg){
@@ -25,6 +26,7 @@ function parseArgs(argv){
     dryRun: false,
     json: false,
     resetAgentModels: false,
+    components: "all",
     projects: [],
     provided: new Set(),
   };
@@ -64,6 +66,11 @@ function parseArgs(argv){
       args.resetAgentModels = true;
       args.provided.add("resetAgentModels");
     }
+    else if (a === "--components") {
+      args.components = takeValue(rest, i, a).trim().toLowerCase();
+      args.provided.add("components");
+      i += 1;
+    }
     else if (a === "--force") {
       args.force = true;
       args.provided.add("force");
@@ -86,13 +93,14 @@ const ARG_FLAGS = {
   dryRun: "--dry-run",
   json: "--json",
   resetAgentModels: "--reset-agent-models",
+  components: "--components",
   projects: "--projects/positional project",
 };
 
 const COMMAND_ARGS = {
   init: new Set(["ai", "mode", "dest", "force", "resetAgentModels"]),
   status: new Set(["projects", "json"]),
-  sync: new Set(["projects", "dryRun", "json", "resetAgentModels"]),
+  sync: new Set(["projects", "dryRun", "json", "resetAgentModels", "components"]),
 };
 
 function validateCommandArgs(args){
@@ -101,6 +109,12 @@ function validateCommandArgs(args){
   const invalid = [...args.provided].filter(name => !allowed.has(name));
   if (invalid.length) {
     die(`${invalid.map(name => ARG_FLAGS[name] || name).join(", ")} not valid for '${args.cmd}'`);
+  }
+  if (args.cmd === "sync" && !["all", "skill"].includes(args.components)) {
+    die("--components must be 'all' or 'skill'");
+  }
+  if (args.cmd === "sync" && args.components === "skill" && args.resetAgentModels) {
+    die("--reset-agent-models cannot be used with --components skill");
   }
 }
 
@@ -383,6 +397,130 @@ function renderEngineeringTemplate(templateText, project){
   return rendered;
 }
 
+const MANAGED_WORKFLOW_START_TOKEN = "auto-coding-skill:managed-workflow:start";
+const MANAGED_WORKFLOW_END_TOKEN = "auto-coding-skill:managed-workflow:end";
+const MANAGED_WORKFLOW_START_RE = /<!--\s*auto-coding-skill:managed-workflow:start\s+version=([0-9]+\.[0-9]+\.[0-9]+)\s*-->/g;
+const MANAGED_WORKFLOW_END_RE = /<!--\s*auto-coding-skill:managed-workflow:end\s*-->/g;
+const KNOWN_OFFICIAL_LEGACY_BODY_HASHES = new Set([
+  // v2.2.0, v3.0.0, and origin/dev@c532734 respectively. Frontmatter is excluded.
+  "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
+  "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
+  "198d675361337bc272880154266b3eb1f50e3f82f3c6ab04b2e559cd18d8c7b4",
+]);
+
+function tokenCount(text, token){
+  return text.split(token).length - 1;
+}
+
+function inspectManagedWorkflow(text){
+  const rawStarts = tokenCount(text, MANAGED_WORKFLOW_START_TOKEN);
+  const rawEnds = tokenCount(text, MANAGED_WORKFLOW_END_TOKEN);
+  if (rawStarts === 0 && rawEnds === 0) return { state: "absent" };
+
+  const starts = [...text.matchAll(MANAGED_WORKFLOW_START_RE)];
+  const ends = [...text.matchAll(MANAGED_WORKFLOW_END_RE)];
+  if (rawStarts !== starts.length || rawEnds !== ends.length) {
+    return { state: "invalid", detail: "managed workflow marker is malformed" };
+  }
+  if (starts.length !== 1 || ends.length !== 1) {
+    return { state: "invalid", detail: "managed workflow markers must contain exactly one start/end pair" };
+  }
+  const start = starts[0].index;
+  const end = ends[0].index;
+  if (start >= end) {
+    return { state: "invalid", detail: "managed workflow markers are out of order or nested" };
+  }
+  const endExclusive = end + ends[0][0].length;
+  return {
+    state: "present",
+    version: starts[0][1],
+    start,
+    endExclusive,
+    block: text.slice(start, endExclusive),
+  };
+}
+
+function splitEngineeringDocument(text){
+  const frontmatter = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+  const bodyStart = frontmatter ? frontmatter[0].length : 0;
+  return { frontmatter: text.slice(0, bodyStart), body: text.slice(bodyStart) };
+}
+
+function engineeringBodyHash(body){
+  return crypto.createHash("sha256").update(body.replace(/\r\n/g, "\n")).digest("hex");
+}
+
+function insertManagedWorkflow(text, block){
+  const { frontmatter } = splitEngineeringDocument(text);
+  const bodyStart = frontmatter.length;
+  const body = text.slice(bodyStart);
+  const heading = /^# Engineering Workflow[^\r\n]*(?:\r?\n|$)/m.exec(body);
+  const insertion = heading ? bodyStart + heading.index + heading[0].length : bodyStart;
+  const before = text.slice(0, insertion);
+  const after = text.slice(insertion);
+  return `${before}${block}${after}`;
+}
+
+function planEngineeringSync(project, assetSkill){
+  const root = path.resolve(project);
+  const engineering = path.join(root, "docs", "ENGINEERING.md");
+  const templatePath = path.join(assetSkill, "data", "templates", "ENGINEERING.md");
+  const renderedTemplate = renderEngineeringTemplate(fs.readFileSync(templatePath, "utf8"), root);
+  const templateRegion = inspectManagedWorkflow(renderedTemplate);
+  if (templateRegion.state !== "present") {
+    return { state: "invalid", detail: `packaged ENGINEERING template: ${templateRegion.detail || "managed workflow markers are missing"}` };
+  }
+  if (!exists(engineering)) {
+    return { state: "missing", version: templateRegion.version, output: renderedTemplate, engineering };
+  }
+
+  const current = fs.readFileSync(engineering, "utf8");
+  const currentRegion = inspectManagedWorkflow(current);
+  if (currentRegion.state === "invalid") return { ...currentRegion, engineering };
+  if (currentRegion.state === "absent") {
+    const currentParts = splitEngineeringDocument(current);
+    const templateParts = splitEngineeringDocument(renderedTemplate);
+    const legacyHash = engineeringBodyHash(currentParts.body);
+    if (KNOWN_OFFICIAL_LEGACY_BODY_HASHES.has(legacyHash)) {
+      return {
+        state: "legacy-official",
+        version: templateRegion.version,
+        previousBodyHash: legacyHash,
+        output: `${currentParts.frontmatter}${templateParts.body}`,
+        engineering,
+      };
+    }
+    return {
+      state: "legacy-custom",
+      version: templateRegion.version,
+      preservedCustom: true,
+      output: insertManagedWorkflow(current, templateRegion.block),
+      engineering,
+    };
+  }
+  if (currentRegion.block === templateRegion.block) {
+    return { state: "current", version: templateRegion.version, output: current, engineering };
+  }
+  return {
+    state: "stale",
+    version: templateRegion.version,
+    previousVersion: currentRegion.version,
+    output: `${current.slice(0, currentRegion.start)}${templateRegion.block}${current.slice(currentRegion.endExclusive)}`,
+    engineering,
+  };
+}
+
+function publicEngineeringPlan(plan){
+  return {
+    state: plan.state,
+    version: plan.version || "unknown",
+    ...(plan.previousVersion ? { previousVersion: plan.previousVersion } : {}),
+    ...(plan.previousBodyHash ? { previousBodyHash: plan.previousBodyHash } : {}),
+    ...(plan.preservedCustom ? { preservedCustom: true } : {}),
+    ...(plan.detail ? { detail: plan.detail } : {}),
+  };
+}
+
 function readPackageVersion(){
   const here = path.dirname(fileURLToPath(import.meta.url));
   const pkgPath = path.resolve(here, "..", "..", "package.json");
@@ -513,6 +651,8 @@ function projectStatus(project, assetSkill, assetAgents){
   const toolDir = path.join(root, "docs", "tools", "autopipeline");
   const engineering = path.join(root, "docs", "ENGINEERING.md");
   const engineeringMissing = !exists(engineering);
+  const engineeringPlan = planEngineeringSync(root, assetSkill);
+  const managedWorkflow = publicEngineeringPlan(engineeringPlan);
   const requiredConfigPaths = [
     { label: "workflow.mode", path: ["workflow", "mode"] },
     { label: "workflow.profile", path: ["workflow", "profile"] },
@@ -583,13 +723,13 @@ function projectStatus(project, assetSkill, assetAgents){
     ? compareManagedAgents(assetAgents, agentsDir)
     : { diffs: [{ path: ".agents/agents", status: "missing" }], bindings: [] };
   const agentDiffs = agentStatus.diffs;
-  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0;
+  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current";
   let next = "";
   if (!exists(skillDir) || !exists(agentsDir)) {
     next = "run autocoding init --force";
   } else if (skillDiffs.length || agentDiffs.length) {
     next = "run autocoding sync --projects <repo>";
-  } else if (engineeringMissing || scriptDiffs.length || missingDocs.length) {
+  } else if (engineeringMissing || managedWorkflow.state !== "current" || scriptDiffs.length || missingDocs.length) {
     next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
   } else if (missingConfigPaths.length) {
     next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
@@ -610,6 +750,7 @@ function projectStatus(project, assetSkill, assetAgents){
     missingConfigPaths,
     unfilledConfigTokens,
     invalidConfigTokens,
+    managedWorkflow,
     next,
   };
 }
@@ -625,44 +766,64 @@ function printProjectStatus(result){
   }
   for (const item of result.missingDocs) console.log(`[autocoding] doc missing: ${item}`);
   for (const item of result.missingConfigTokens) console.log(`[autocoding] config missing path: ${item}`);
+  if (result.managedWorkflow?.state !== "current") {
+    const detail = result.managedWorkflow?.detail ? ` - ${result.managedWorkflow.detail}` : "";
+    console.log(`[autocoding] engineering managed-workflow: ${result.managedWorkflow?.state || "unknown"} target=${result.managedWorkflow?.version || "unknown"}${detail}`);
+  }
   for (const item of result.agentBindings || []) console.log(`[autocoding] agent model: ${item.agent} -> ${item.model}`);
   if (result.next) console.log(`[autocoding] next: ${result.next}`);
 }
 
-function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels = false){
+function engineeringPlanDetail(plan){
+  if (plan.state === "legacy-custom") return `managed workflow preserved-custom -> ${plan.version}`;
+  if (plan.state === "legacy-official") return `managed workflow official-legacy -> ${plan.version}`;
+  return `managed workflow ${plan.state} -> ${plan.version}`;
+}
+
+function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels = false, components = "all", engineeringPlan = null){
   const root = path.resolve(project);
   const actions = [];
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
-  const agentsDir = path.join(root, ".agents", "agents");
-  const toolDir = path.join(root, "docs", "tools", "autopipeline");
-  const engineering = path.join(root, "docs", "ENGINEERING.md");
-  const engineeringWasMissing = !exists(engineering);
-  const templateEngineering = path.join(assetSkill, "data", "templates", "ENGINEERING.md");
+  const skillOnly = components === "skill";
   actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, skillDir) });
-  actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, agentsDir) });
-  actions.push({ action: dryRun ? "would-sync" : "sync", path: "docs/tools/autopipeline/ap.py" });
   if (!dryRun) {
     rmrf(skillDir);
     copyDir(assetSkill, skillDir);
+  }
+  if (skillOnly) return { project: root, dryRun, components, actions };
+
+  const agentsDir = path.join(root, ".agents", "agents");
+  const toolDir = path.join(root, "docs", "tools", "autopipeline");
+  const plan = engineeringPlan || planEngineeringSync(root, assetSkill);
+  actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, agentsDir) });
+  actions.push({ action: dryRun ? "would-sync" : "sync", path: "docs/tools/autopipeline/ap.py" });
+  if (!dryRun) {
     syncManagedAgents(assetAgents, agentsDir, { resetModel: resetAgentModels });
     fs.mkdirSync(toolDir, { recursive: true });
     fs.copyFileSync(path.join(assetSkill, "data", "templates", "tools", "ap.py"), path.join(toolDir, "ap.py"));
     for (const copied of copyMissingDocs(assetSkill, root)) actions.push({ action: "create", path: copied });
-    if (engineeringWasMissing) {
-      fs.mkdirSync(path.dirname(engineering), { recursive: true });
-      fs.writeFileSync(engineering, renderEngineeringTemplate(fs.readFileSync(templateEngineering, "utf8"), root));
-      actions.push({ action: "create", path: path.join("docs", "ENGINEERING.md") });
+    if (plan.state !== "current") {
+      fs.mkdirSync(path.dirname(plan.engineering), { recursive: true });
+      fs.writeFileSync(plan.engineering, plan.output);
+      actions.push({
+        action: plan.state === "missing" ? "create" : "update",
+        path: path.join("docs", "ENGINEERING.md"),
+        detail: engineeringPlanDetail(plan),
+      });
     }
   } else {
     for (const rel of CORE_DOCS) {
       if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
     }
-    if (engineeringWasMissing) actions.push({ action: "would-create", path: path.join("docs", "ENGINEERING.md") });
+    if (plan.state !== "current") {
+      actions.push({
+        action: plan.state === "missing" ? "would-create" : "would-update",
+        path: path.join("docs", "ENGINEERING.md"),
+        detail: engineeringPlanDetail(plan),
+      });
+    }
   }
-  if (!engineeringWasMissing) {
-    actions.push({ action: "manual", path: "docs/ENGINEERING.md", detail: "merge existing files with ap.py upgrade --write" });
-  }
-  return { project: root, dryRun, actions };
+  return { project: root, dryRun, components, managedWorkflow: publicEngineeringPlan(plan), actions };
 }
 
 function projectRoot(){ return process.cwd(); }
@@ -721,12 +882,13 @@ autocoding - install auto-coding-skill into generic .agents paths
 Usage:
   autocoding init [--mode project|global] [--dest <repo-root|.agents-dir|skill-dir>] [--force] [--reset-agent-models]
   autocoding status --projects <path[,path...]> [--json]
-  autocoding sync --projects <path[,path...]> [--dry-run] [--json] [--reset-agent-models]
+  autocoding sync --projects <path[,path...]> [--components all|skill] [--dry-run] [--json] [--reset-agent-models]
 
 Examples:
   autocoding init
   autocoding status --projects /Users/elvis/Product/xjmate,/Users/elvis/Product/geesight
   autocoding sync --projects /Users/elvis/Product/xjmate --dry-run
+  autocoding sync --projects /Users/elvis/Product/geesight --components skill
 
 Compatibility:
   --ai <value> is accepted for old scripts and ignored.
@@ -738,8 +900,13 @@ Compatibility:
   validateCommandArgs(args);
 
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const assetSkill = path.resolve(here, "..", "assets", "skill");
-  const assetAgents = path.resolve(here, "..", "assets", "agents");
+  const packagedAssetSkill = path.resolve(here, "..", "assets", "skill");
+  const packagedAssetAgents = path.resolve(here, "..", "assets", "agents");
+  const sourceAssetSkill = path.resolve(here, "..", "..", "src", "auto-coding-skill");
+  const sourceAssetAgents = path.resolve(here, "..", "..", "src", "agents");
+  const useSourceAssets = exists(sourceAssetSkill) && exists(sourceAssetAgents);
+  const assetSkill = useSourceAssets ? sourceAssetSkill : packagedAssetSkill;
+  const assetAgents = useSourceAssets ? sourceAssetAgents : packagedAssetAgents;
   if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
   if (!exists(assetAgents)) die(`missing assets at ${assetAgents}`);
 
@@ -756,13 +923,36 @@ Compatibility:
 
   if (args.cmd === "sync") {
     const projects = args.projects.length ? args.projects : [projectRoot()];
-    const results = projects.map(project => syncProject(project, assetSkill, assetAgents, args.dryRun, args.resetAgentModels));
+    const engineeringPlans = new Map();
+    if (args.components === "all") {
+      for (const project of projects) {
+        const root = path.resolve(project);
+        const plan = planEngineeringSync(root, assetSkill);
+        if (plan.state === "invalid") {
+          die(`refusing to sync ${root}: ${plan.detail}`);
+        }
+        engineeringPlans.set(root, plan);
+      }
+    }
+    const results = projects.map(project => {
+      const root = path.resolve(project);
+      return syncProject(
+        root,
+        assetSkill,
+        assetAgents,
+        args.dryRun,
+        args.resetAgentModels,
+        args.components,
+        engineeringPlans.get(root) || null,
+      );
+    });
     if (args.json) console.log(JSON.stringify({ version: readPackageVersion(), results }, null, 2));
     else {
       console.log(`[autocoding] version=${readPackageVersion()}`);
       for (const result of results) {
         console.log(`[autocoding] project=${result.project}`);
         console.log(`[autocoding] dryRun=${result.dryRun}`);
+        console.log(`[autocoding] components=${result.components}`);
         for (const item of result.actions) {
           const detail = item.detail ? ` - ${item.detail}` : "";
           console.log(`[autocoding] ${item.action}: ${item.path}${detail}`);

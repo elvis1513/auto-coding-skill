@@ -46,6 +46,39 @@ _GENERATED_NOISE_PATTERNS = [
 ]
 _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
+_WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
+_FALLBACK_WORKFLOW_MIGRATION_POLICY = {
+    "schema_version": 1,
+    "managed_versions": {"agents": "3.0.2", "engineering": "3.0.2"},
+    "known_official_engineering_body_sha256": [
+        "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
+        "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
+        "198d675361337bc272880154266b3eb1f50e3f82f3c6ab04b2e559cd18d8c7b4",
+    ],
+    "known_official_fragments": [],
+    "conflict_rules": [
+        {
+            "id": "mandatory-high-risk-full",
+            "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+            "pattern": r"^(?:.*(?:high[- ]risk|高风险).*(?:must|required|requires|必须|需).*(?:full(?:[ -]gate)?|gate_full|verify|验证).*)$",
+            "flags": "im",
+            "message": "normal development must not require a full/verify gate",
+        },
+        {
+            "id": "mandatory-change-full",
+            "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+            "pattern": r"^(?:.*(?:changes?|变更).*(?:require|required|requires|必须).*(?:full(?:[ -]gate)?|gate_full).*)$",
+            "flags": "im",
+            "message": "changed files must not automatically require a full gate",
+        },
+    ],
+    "dependency_recovery": {
+        "allowed_gate": "gate_changed",
+        "requires_locked_dependency": True,
+        "retry_same_gate_only": True,
+        "forbid_full_gate_recovery": True,
+    },
+}
 _DEFAULT_DISPOSABLE_IGNORED_PATTERNS = [
     ".local/auto-coding-skill",
     ".local/auto-coding-skill/**",
@@ -625,6 +658,25 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _bool_config(gate_cfg.get("full_on_unknown"), False):
         gate_cfg["full_on_unknown"] = False
         changed.append("gate.full_on_unknown")
+    if "full_on" in gate_cfg:
+        del gate_cfg["full_on"]
+        changed.append("gate.full_on")
+    raw_rules = gate_cfg.get("rules")
+    if isinstance(raw_rules, list):
+        migrated_rules: list = []
+        for index, rule in enumerate(raw_rules):
+            if not isinstance(rule, dict):
+                migrated_rules.append(rule)
+                continue
+            migrated_rule = dict(rule)
+            for legacy_key in ["scope", "commands"]:
+                if legacy_key in migrated_rule:
+                    del migrated_rule[legacy_key]
+                    changed.append(f"gate.rules[{index}].{legacy_key}")
+            if migrated_rule:
+                migrated_rules.append(migrated_rule)
+        if migrated_rules != raw_rules:
+            gate_cfg["rules"] = migrated_rules
 
     concurrency_cfg = cfg.setdefault("concurrency", {})
     if not isinstance(concurrency_cfg, dict):
@@ -720,6 +772,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     write = bool(args.write) and not bool(args.dry_run)
     source_root = _find_skill_asset_root(repo)
     templates = source_root / "data" / "templates"
+    template_engineering = templates / "ENGINEERING.md"
     actions: list[dict] = []
 
     def add_action(kind: str, path: Path, action: str, detail: str = "") -> None:
@@ -729,6 +782,25 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             "action": action,
             "detail": detail,
         })
+
+    # Complete policy discovery before the first write. Known official fragments
+    # are safe migration inputs; every remaining match is project-owned and must
+    # be handled explicitly instead of being overwritten by a partial upgrade.
+    workflow_plans = _workflow_policy_plans(repo)
+    workflow_issues = [issue for plan in workflow_plans for issue in plan["issues"]]
+    if workflow_issues:
+        raise APError(
+            "Upgrade preflight found unknown workflow policy conflicts; no files were written:\n- "
+            + "\n- ".join(workflow_issues)
+        )
+    workflow_plan_by_path = {plan["path"]: plan for plan in workflow_plans}
+    engineering_plan = workflow_plan_by_path["docs/ENGINEERING.md"]
+    if engineering_plan.get("official_body_hash") and template_engineering.exists():
+        current = engineering_plan["original"]
+        frontmatter = _frontmatter_span(current, "docs/ENGINEERING.md")
+        _, template_body = _read_frontmatter_markdown(template_engineering)
+        body_start = frontmatter[1] if frontmatter else 0
+        engineering_plan["output"] = current[:body_start] + template_body
 
     tool_files = [
         (
@@ -781,6 +853,14 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if write:
             copy_tree(source_root, project_skill)
 
+    agents_plan = workflow_plan_by_path["AGENTS.md"]
+    agents_path = repo / "AGENTS.md"
+    if agents_plan["output"] != agents_plan["original"]:
+        migrated = ", ".join(item["id"] for item in agents_plan["migrations"])
+        add_action("policy", agents_path, "migrate", migrated)
+        if write:
+            agents_path.write_text(agents_plan["output"], encoding="utf-8")
+
     docs_template = templates / "docs"
     for rel in _CORE_DOC_TEMPLATES:
         src = docs_template / rel
@@ -797,19 +877,25 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             add_action("doc", dst, "ok")
 
     engineering = repo / "docs" / "ENGINEERING.md"
-    template_engineering = templates / "ENGINEERING.md"
     if engineering.exists() and template_engineering.exists():
-        current_cfg, body = _read_frontmatter_markdown(engineering)
+        planned_engineering = engineering_plan["output"] or engineering.read_text(encoding="utf-8")
+        current_cfg, body = _parse_frontmatter_markdown_text(planned_engineering, engineering)
         template_cfg, _ = _read_frontmatter_markdown(template_engineering)
         merged_cfg = json.loads(json.dumps(current_cfg))
         added_keys = _deep_merge_missing(merged_cfg, template_cfg)
         migrated_keys = _migrate_fast_development_defaults(merged_cfg, repo)
-        if added_keys or migrated_keys:
+        body_migrated = planned_engineering != engineering_plan["original"]
+        if added_keys or migrated_keys or body_migrated:
             detail_parts = []
             if added_keys:
                 detail_parts.append("add " + ", ".join(added_keys))
             if migrated_keys:
                 detail_parts.append("migrate " + ", ".join(migrated_keys))
+            if body_migrated:
+                detail_parts.append(
+                    "remove known legacy workflow "
+                    + ", ".join(item["id"] for item in engineering_plan["migrations"])
+                )
             add_action("config", engineering, "merge", "; ".join(detail_parts))
             if write:
                 _write_frontmatter_markdown(engineering, merged_cfg, body)
@@ -1063,10 +1149,229 @@ def _files_differ(a: Path, b: Path) -> bool:
     return _file_sha256(a) != _file_sha256(b)
 
 
-def _read_frontmatter_markdown(path: Path) -> tuple[dict, str]:
+def _load_workflow_migration_policy(repo: Path) -> dict:
+    policy_path = _find_skill_asset_root(repo) / _WORKFLOW_MIGRATION_POLICY
+    if policy_path.exists():
+        try:
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise APError(f"Invalid workflow migration policy: {policy_path}: {exc}") from exc
+    else:
+        # Keep installed runtimes fail-closed during a rolling package update. The
+        # packaged policy is authoritative once present; this fallback intentionally
+        # knows no removable fragments, so only an explicit policy can auto-migrate.
+        policy = json.loads(json.dumps(_FALLBACK_WORKFLOW_MIGRATION_POLICY))
+
+    if not isinstance(policy, dict) or policy.get("schema_version") != 1:
+        raise APError(f"Unsupported workflow migration policy schema: {policy_path}")
+    for field in [
+        "known_official_engineering_body_sha256",
+        "known_official_fragments",
+        "conflict_rules",
+    ]:
+        if not isinstance(policy.get(field), list):
+            raise APError(f"Workflow migration policy field must be a list: {field}")
+    for index, fragment in enumerate(policy["known_official_fragments"]):
+        if not isinstance(fragment, dict):
+            raise APError(f"Workflow migration policy fragment[{index}] must be an object")
+        if fragment.get("match") not in {"exact-line", "exact-block"}:
+            raise APError(f"Workflow migration policy fragment[{index}] has invalid match mode")
+        if not _text(fragment.get("id")) or not isinstance(fragment.get("paths"), list):
+            raise APError(f"Workflow migration policy fragment[{index}] is incomplete")
+        if not isinstance(fragment.get("text"), str) or not fragment["text"].strip():
+            raise APError(f"Workflow migration policy fragment[{index}] has empty text")
+    for index, rule in enumerate(policy["conflict_rules"]):
+        if not isinstance(rule, dict):
+            raise APError(f"Workflow migration policy conflict_rules[{index}] must be an object")
+        flags = _text(rule.get("flags"))
+        if set(flags) - {"i", "m"}:
+            raise APError(f"Workflow migration policy conflict_rules[{index}] has invalid flags")
+        if not _text(rule.get("id")) or not isinstance(rule.get("paths"), list):
+            raise APError(f"Workflow migration policy conflict_rules[{index}] is incomplete")
+        try:
+            re.compile(_text(rule.get("pattern")), _workflow_regex_flags(flags))
+        except re.error as exc:
+            raise APError(
+                f"Workflow migration policy conflict_rules[{index}] has invalid regex: {exc}"
+            ) from exc
+    return policy
+
+
+def _workflow_regex_flags(raw: str) -> int:
+    flags = 0
+    if "i" in raw:
+        flags |= re.IGNORECASE
+    if "m" in raw:
+        flags |= re.MULTILINE
+    return flags
+
+
+def _blank_text_span(text: str, start: int, end: int) -> str:
+    return text[:start] + "".join("\n" if char == "\n" else " " for char in text[start:end]) + text[end:]
+
+
+def _merge_text_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if start >= end:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _managed_document_span(text: str, kind: str, rel: str) -> Optional[tuple[int, int]]:
+    token = f"auto-coding-skill:managed-{kind}"
+    raw_starts = text.count(f"{token}:start")
+    raw_ends = text.count(f"{token}:end")
+    if raw_starts == 0 and raw_ends == 0:
+        return None
+    start_re = re.compile(
+        rf"<!--\s*{re.escape(token)}:start(?:\s+version=[0-9]+\.[0-9]+\.[0-9]+)?\s*-->"
+    )
+    end_re = re.compile(rf"<!--\s*{re.escape(token)}:end\s*-->")
+    starts = list(start_re.finditer(text))
+    ends = list(end_re.finditer(text))
+    if raw_starts != 1 or raw_ends != 1 or len(starts) != 1 or len(ends) != 1:
+        raise APError(f"Malformed managed {kind} markers in {rel}")
+    if starts[0].start() >= ends[0].start():
+        raise APError(f"Out-of-order managed {kind} markers in {rel}")
+    return starts[0].start(), ends[0].end()
+
+
+def _frontmatter_span(text: str, rel: str) -> Optional[tuple[int, int]]:
+    if not text.startswith("---\n"):
+        return None
+    match = re.match(r"^---\n[\s\S]*?\n---(?:\n|$)", text)
+    if not match:
+        raise APError(f"Malformed Markdown frontmatter in {rel}")
+    return 0, match.end()
+
+
+def _known_fragment_spans(
+    visible: str,
+    rel: str,
+    policy: dict,
+) -> list[tuple[int, int, str, int]]:
+    found: list[tuple[int, int, str, int]] = []
+    for fragment in policy.get("known_official_fragments") or []:
+        if rel not in fragment.get("paths", []):
+            continue
+        fragment_id = _text(fragment.get("id"))
+        expected = str(fragment.get("text") or "").replace("\r\n", "\n")
+        if fragment.get("match") == "exact-line":
+            cursor = 0
+            for line in visible.splitlines(keepends=True):
+                content = line.rstrip("\n")
+                if content.strip() == expected.strip():
+                    found.append((cursor, cursor + len(line), fragment_id, visible.count("\n", 0, cursor) + 1))
+                cursor += len(line)
+            continue
+        cursor = 0
+        while True:
+            start = visible.find(expected, cursor)
+            if start < 0:
+                break
+            end = start + len(expected)
+            found.append((start, end, fragment_id, visible.count("\n", 0, start) + 1))
+            cursor = end
+    return found
+
+
+def _workflow_document_plan(repo: Path, rel: str, policy: dict) -> dict:
+    path = repo / rel
     if not path.exists():
-        return {}, ""
-    text = path.read_text(encoding="utf-8")
+        return {"path": rel, "original": "", "output": "", "migrations": [], "issues": []}
+    original = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    protected: list[tuple[int, int]] = []
+    if rel == "docs/ENGINEERING.md":
+        frontmatter = _frontmatter_span(original, rel)
+        if frontmatter:
+            protected.append(frontmatter)
+        managed = _managed_document_span(original, "workflow", rel)
+    else:
+        managed = _managed_document_span(original, "agents", rel)
+    if managed:
+        protected.append(managed)
+
+    visible = original
+    for start, end in protected:
+        visible = _blank_text_span(visible, start, end)
+
+    official_body_hash = ""
+    if rel == "docs/ENGINEERING.md" and managed is None:
+        body_start = protected[0][1] if protected else 0
+        body = original[body_start:]
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        if digest in set(policy.get("known_official_engineering_body_sha256") or []):
+            official_body_hash = digest
+            visible = _blank_text_span(visible, body_start, len(visible))
+
+    known = _known_fragment_spans(visible, rel, policy)
+    known_spans = _merge_text_spans([(start, end) for start, end, _, _ in known])
+    scan_text = visible
+    for start, end in known_spans:
+        scan_text = _blank_text_span(scan_text, start, end)
+
+    issues: list[str] = []
+    for rule in policy.get("conflict_rules") or []:
+        if rel not in rule.get("paths", []):
+            continue
+        regex = re.compile(_text(rule.get("pattern")), _workflow_regex_flags(_text(rule.get("flags"))))
+        for match in regex.finditer(scan_text):
+            line = scan_text.count("\n", 0, match.start()) + 1
+            snippet = " ".join(match.group(0).strip().split())[:180]
+            message = _text(rule.get("message")) or "conflicts with the fast development workflow"
+            issues.append(f"{rel}:{line} [{_text(rule.get('id'))}] {message}: {snippet}")
+
+    output = original
+    for start, end in reversed(known_spans):
+        output = output[:start] + output[end:]
+    migrations = [
+        {"id": fragment_id, "line": line}
+        for _, _, fragment_id, line in known
+    ]
+    if official_body_hash:
+        migrations.append({"id": f"official-body:{official_body_hash}", "line": 1})
+    return {
+        "path": rel,
+        "original": original,
+        "output": output,
+        "migrations": migrations,
+        "issues": issues,
+        "official_body_hash": official_body_hash,
+    }
+
+
+def _workflow_policy_plans(repo: Path, policy: Optional[dict] = None) -> list[dict]:
+    effective = policy or _load_workflow_migration_policy(repo)
+    return [
+        _workflow_document_plan(repo, "AGENTS.md", effective),
+        _workflow_document_plan(repo, "docs/ENGINEERING.md", effective),
+    ]
+
+
+def _workflow_policy_issues(repo: Path) -> list[str]:
+    issues: list[str] = []
+    for plan in _workflow_policy_plans(repo):
+        issues.extend(plan["issues"])
+        for migration in plan["migrations"]:
+            issues.append(
+                f"{plan['path']}:{migration['line']} [{migration['id']}] known legacy workflow rule; "
+                "run `ap.py upgrade --dry-run` then `ap.py upgrade --write`"
+            )
+    return issues
+
+
+def _require_workflow_policy_clean(repo: Path) -> None:
+    issues = _workflow_policy_issues(repo)
+    if issues:
+        raise APError("Workflow policy conflicts block normal development:\n- " + "\n- ".join(issues))
+
+
+def _parse_frontmatter_markdown_text(text: str, path: Path) -> tuple[dict, str]:
     m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)(.*)$", text, flags=re.DOTALL)
     if not m:
         raise APError(f"Markdown frontmatter not found: {path}")
@@ -1074,6 +1379,12 @@ def _read_frontmatter_markdown(path: Path) -> tuple[dict, str]:
         raise APError("PyYAML not installed. Install dependencies with: pip install pyyaml requests")
     data = yaml.safe_load(m.group(1)) or {}
     return data, m.group(3)
+
+
+def _read_frontmatter_markdown(path: Path) -> tuple[dict, str]:
+    if not path.exists():
+        return {}, ""
+    return _parse_frontmatter_markdown_text(path.read_text(encoding="utf-8"), path)
 
 
 def _write_frontmatter_markdown(path: Path, data: dict, body: str) -> None:
@@ -4305,6 +4616,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     missing: List[str] = []
     validation_errors: List[str] = []
+    validation_errors.extend(_workflow_policy_issues(repo))
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
     profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
@@ -4336,6 +4648,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if enforcement and enforcement not in {"advisory", "blocking"}:
         validation_errors.append("structure.enforcement must be advisory or blocking")
     gate_cfg = _gate_cfg(cfg)
+    if "full_on" in gate_cfg:
+        validation_errors.append("gate.full_on is legacy automatic full escalation; run ap.py upgrade")
     raw_rules = gate_cfg.get("rules") or []
     rules_valid = isinstance(raw_rules, list)
     if not rules_valid:
@@ -4353,10 +4667,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 f"gate.rules[{index}].profile must be micro, standard, or high-risk"
             )
         rule_scope = _text(rule.get("scope")).lower()
-        if rule_scope and rule_scope not in {"changed", "standard", "full"}:
+        if "scope" in rule:
             rules_valid = False
             validation_errors.append(
-                f"gate.rules[{index}].scope must be changed, standard, or full"
+                f"gate.rules[{index}].scope is legacy automatic gate escalation; run ap.py upgrade"
+            )
+        if "commands" in rule:
+            rules_valid = False
+            validation_errors.append(
+                f"gate.rules[{index}].commands is legacy automatic gate escalation; run ap.py upgrade"
             )
 
     if not (_configured_command(cfg, "gate_changed") or _configured_command(cfg, "quick_test")):
@@ -5607,6 +5926,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    _require_workflow_policy_clean(repo)
     _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
@@ -6645,6 +6965,7 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    _require_workflow_policy_clean(repo)
     manifest = _require_task_context(repo, cfg, args.task_id)
     _require_current_writer(manifest, args)
     lock_name = f"task-{_validate_task_id(args.task_id)}"

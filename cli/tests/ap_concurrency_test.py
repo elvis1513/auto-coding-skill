@@ -242,6 +242,46 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         return result
 
+    def test_task_start_rejects_unknown_full_gate_policy_before_creating_branch(self) -> None:
+        _, repo, _ = self.make_repo()
+        (repo / "AGENTS.md").write_text(
+            "# Workflow\nRuntime changes require the full gate.\n",
+            encoding="utf-8",
+        )
+        result = self.ap(
+            repo,
+            "task-start",
+            "POLICY-START",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            ".",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("AGENTS.md:2", result.stdout + result.stderr)
+        self.assert_local_branch(repo, "codex/POLICY-START", False)
+
+    def test_commit_push_rejects_policy_added_after_task_start(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "POLICY-PUSH")
+        (worktree / "AGENTS.md").write_text(
+            "# Workflow\nRuntime changes require the full gate.\n",
+            encoding="utf-8",
+        )
+        self.approve_task(worktree, "POLICY-PUSH")
+        result = self.ap(
+            worktree,
+            "commit-push",
+            "POLICY-PUSH",
+            "--msg",
+            "POLICY-PUSH: blocked",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("AGENTS.md:2", result.stdout + result.stderr)
+        self.assertEqual("", git_output(worktree, "diff", "--cached", "--name-only"))
+
     def manifest_payloads(self, repo: Path) -> list[dict]:
         common_dir_raw = git_output(repo, "rev-parse", "--git-common-dir")
         common_dir = Path(common_dir_raw)

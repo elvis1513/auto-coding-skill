@@ -68,6 +68,30 @@ def base_config() -> dict:
 
 
 class AutoCodingProfileTests(unittest.TestCase):
+    @staticmethod
+    def workflow_policy(*, fragments: list[dict] | None = None) -> dict:
+        return {
+            "schema_version": 1,
+            "managed_versions": {"agents": "3.0.2", "engineering": "3.0.2"},
+            "known_official_engineering_body_sha256": [],
+            "known_official_fragments": fragments or [],
+            "conflict_rules": [
+                {
+                    "id": "mandatory-full",
+                    "paths": ["AGENTS.md", "docs/ENGINEERING.md"],
+                    "pattern": r"^.*must run the full gate.*$",
+                    "flags": "im",
+                    "message": "full gate is not automatic",
+                }
+            ],
+            "dependency_recovery": {
+                "allowed_gate": "gate_changed",
+                "requires_locked_dependency": True,
+                "retry_same_gate_only": True,
+                "forbid_full_gate_recovery": True,
+            },
+        }
+
     def make_repo(self, change_path: str | None = None, config: dict | None = None) -> tuple[Path, dict]:
         temp = tempfile.TemporaryDirectory(prefix="autocoding-profile-")
         self.addCleanup(temp.cleanup)
@@ -452,6 +476,80 @@ class AutoCodingProfileTests(unittest.TestCase):
         with self.assertRaises(APError) as context:
             ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         self.assertIn("gate.rules[0].scope", str(context.exception))
+
+    def test_upgrade_migrates_legacy_yaml_and_known_policy_fragments(self) -> None:
+        cfg = base_config()
+        cfg["gate"]["full_on"] = {"paths": ["src/**"]}
+        cfg["gate"]["rules"] = [
+            {
+                "name": "legacy",
+                "paths": ["src/**"],
+                "profile": "high-risk",
+                "scope": "full",
+                "commands": ["gate_full"],
+            }
+        ]
+        repo, _ = self.make_repo(config=cfg)
+        engineering = repo / "docs" / "ENGINEERING.md"
+        engineering.write_text(
+            engineering.read_text(encoding="utf-8") + "High-risk work must run the full gate.\n",
+            encoding="utf-8",
+        )
+        policy = self.workflow_policy(
+            fragments=[
+                {
+                    "id": "official-high-risk-full",
+                    "paths": ["docs/ENGINEERING.md"],
+                    "match": "exact-line",
+                    "text": "High-risk work must run the full gate.",
+                }
+            ]
+        )
+        args = argparse.Namespace(repo=str(repo), write=True, dry_run=False, json=False)
+        with mock.patch.object(ap, "_load_workflow_migration_policy", return_value=policy):
+            ap.cmd_upgrade(args)
+
+        migrated, body = ap._read_frontmatter_markdown(engineering)
+        self.assertNotIn("full_on", migrated["gate"])
+        self.assertNotIn("scope", migrated["gate"]["rules"][0])
+        self.assertNotIn("commands", migrated["gate"]["rules"][0])
+        self.assertEqual("true", migrated["commands"]["gate_full"])
+        self.assertNotIn("must run the full gate", body)
+
+    def test_upgrade_unknown_policy_conflict_fails_before_any_write(self) -> None:
+        repo, _ = self.make_repo()
+        agents = repo / "AGENTS.md"
+        agents.write_text("# Rules\nHigh-risk work must run the full gate.\n", encoding="utf-8")
+        before = agents.read_text(encoding="utf-8")
+        args = argparse.Namespace(repo=str(repo), write=True, dry_run=False, json=False)
+        with mock.patch.object(
+            ap,
+            "_load_workflow_migration_policy",
+            return_value=self.workflow_policy(),
+        ):
+            with self.assertRaises(APError) as context:
+                ap.cmd_upgrade(args)
+        self.assertIn("AGENTS.md:2", str(context.exception))
+        self.assertEqual(before, agents.read_text(encoding="utf-8"))
+        self.assertFalse((repo / ".agents").exists())
+
+    def test_doctor_ignores_managed_blocks_but_rejects_unknown_external_rule(self) -> None:
+        repo, _ = self.make_repo()
+        agents = repo / "AGENTS.md"
+        agents.write_text(
+            "<!-- auto-coding-skill:managed-agents:start version=3.0.2 -->\n"
+            "High-risk work must run the full gate.\n"
+            "<!-- auto-coding-skill:managed-agents:end -->\n",
+            encoding="utf-8",
+        )
+        policy = self.workflow_policy()
+        with mock.patch.object(ap, "_load_workflow_migration_policy", return_value=policy):
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        agents.write_text(agents.read_text(encoding="utf-8") + "High-risk work must run the full gate.\n", encoding="utf-8")
+        with mock.patch.object(ap, "_load_workflow_migration_policy", return_value=policy):
+            with self.assertRaises(APError) as context:
+                ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn("AGENTS.md:4", str(context.exception))
 
     def test_doctor_rejects_legacy_isolation(self) -> None:
         cfg = base_config()

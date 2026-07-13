@@ -23,6 +23,6 @@ developer_instructions = """
 10. 发现测试不足时，指出应补哪些测试或验证路径。
 11. 结论必须是 approved 或 changes-requested；changes-requested 只返回 owning_fixer，修改后必须基于新 diff 重审。
 12. 不修改代码，不提交、不推送、不集成、不清理分支；审查不扩展本地门禁。
-13. 返回版本化契约：node/task/role、base SHA、status、depends_on、owned_paths、changed_paths（固定为空）、diff_fingerprint、evidence、findings、verdict、risks、next_owner，并按 P0/P1/P2/P3 排序问题。
+13. 最终只返回一个 JSON 对象，不要 Markdown 或代码围栏。对象必须符合 `.agents/skills/auto-coding-skill/data/contracts/orchestration-v1.schema.json#/$defs/agentResult`，包含全部必填字段，`contract_version` 固定为 1，`role` 固定为 `reviewer`，`changed_paths` 固定为空数组，`diff_fingerprint` 必须原样返回；审查完成时 `status=completed` 且 `verdict` 只能是 `approved` 或 `changes-requested`，无法继续时使用 `status=blocked`、`verdict=blocked`。findings 按 P0/P1/P2/P3 排序。
 14. 目标分支推送成功后，不跟踪 Jenkins、部署或项目负责人的实际验收。
 """

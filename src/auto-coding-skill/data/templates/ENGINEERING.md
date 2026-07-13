@@ -244,6 +244,11 @@ reinitialized or recovered.
 Integration must not update the primary checkout; pull it explicitly only when
 its user-owned state is ready.
 
+Before running `autocoding sync`, finish, integrate, and clean every registered
+v3.0 task with the currently installed 3.0.0 runtime. Sync atomically rejects the
+whole project batch while any schema-v1 task remains, including
+`--components skill`; it never guesses or auto-claims owned paths during upgrade.
+
 ## Subagent orchestration
 
 The main agent owns the task graph and Git lifecycle. Before dispatch, decompose
@@ -343,7 +348,7 @@ python3 docs/tools/autopipeline/ap.py doctor
 python3 docs/tools/autopipeline/ap.py classify --scope auto
 python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
 python3 docs/tools/autopipeline/ap.py structure-check --scope auto
-python3 docs/tools/autopipeline/ap.py task-start <TASK_ID>
+python3 docs/tools/autopipeline/ap.py task-start <TASK_ID> --owned-path <PATH>
 python3 docs/tools/autopipeline/ap.py task-status <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-submodule-sync <TASK_ID>
 python3 docs/tools/autopipeline/ap.py task-review <TASK_ID> --verdict approved --diff-fingerprint <SHA256>

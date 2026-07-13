@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 function die(msg){
@@ -521,6 +522,50 @@ function publicEngineeringPlan(plan){
   };
 }
 
+function registeredLegacyTasks(project){
+  const root = path.resolve(project);
+  let commonDir;
+  try {
+    const raw = execFileSync("git", ["-C", root, "rev-parse", "--git-common-dir"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    commonDir = path.resolve(root, raw);
+  } catch {
+    return [];
+  }
+  const tasksDir = path.join(commonDir, "auto-coding-skill", "tasks");
+  if (!exists(tasksDir)) return [];
+  const legacy = [];
+  for (const entry of fs.readdirSync(tasksDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const manifestPath = path.join(tasksDir, entry.name);
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch {
+      legacy.push({ project: root, manifest: entry.name, schema: "invalid" });
+      continue;
+    }
+    const schema = Number(manifest?.schema ?? 0);
+    if (!Number.isFinite(schema) || schema < 2) {
+      legacy.push({ project: root, manifest: entry.name, schema: Number.isFinite(schema) ? schema : "invalid" });
+    }
+  }
+  return legacy;
+}
+
+function assertNoLegacyRegisteredTasks(projects){
+  const legacy = projects.flatMap(project => registeredLegacyTasks(project));
+  if (!legacy.length) return;
+  const locations = legacy.map(item => `${item.project}:${item.manifest}(schema=${item.schema})`).join(", ");
+  die(
+    "refusing the entire sync batch because registered auto-coding tasks use schema < 2: "
+    + `${locations}\nFinish, integrate, and clean these tasks with the currently installed 3.0.0 runtime before upgrading. `
+    + "sync will not infer or auto-claim owned paths for legacy tasks.",
+  );
+}
+
 function readPackageVersion(){
   const here = path.dirname(fileURLToPath(import.meta.url));
   const pkgPath = path.resolve(here, "..", "..", "package.json");
@@ -923,6 +968,7 @@ Compatibility:
 
   if (args.cmd === "sync") {
     const projects = args.projects.length ? args.projects : [projectRoot()];
+    assertNoLegacyRegisteredTasks(projects);
     const engineeringPlans = new Map();
     if (args.components === "all") {
       for (const project of projects) {

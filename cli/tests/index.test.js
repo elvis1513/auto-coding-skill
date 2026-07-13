@@ -832,6 +832,7 @@ function testMalformedManagedMarkersFailClosed() {
 
 function testSkillOnlySyncTouchesOnlySkill() {
   const repo = tmpdir("skill-only-sync");
+  run("git", ["init", "-q"], { cwd: repo });
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
@@ -860,6 +861,34 @@ function testSkillOnlySyncTouchesOnlySkill() {
   assert(invalid.status !== 0 && invalid.stderr.includes("--components"), "sync should reject unknown component scopes");
   const conflicting = run("node", [cli, "sync", "--projects", repo, "--components", "skill", "--reset-agent-models"], { check: false });
   assert(conflicting.status !== 0, "skill-only sync should reject irrelevant agent reset options");
+
+  writeFile(skill, "legacy-task-sentinel\n");
+  writeFile(path.join(repo, ".git", "auto-coding-skill", "tasks", "T-LEGACY.json"), JSON.stringify({ schema: 1, task_id: "T-LEGACY" }));
+  const blocked = run("node", [cli, "sync", "--projects", repo, "--components", "skill"], { check: false });
+  assert(blocked.status !== 0 && blocked.stderr.includes("schema < 2"), "skill-only sync must block registered legacy tasks");
+  assert(blocked.stderr.includes("3.0.0 runtime") && blocked.stderr.includes("will not infer or auto-claim"), "legacy task error should give safe completion guidance");
+  assert(fs.readFileSync(skill, "utf8") === "legacy-task-sentinel\n", "blocked skill-only sync must not write the skill");
+}
+
+function testLegacyTaskPreflightRejectsWholeBatchAtomically() {
+  const first = tmpdir("legacy-batch-first");
+  const second = tmpdir("legacy-batch-second");
+  for (const repo of [first, second]) {
+    run("git", ["init", "-q"], { cwd: repo });
+    run("node", [cli, "init"], { cwd: repo });
+    run("node", [cli, "sync", "--projects", repo]);
+  }
+  const firstSkill = path.join(first, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+  const secondAgent = path.join(second, ".agents", "agents", "explorer.toml");
+  writeFile(firstSkill, "first-project-sentinel\n");
+  writeFile(secondAgent, `${fs.readFileSync(secondAgent, "utf8")}\n# second-project-sentinel\n`);
+  const secondAgentBefore = fs.readFileSync(secondAgent);
+  writeFile(path.join(second, ".git", "auto-coding-skill", "tasks", "T-V3.json"), JSON.stringify({ schema: 1, task_id: "T-V3" }));
+
+  const result = run("node", [cli, "sync", "--projects", `${first},${second}`], { check: false });
+  assert(result.status !== 0 && result.stderr.includes("entire sync batch"), "one legacy task should reject the complete multi-project batch");
+  assert(fs.readFileSync(firstSkill, "utf8") === "first-project-sentinel\n", "batch preflight must reject before writing an earlier clean project");
+  assert(fs.readFileSync(secondAgent).equals(secondAgentBefore), "batch preflight must not write the project containing the legacy task");
 }
 
 testPreflightAvoidsPartialInstall();
@@ -892,5 +921,6 @@ testLegacyEngineeringMigrationPreservesExistingBody();
 testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication();
 testMalformedManagedMarkersFailClosed();
 testSkillOnlySyncTouchesOnlySkill();
+testLegacyTaskPreflightRejectsWholeBatchAtomically();
 
 console.log("cli-installer-regression-ok");

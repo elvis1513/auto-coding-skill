@@ -13,7 +13,7 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = REPO_ROOT / "cli" / "assets" / "skill" / "scripts"
+SCRIPT_DIR = REPO_ROOT / "src" / "auto-coding-skill" / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import ap  # noqa: E402
@@ -183,6 +183,34 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("dev", plan["effective_mode"])
         self.assertEqual([], plan["recommended_agents"])
         self.assertEqual("main-only", plan["agent_plan"]["strategy"])
+        self.assertEqual(1, plan["contract_version"])
+        self.assertEqual("data/contracts/orchestration-v1.schema.json", plan["contract_schema"])
+        for field in [
+            "contract_version",
+            "contract_schema",
+            "policies",
+            "assignment_contract",
+            "result_contract",
+            "stages",
+            "constraints",
+        ]:
+            self.assertIn(field, plan["agent_plan"])
+
+    def test_planned_files_and_intent_drive_classification_without_polluting_changed_files(self) -> None:
+        repo, cfg = self.make_repo()
+        plan = self.plan(
+            repo,
+            cfg,
+            planned_paths=["src/frontend/LoginPage.tsx"],
+            intent="新增登录鉴权页面并发布",
+        )
+        self.assertEqual([], plan["changed_files"])
+        self.assertEqual(["src/frontend/LoginPage.tsx"], plan["planned_files"])
+        self.assertEqual(["src/frontend/LoginPage.tsx"], plan["classification_files"])
+        self.assertTrue(plan["intent_provided"])
+        self.assertEqual(["auth", "release_or_tooling", "ui"], plan["intent_categories"])
+        self.assertIn("browser_debugger", plan["recommended_agents"])
+        self.assertNotIn("新增登录鉴权页面并发布", str(plan))
 
     def test_ordinary_code_resolves_standard(self) -> None:
         repo, cfg = self.make_repo("src/widget.py")

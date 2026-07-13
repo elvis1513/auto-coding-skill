@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-AP_SCRIPT = REPO_ROOT / "cli" / "assets" / "skill" / "scripts" / "ap.py"
+AP_SCRIPT = REPO_ROOT / "src" / "auto-coding-skill" / "scripts" / "ap.py"
 _MISSING = object()
 
 
@@ -162,6 +163,26 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=check,
         )
 
+    def approve_task(self, repo: Path, task_id: str) -> str:
+        status = self.ap(repo, "task-status", task_id, "--json")
+        fingerprint = json.loads(status.stdout)["tasks"][0]["current_diff_fingerprint"]
+        self.ap(
+            repo,
+            "task-review",
+            task_id,
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            fingerprint,
+            "--reviewer",
+            "test-reviewer",
+        )
+        return fingerprint
+
+    def commit_push(self, repo: Path, task_id: str, message: str) -> subprocess.CompletedProcess[str]:
+        self.approve_task(repo, task_id)
+        return self.ap(repo, "commit-push", task_id, "--msg", message)
+
     def task_worktree(self, repo: Path, task_id: str) -> Path:
         wanted = f"refs/heads/codex/{task_id}"
         current_path: Path | None = None
@@ -173,7 +194,15 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.fail(f"no worktree registered for {wanted}")
 
     def start_task(self, repo: Path, task_id: str) -> Path:
-        result = self.ap(repo, "task-start", task_id, "--base", "origin/dev")
+        result = self.ap(
+            repo,
+            "task-start",
+            task_id,
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            ".",
+        )
         worktree = self.task_worktree(repo, task_id)
         self.assertIn(task_id, result.stdout + result.stderr)
         self.assertTrue(worktree.is_dir())
@@ -277,6 +306,201 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         ]:
             self.assertIn(field, active_task)
 
+    def test_owned_paths_are_required_and_unowned_changes_are_rejected(self) -> None:
+        _, repo, remote = self.make_repo()
+        missing = self.ap(
+            repo,
+            "task-start",
+            "NO-OWNED",
+            "--base",
+            "origin/dev",
+            check=False,
+        )
+        self.assertNotEqual(0, missing.returncode)
+        self.assertIn("owned-path", (missing.stdout + missing.stderr).lower())
+        self.assert_remote_branch(remote, "codex/NO-OWNED", False)
+
+        self.ap(
+            repo,
+            "task-start",
+            "OWNED-ONLY",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "src/owned",
+        )
+        worktree = self.task_worktree(repo, "OWNED-ONLY")
+        outside = worktree / "src" / "outside.txt"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("outside\n", encoding="utf-8")
+        status = self.ap(worktree, "task-status", "OWNED-ONLY", "--json")
+        fingerprint = json.loads(status.stdout)["tasks"][0]["current_diff_fingerprint"]
+        review = self.ap(
+            worktree,
+            "task-review",
+            "OWNED-ONLY",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            fingerprint,
+            check=False,
+        )
+        self.assertNotEqual(0, review.returncode)
+        self.assertIn("outside task owned_paths", review.stdout + review.stderr)
+
+    def test_approved_fingerprint_expires_when_owned_diff_changes(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "STALE-REVIEW")
+        payload = worktree / "payload.txt"
+        payload.write_text("reviewed\n", encoding="utf-8")
+        self.approve_task(worktree, "STALE-REVIEW")
+        payload.write_text("changed after review\n", encoding="utf-8")
+
+        result = self.ap(
+            worktree,
+            "commit-push",
+            "STALE-REVIEW",
+            "--msg",
+            "STALE-REVIEW: must fail",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("fingerprint is stale", result.stdout + result.stderr)
+        self.assert_remote_branch(remote, "codex/STALE-REVIEW", False)
+
+    def test_writer_lease_requires_match_and_owner_handoff_uses_generation_cas(self) -> None:
+        _, repo, _ = self.make_repo()
+        owner = os.environ["CODEX_THREAD_ID"]
+        self.ap(
+            repo,
+            "task-start",
+            "LEASE-1",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            ".",
+            "--writer",
+            "fixer-label",
+        )
+        worktree = self.task_worktree(repo, "LEASE-1")
+        (worktree / "lease.txt").write_text("ready\n", encoding="utf-8")
+        self.approve_task(worktree, "LEASE-1")
+
+        mismatch = self.ap(
+            worktree,
+            "commit-push",
+            "LEASE-1",
+            "--msg",
+            "LEASE-1: wrong writer",
+            check=False,
+        )
+        self.assertNotEqual(0, mismatch.returncode)
+        self.assertIn("writer lease mismatch", (mismatch.stdout + mismatch.stderr).lower())
+
+        self.ap(
+            repo,
+            "task-handoff",
+            "LEASE-1",
+            "--from",
+            "fixer-label",
+            "--to",
+            owner,
+            "--generation",
+            "1",
+        )
+        stale = self.ap(
+            repo,
+            "task-handoff",
+            "LEASE-1",
+            "--from",
+            owner,
+            "--to",
+            "next-writer",
+            "--generation",
+            "1",
+            check=False,
+        )
+        self.assertNotEqual(0, stale.returncode)
+        self.assertIn("generation changed", stale.stdout + stale.stderr)
+        manifest = json.loads(self.registry_manifest_path(repo, "LEASE-1").read_text(encoding="utf-8"))
+        self.assertEqual(owner, manifest["writer_lease"]["holder"])
+        self.assertEqual(2, manifest["writer_lease"]["generation"])
+
+    def test_dependency_sha_must_already_be_in_task_base(self) -> None:
+        _, repo, _ = self.make_repo()
+        tree = git_output(repo, "rev-parse", "HEAD^{tree}")
+        orphan = git_output(repo, "commit-tree", tree, "-m", "unintegrated prerequisite")
+        result = self.ap(
+            repo,
+            "task-start",
+            "DEPENDENT-1",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            ".",
+            "--depends-on",
+            f"UPSTREAM-1={orphan}",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("not integrated", result.stdout + result.stderr)
+
+    def test_target_advance_rebases_then_requires_review_before_integration(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "REBASE-REVIEW")
+        (worktree / "task.txt").write_text("task\n", encoding="utf-8")
+        self.commit_push(worktree, "REBASE-REVIEW", "REBASE-REVIEW: ready")
+
+        (repo / "upstream.txt").write_text("upstream\n", encoding="utf-8")
+        git(repo, "add", "upstream.txt")
+        git(repo, "commit", "-qm", "advance target")
+        git(repo, "push", "-q", "origin", "dev")
+
+        rebased = self.ap(repo, "task-integrate", "REBASE-REVIEW", check=False)
+        self.assertNotEqual(0, rebased.returncode)
+        self.assertIn("review again", rebased.stdout + rebased.stderr)
+        manifest = json.loads(self.registry_manifest_path(repo, "REBASE-REVIEW").read_text(encoding="utf-8"))
+        self.assertEqual("pushed", manifest["state"])
+        self.assertEqual("pending", manifest["review"]["verdict"])
+        self.assertNotEqual(
+            0,
+            git(remote, "cat-file", "-e", "refs/heads/dev:task.txt", check=False).returncode,
+        )
+
+        self.approve_task(worktree, "REBASE-REVIEW")
+        self.ap(repo, "task-integrate", "REBASE-REVIEW")
+        self.assertEqual("task", git_output(remote, "show", "refs/heads/dev:task.txt"))
+
+    def test_rebase_conflict_can_resume_only_then_requires_fresh_review(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "RESUME-1")
+        (worktree / "shared.txt").write_text("task side\n", encoding="utf-8")
+        self.commit_push(worktree, "RESUME-1", "RESUME-1: ready")
+
+        (repo / "shared.txt").write_text("target side\n", encoding="utf-8")
+        git(repo, "add", "shared.txt")
+        git(repo, "commit", "-qm", "conflicting target change")
+        git(repo, "push", "-q", "origin", "dev")
+
+        conflict = self.ap(repo, "task-integrate", "RESUME-1", check=False)
+        self.assertNotEqual(0, conflict.returncode)
+        self.assertIn("rebase conflicted", conflict.stdout + conflict.stderr)
+        manifest = json.loads(self.registry_manifest_path(repo, "RESUME-1").read_text(encoding="utf-8"))
+        self.assertEqual("conflicted", manifest["state"])
+        self.assertEqual("pending", manifest["review"]["verdict"])
+
+        (worktree / "shared.txt").write_text("resolved\n", encoding="utf-8")
+        git(worktree, "add", "shared.txt")
+        git(worktree, "-c", "core.editor=true", "rebase", "--continue")
+        self.ap(repo, "task-resume", "RESUME-1")
+        manifest = json.loads(self.registry_manifest_path(repo, "RESUME-1").read_text(encoding="utf-8"))
+        self.assertEqual("pushed", manifest["state"])
+        self.assertEqual("pending", manifest["review"]["verdict"])
+
+        self.approve_task(worktree, "RESUME-1")
+        self.ap(repo, "task-integrate", "RESUME-1")
+        self.assertEqual("resolved", git_output(remote, "show", "refs/heads/dev:shared.txt"))
+
     def test_task_start_rolls_back_checkout_hook_side_effects(self) -> None:
         hook_bodies = {
             "untracked": (
@@ -296,7 +520,16 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 self.install_hook(repo, "post-checkout", body)
                 task_id = f"HOOK-{label.upper()}"
 
-                result = self.ap(repo, "task-start", task_id, "--base", "origin/dev", check=False)
+                result = self.ap(
+                    repo,
+                    "task-start",
+                    task_id,
+                    "--base",
+                    "origin/dev",
+                    "--owned-path",
+                    ".",
+                    check=False,
+                )
 
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn("hook", (result.stdout + result.stderr).lower())
@@ -425,6 +658,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         second_status = git(second_worktree, "status", "--short").stdout
         self.assertIn("?? docs/tasks/active/", second_status)
         self.assertIn("?? second-task-only.txt", second_status)
+        self.approve_task(worktree, "ISOLATED-1")
+        self.approve_task(second_worktree, "ISOLATED-2")
         with ThreadPoolExecutor(max_workers=2) as pool:
             first_commit = pool.submit(
                 self.ap,
@@ -495,13 +730,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
         worktree = self.start_task(repo, "INTEGRATE-1")
         (worktree / "integrated.txt").write_text("integrated\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "INTEGRATE-1",
-            "--msg",
-            "INTEGRATE-1: ready",
-        )
+        self.commit_push(worktree, "INTEGRATE-1", "INTEGRATE-1: ready")
         task_commit = git_output(worktree, "rev-parse", "HEAD")
         self.assertEqual("c", commit_hook_marker.read_text(encoding="utf-8"))
         self.assertFalse(
@@ -534,13 +763,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         _, repo, remote = self.make_repo()
         worktree = self.start_task(repo, "FAILED-GATE")
         (worktree / "must-not-integrate.txt").write_text("blocked\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "FAILED-GATE",
-            "--msg",
-            "FAILED-GATE: staged task",
-        )
+        self.commit_push(worktree, "FAILED-GATE", "FAILED-GATE: staged task")
         registry = self.registry_manifest_path(repo, "FAILED-GATE")
         payload = json.loads(registry.read_text(encoding="utf-8"))
         payload["state"] = "gate-failed"
@@ -560,13 +783,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         _, repo, remote = self.make_repo()
         worktree = self.start_task(repo, "KEEP-REMOTE")
         (worktree / "kept.txt").write_text("kept remotely\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "KEEP-REMOTE",
-            "--msg",
-            "KEEP-REMOTE: ready",
-        )
+        self.commit_push(worktree, "KEEP-REMOTE", "KEEP-REMOTE: ready")
         self.ap(repo, "task-integrate", "KEEP-REMOTE", "--keep-worktree")
 
         finish = self.ap(repo, "task-finish", "KEEP-REMOTE", "--keep-remote")
@@ -584,13 +801,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         (deleting / "shared.txt").unlink()
         (observer / "observer.txt").write_text("observer\n", encoding="utf-8")
 
-        self.ap(
-            deleting,
-            "commit-push",
-            "DELETE-1",
-            "--msg",
-            "DELETE-1: delete shared file",
-        )
+        self.commit_push(deleting, "DELETE-1", "DELETE-1: delete shared file")
 
         deleted_ref = "refs/heads/codex/DELETE-1"
         self.assertNotEqual(
@@ -651,13 +862,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         _, repo, remote = self.make_repo()
         worktree = self.start_task(repo, "PRUNE-REGISTERED")
         (worktree / "registered.txt").write_text("registered\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "PRUNE-REGISTERED",
-            "--msg",
-            "PRUNE-REGISTERED: ready",
-        )
+        self.commit_push(worktree, "PRUNE-REGISTERED", "PRUNE-REGISTERED: ready")
         self.ap(
             repo,
             "task-integrate",
@@ -682,13 +887,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
         worktree = self.start_task(repo, "IGNORED-1")
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "IGNORED-1",
-            "--msg",
-            "IGNORED-1: ready",
-        )
+        self.commit_push(worktree, "IGNORED-1", "IGNORED-1: ready")
         self.ap(repo, "task-integrate", "IGNORED-1", "--keep-worktree")
 
         (worktree / ".env").write_text("must survive\n", encoding="utf-8")
@@ -754,13 +953,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--recursive",
         )
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "SUBMODULE-1",
-            "--msg",
-            "SUBMODULE-1: ready",
-        )
+        self.commit_push(worktree, "SUBMODULE-1", "SUBMODULE-1: ready")
         self.ap(repo, "task-integrate", "SUBMODULE-1", "--keep-worktree")
 
         task_module = worktree / "vendor" / "module"
@@ -989,13 +1182,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             git(repo, "config", "--local", "--get", "submodule.vendor/module.active", check=False).returncode,
         )
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "SUBMODULE-CONFIG",
-            "--msg",
-            "SUBMODULE-CONFIG: ready",
-        )
+        self.commit_push(worktree, "SUBMODULE-CONFIG", "SUBMODULE-CONFIG: ready")
         self.ap(repo, "task-integrate", "SUBMODULE-CONFIG")
 
         self.assertEqual(before_status, git_output(repo, "submodule", "status", "--", "vendor/module"))
@@ -1070,6 +1257,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "alternate",
             "--remote",
             "upstream",
+            "--owned-path",
+            ".",
         )
         worktree = self.task_worktree(repo, "RELATIVE-BASE")
         self.assertIn("../module-b.git", (worktree / ".gitmodules").read_text(encoding="utf-8"))
@@ -1140,13 +1329,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--recursive",
         )
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "SUBMODULE-RESIDUAL",
-            "--msg",
-            "SUBMODULE-RESIDUAL: ready",
-        )
+        self.commit_push(worktree, "SUBMODULE-RESIDUAL", "SUBMODULE-RESIDUAL: ready")
         self.ap(repo, "task-integrate", "SUBMODULE-RESIDUAL", "--keep-worktree")
 
         module_b = worktree / "vendor" / "b"
@@ -1207,13 +1390,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         root, repo, remote = self.make_repo()
         worktree = self.start_task(repo, "REMOTE-RACE")
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
-        self.ap(
-            worktree,
-            "commit-push",
-            "REMOTE-RACE",
-            "--msg",
-            "REMOTE-RACE: ready",
-        )
+        self.commit_push(worktree, "REMOTE-RACE", "REMOTE-RACE: ready")
         self.ap(repo, "task-integrate", "REMOTE-RACE", "--keep-worktree")
 
         attacker = root / "attacker"
@@ -1260,6 +1437,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         git(worktree, "commit", "-qm", "configure mutating gate")
         before = git_output(worktree, "rev-parse", "HEAD")
         (worktree / "task.txt").write_text("task\n", encoding="utf-8")
+        self.approve_task(worktree, "MUTATE-1")
 
         result = self.ap(
             worktree,
@@ -1287,6 +1465,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         before = git_output(worktree, "rev-parse", "HEAD")
         (worktree / "payload.txt").write_text("payload\n", encoding="utf-8")
+        self.approve_task(worktree, "COMMIT-HOOK")
 
         result = self.ap(
             worktree,

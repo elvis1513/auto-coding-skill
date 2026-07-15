@@ -202,7 +202,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 return current_path
         self.fail(f"no worktree registered for {wanted}")
 
-    def start_task(self, repo: Path, task_id: str) -> Path:
+    def start_task(self, repo: Path, task_id: str, owned_path: str = ".") -> Path:
         result = self.ap(
             repo,
             "task-start",
@@ -210,7 +210,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--base",
             "origin/dev",
             "--owned-path",
-            ".",
+            owned_path,
             "--isolated",
             "--review-required",
         )
@@ -701,8 +701,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_control_commands_are_rejected_from_another_task_worktree(self) -> None:
         _, repo, _ = self.make_repo()
-        first = self.start_task(repo, "CROSS-1")
-        second = self.start_task(repo, "CROSS-2")
+        first = self.start_task(repo, "CROSS-1", "cross/one")
+        second = self.start_task(repo, "CROSS-2", "cross/two")
 
         commands = [
             ("task-integrate", "CROSS-1"),
@@ -734,6 +734,58 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                     "worktrees": git_output(repo, "worktree", "list", "--porcelain"),
                 }
                 self.assertEqual(before, after)
+
+    def test_task_start_rejects_overlapping_active_owned_paths(self) -> None:
+        _, repo, _ = self.make_repo()
+        first = self.start_task(repo, "OWNER-1", "backend")
+        result = self.ap(
+            repo,
+            "task-start",
+            "OWNER-2",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "backend/api",
+            "--isolated",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("overlap active task OWNER-1", result.stdout + result.stderr)
+        self.assertTrue(first.exists())
+        self.assertFalse(self.registry_manifest_path(repo, "OWNER-2").exists())
+        self.assert_local_branch(repo, "codex/OWNER-2", False)
+
+    def test_task_start_rejects_terminal_ledger_lifecycle_and_multi_writer(self) -> None:
+        _, repo, _ = self.make_repo()
+        terminal = self.ap(
+            repo,
+            "task-start",
+            "LEDGER-END",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "docs/tasks/closure-log.md",
+            check=False,
+        )
+        self.assertNotEqual(0, terminal.returncode)
+        self.assertIn("terminal maintenance", terminal.stdout + terminal.stderr)
+        self.assertFalse(self.registry_manifest_path(repo, "LEDGER-END").exists())
+
+        multi = self.ap(
+            repo,
+            "task-start",
+            "MULTI-1",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "frontend",
+            "--writers",
+            "2",
+            check=False,
+        )
+        self.assertNotEqual(0, multi.returncode)
+        self.assertIn("exactly one writer lease", multi.stdout + multi.stderr)
+        self.assertFalse(self.registry_manifest_path(repo, "MULTI-1").exists())
 
     def test_missing_task_manifest_is_rejected_in_linked_worktree(self) -> None:
         _, repo, remote = self.make_repo("worktree")
@@ -786,8 +838,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_commit_push_requires_matching_manifest_and_isolated_worktree(self) -> None:
         _, repo, remote = self.make_repo()
-        worktree = self.start_task(repo, "ISOLATED-1")
-        second_worktree = self.start_task(repo, "ISOLATED-2")
+        worktree = self.start_task(repo, "ISOLATED-1", "task-only.txt")
+        second_worktree = self.start_task(repo, "ISOLATED-2", "second-task-only.txt")
         (worktree / "task-only.txt").write_text("task change\n", encoding="utf-8")
         (second_worktree / "second-task-only.txt").write_text(
             "second task change\n",
@@ -953,8 +1005,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_task_deletion_is_isolated_and_committed_only_on_its_task_branch(self) -> None:
         _, repo, remote = self.make_repo()
-        deleting = self.start_task(repo, "DELETE-1")
-        observer = self.start_task(repo, "DELETE-2")
+        deleting = self.start_task(repo, "DELETE-1", "shared.txt")
+        observer = self.start_task(repo, "DELETE-2", "observer.txt")
         (deleting / "shared.txt").unlink()
         (observer / "observer.txt").write_text("observer\n", encoding="utf-8")
 
@@ -972,7 +1024,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
     def test_task_finish_refuses_dirty_or_unmerged_tasks(self) -> None:
         _, repo, _ = self.make_repo()
 
-        dirty_worktree = self.start_task(repo, "DIRTY-1")
+        dirty_worktree = self.start_task(repo, "DIRTY-1", "dirty.txt")
         (dirty_worktree / "dirty.txt").write_text("not committed\n", encoding="utf-8")
         dirty = self.ap(repo, "task-finish", "DIRTY-1", check=False)
         self.assertNotEqual(0, dirty.returncode)
@@ -980,7 +1032,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assert_local_branch(repo, "codex/DIRTY-1", True)
         self.assertTrue((dirty_worktree / "dirty.txt").exists())
 
-        unmerged_worktree = self.start_task(repo, "UNMERGED-1")
+        unmerged_worktree = self.start_task(repo, "UNMERGED-1", "unmerged.txt")
         (unmerged_worktree / "unmerged.txt").write_text("committed only on task\n", encoding="utf-8")
         git(unmerged_worktree, "add", "unmerged.txt")
         git(unmerged_worktree, "commit", "-qm", "unmerged task commit")

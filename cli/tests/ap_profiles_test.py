@@ -233,7 +233,10 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual(["src/frontend/LoginPage.tsx"], plan["classification_files"])
         self.assertTrue(plan["intent_provided"])
         self.assertEqual(["auth", "release_or_tooling", "ui"], plan["intent_categories"])
-        self.assertIn("browser_debugger", plan["recommended_agents"])
+        self.assertTrue(plan["needs_browser"])
+        self.assertEqual(["reviewer"], plan["recommended_agents"])
+        self.assertNotIn("browser_debugger", plan["recommended_agents"])
+        self.assertNotIn("docs_researcher", plan["recommended_agents"])
         self.assertNotIn("新增登录鉴权页面并发布", str(plan))
 
     def test_ordinary_code_resolves_standard(self) -> None:
@@ -329,22 +332,22 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertFalse(plan["needs_jenkins"])
         self.assertFalse(plan["needs_target"])
 
-    def test_ui_api_discovery_roles_run_in_one_parallel_stage(self) -> None:
+    def test_ui_api_reports_capabilities_without_auto_dispatch(self) -> None:
         repo, cfg = self.make_repo("src/api/settings-page.tsx")
         plan = self.plan(repo, cfg)
-        discovery = next(stage for stage in plan["agent_plan"]["stages"] if stage["id"] == "discovery")
-        self.assertEqual("parallel", discovery["mode"])
-        self.assertEqual(
-            ["docs_researcher", "browser_debugger"],
-            discovery["roles"],
-        )
-        flattened = [
-            role
-            for stage in plan["agent_plan"]["stages"]
-            for role in stage["roles"]
-            if role != "main"
-        ]
-        self.assertEqual(list(dict.fromkeys(flattened)), plan["recommended_agents"])
+        self.assertTrue(plan["needs_browser"])
+        self.assertEqual([], plan["recommended_agents"])
+        self.assertEqual("main-only", plan["agent_plan"]["strategy"])
+        self.assertEqual(["main"], plan["agent_plan"]["stages"][0]["roles"])
+
+    def test_terminal_ledger_maintenance_creates_no_lifecycle_plan(self) -> None:
+        repo, cfg = self.make_repo()
+        plan = self.plan(repo, cfg, planned_paths=["docs/tasks/closure-log.md"])
+        self.assertTrue(plan["terminal_maintenance"])
+        self.assertEqual("none", plan["execution_mode"])
+        self.assertFalse(plan["review_required"])
+        self.assertFalse(plan["design_required"])
+        self.assertEqual([], plan["recommended_agents"])
 
     def test_requested_verify_mode_is_rejected(self) -> None:
         repo, cfg = self.make_repo("src/widget.py")
@@ -551,9 +554,13 @@ class AutoCodingProfileTests(unittest.TestCase):
 
     def test_upgrade_unknown_policy_conflict_fails_before_any_write(self) -> None:
         repo, _ = self.make_repo()
-        agents = repo / "AGENTS.md"
-        agents.write_text("# Rules\nHigh-risk work must run the full gate.\n", encoding="utf-8")
-        before = agents.read_text(encoding="utf-8")
+        engineering = repo / "docs" / "ENGINEERING.md"
+        engineering.write_text(
+            engineering.read_text(encoding="utf-8")
+            + "High-risk work must run the full gate.\n",
+            encoding="utf-8",
+        )
+        before = engineering.read_text(encoding="utf-8")
         args = argparse.Namespace(repo=str(repo), write=True, dry_run=False, json=False)
         with mock.patch.object(
             ap,
@@ -562,8 +569,8 @@ class AutoCodingProfileTests(unittest.TestCase):
         ):
             with self.assertRaises(APError) as context:
                 ap.cmd_upgrade(args)
-        self.assertIn("AGENTS.md:2", str(context.exception))
-        self.assertEqual(before, agents.read_text(encoding="utf-8"))
+        self.assertIn("docs/ENGINEERING.md", str(context.exception))
+        self.assertEqual(before, engineering.read_text(encoding="utf-8"))
         self.assertFalse((repo / ".agents").exists())
 
     def test_doctor_ignores_managed_blocks_but_rejects_unknown_external_rule(self) -> None:

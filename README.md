@@ -5,7 +5,12 @@ A delivery-first Codex engineering workflow:
 `analysis → decomposition → necessary design → development → one final fast
 changed-scope gate → commit/push`.
 
-Version 4.0 replaces the 3.x governance-first defaults with progressive
+The Skill is a selectable guardrail, not a command sequence that must run for
+every task. The model skips machinery whose expected benefit does not exceed its
+cost; read-only work and obvious small clean-checkout changes normally stay direct.
+
+Version 4.1 consolidates the 4.x delivery-first workflow into one canonical
+repository contract. Version 4.0 replaced the 3.x governance-first defaults with progressive
 guardrails. Clean single-writer work stays on the current branch. Worktrees,
 parallel fixers, fingerprint review, durable design records, and stronger
 affected-scope checks are enabled only when concurrency or risk justifies them.
@@ -26,7 +31,7 @@ The project install contains:
 .agents/agents/
 docs/ENGINEERING.md
 docs/tools/autopipeline/ap.py
-AGENTS.md (managed bridge only; project content is preserved)
+AGENTS.md (fully managed canonical repository contract)
 ```
 
 Ordinary projects no longer receive taskbook or closure logs. Existing optional
@@ -80,7 +85,7 @@ Dirty or parallel work receives an isolated task branch/worktree:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0002 \
-  --owned-path backend --writers 2 --review-required
+  --owned-path backend --review-required
 # implement in the printed worktree
 python3 docs/tools/autopipeline/ap.py task-review T0002 \
   --verdict approved --diff-fingerprint "$SHA256"
@@ -92,6 +97,10 @@ python3 docs/tools/autopipeline/ap.py task-integrate T0002
 Integration serializes the target push and removes clean merged worktrees and
 temporary branches. Unknown changes, unmerged history, unsafe ignored data, or
 dirty submodules block cleanup rather than being discarded.
+
+Parallel development uses one task ID and one `task-start` per writer. `--writers`
+belongs to `classify` planning only; the runtime rejects overlapping active
+`owned_paths` and never creates multiple writers in one task/worktree.
 
 ## Real changed-scope validation
 
@@ -152,13 +161,14 @@ diagnostics outside normal closure.
 
 The main agent owns architecture, final validation, Git closure, ordered
 integration, push, and cleanup. Push ends the coding task; later CI/acceptance is
-handled only through a separately requested diagnostic task.
+not polled automatically. An explicitly requested failure diagnosis may continue
+in the same conversation/task without an artificial second ledger lifecycle.
 
 ## Upgrade and multi-project sync
 
-Finish all in-flight schema-1/schema-2 registered tasks using their installed 3.x
-runtime before syncing 4.0. Batch sync fails before any writes when it finds an
-incompatible active task.
+Finish every registered task using its currently installed runtime before syncing
+a different Skill version. Batch sync fails before any writes when it finds an
+active manifest, regardless of schema version.
 
 ```bash
 autocoding status --projects /path/a,/path/b
@@ -168,8 +178,27 @@ autocoding sync --projects /path/a,/path/b
 
 Sync replaces the managed Skill directory, so missing files are restored and
 obsolete managed files are removed. It preserves project frontmatter, access
-values, custom agents, explicit model overrides, optional documents, and content
-outside managed AGENTS/ENGINEERING blocks.
+values, custom role agents, explicit model overrides, optional documents, and
+project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
+replaced as a whole; its previous content is archived under
+`docs/archive/workflow/` as historical, non-authoritative context.
+
+## What changed in 4.1.0
+
+- Made root `AGENTS.md` byte-identical across installed projects and whole-file
+  managed on every full sync/upgrade.
+- Established code/tests/runtime as the source of current behavior and
+  `ENGINEERING.md` as the single project workflow/configuration source.
+- Added an engineering-centered documentation framework plus optional
+  `docs/project/` fact templates.
+- Prevented Skill upgrades while any registered task is active and recorded the
+  installed Skill version in new task manifests.
+- Made reviewer scope bounded, with targeted recheck for mechanical docs-only
+  fixes and non-blocking handling of adjacent findings.
+- Defined ledger/archive reconciliation as a terminal maintenance action, so
+  closing records cannot recursively create more task records.
+- Kept explicit Jenkins failure diagnosis in the same requested task while
+  preserving push-as-completion and no automatic polling.
 
 ## What changed in 4.0.0
 

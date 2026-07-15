@@ -49,7 +49,7 @@ _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.0.0", "engineering": "4.0.0"},
+    "managed_versions": {"agents": "4.1.0", "engineering": "4.1.0"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -575,10 +575,6 @@ def _copy_conflicts(src: Path, dst: Path) -> list[Path]:
     return conflicts
 
 
-_MANAGED_EXTRA_CLEANUP_DIRS = {
-    Path("data/templates/bridges"),
-}
-
 _CORE_DOC_TEMPLATES: list[Path] = []
 
 
@@ -634,8 +630,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.0.0":
-        workflow_cfg["skill_version"] = "4.0.0"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.0":
+        workflow_cfg["skill_version"] = "4.1.0"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -715,17 +711,6 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
         if migrated_rules != raw_rules:
             gate_cfg["rules"] = []
             changed.append("gate.rules")
-
-    if not validation_routes:
-        validation_routes.append(
-            {
-                "name": "project-code",
-                "paths": ["**"],
-                "exclude": ["*.md", "docs/**"],
-                "commands": ["project_fast"],
-            }
-        )
-        changed.append("validation.routes[0]")
 
     concurrency_cfg = cfg.setdefault("concurrency", {})
     if not isinstance(concurrency_cfg, dict):
@@ -822,7 +807,18 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     source_root = _find_skill_asset_root(repo)
     templates = source_root / "data" / "templates"
     template_engineering = templates / "ENGINEERING.md"
+    template_agents = templates / "bridges" / "AGENTS.md"
     actions: list[dict] = []
+
+    registry = _task_state_root(repo) / "tasks"
+    active_manifests = sorted(registry.glob("*.json")) if registry.exists() else []
+    if active_manifests:
+        names = ", ".join(path.name for path in active_manifests)
+        raise APError(
+            "Upgrade refused because registered tasks are still active: "
+            f"{names}. Finish, integrate, or clean them with the installed runtime first; "
+            "workflow semantics must not change mid-task."
+        )
 
     def add_action(kind: str, path: Path, action: str, detail: str = "") -> None:
         actions.append({
@@ -836,7 +832,15 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     # are safe migration inputs; every remaining match is project-owned and must
     # be handled explicitly instead of being overwritten by a partial upgrade.
     workflow_plans = _workflow_policy_plans(repo)
-    workflow_issues = [issue for plan in workflow_plans for issue in plan["issues"]]
+    # Root AGENTS.md is a whole-file managed bridge in 4.1. Unknown legacy text
+    # is archived and replaced, so only ENGINEERING policy conflicts block the
+    # upgrade preflight.
+    workflow_issues = [
+        issue
+        for plan in workflow_plans
+        if plan["path"] == "docs/ENGINEERING.md"
+        for issue in plan["issues"]
+    ]
     if workflow_issues:
         raise APError(
             "Upgrade preflight found unknown workflow policy conflicts; no files were written:\n- "
@@ -850,6 +854,35 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         _, template_body = _read_frontmatter_markdown(template_engineering)
         body_start = frontmatter[1] if frontmatter else 0
         engineering_plan["output"] = current[:body_start] + template_body
+
+    section_migrations = [
+        item
+        for item in engineering_plan.get("migrations") or []
+        if _text(item.get("id")).startswith("engineering-section-")
+    ]
+    if section_migrations and engineering_plan.get("original"):
+        version_match = re.search(
+            r"auto-coding-skill:managed-workflow:start\s+version=([0-9]+\.[0-9]+\.[0-9]+)",
+            template_engineering.read_text(encoding="utf-8"),
+        )
+        version = version_match.group(1) if version_match else "current"
+        archive_header = (
+            f"# Archived ENGINEERING.md before auto-coding-skill {version} docs convergence\n\n"
+            "This file is historical and non-authoritative. Known duplicate workflow sections\n"
+            "were removed from docs/ENGINEERING.md. Move any still-current project facts into\n"
+            "docs/ENGINEERING.md project-fact sections or docs/project/.\n\n---\n\n"
+        )
+        archive_content = archive_header + engineering_plan["original"]
+        archive_dir = repo / "docs" / "archive" / "workflow"
+        archive = archive_dir / f"ENGINEERING.pre-{version}.md"
+        if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
+            digest = hashlib.sha256(engineering_plan["original"].encode("utf-8")).hexdigest()[:12]
+            archive = archive_dir / f"ENGINEERING.pre-{version}-{digest}.md"
+        if not archive.exists():
+            add_action("policy", archive, "archive", "before duplicate workflow section cleanup")
+            if write:
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                archive.write_text(archive_content, encoding="utf-8")
 
     tool_files = [
         (
@@ -889,26 +922,39 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         for dst in _iter_files(project_skill):
             rel = dst.relative_to(project_skill)
             if not (source_root / rel).exists():
-                if rel.parts[:3] == ("data", "templates", "docs"):
-                    continue
-                if rel.parent in _MANAGED_EXTRA_CLEANUP_DIRS:
-                    add_action("skill", dst, "delete", "stale managed template")
-                    if write:
-                        dst.unlink()
-                else:
-                    add_action("skill", dst, "extra", "present only in project copy")
+                add_action("skill", dst, "delete", "stale file in fully managed Skill copy")
+                if write:
+                    dst.unlink()
     else:
         add_action("skill", project_skill, "create", "install runtime required by the project launcher")
         if write:
             copy_tree(source_root, project_skill)
 
-    agents_plan = workflow_plan_by_path["AGENTS.md"]
     agents_path = repo / "AGENTS.md"
-    if agents_plan["output"] != agents_plan["original"]:
-        migrated = ", ".join(item["id"] for item in agents_plan["migrations"])
-        add_action("policy", agents_path, "migrate", migrated)
+    canonical_agents = template_agents.read_text(encoding="utf-8") if template_agents.exists() else ""
+    current_agents = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+    if canonical_agents and current_agents != canonical_agents:
+        if current_agents:
+            archive_dir = repo / "docs" / "archive" / "workflow"
+            archive_header = (
+                "# Archived AGENTS.md before auto-coding-skill 4.1.0\n\n"
+                "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
+                "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
+                "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
+            )
+            archive_content = archive_header + current_agents
+            archive = archive_dir / "AGENTS.pre-4.1.0.md"
+            if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
+                digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
+                archive = archive_dir / f"AGENTS.pre-4.1.0-{digest}.md"
+            if not archive.exists():
+                add_action("policy", archive, "archive", "historical and non-authoritative")
+                if write:
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    archive.write_text(archive_content, encoding="utf-8")
+        add_action("policy", agents_path, "replace", "fully managed canonical AGENTS.md")
         if write:
-            agents_path.write_text(agents_plan["output"], encoding="utf-8")
+            agents_path.write_text(canonical_agents, encoding="utf-8")
 
     docs_template = templates / "docs"
     for rel in _CORE_DOC_TEMPLATES:
@@ -928,6 +974,10 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     engineering = repo / "docs" / "ENGINEERING.md"
     if engineering.exists() and template_engineering.exists():
         planned_engineering = engineering_plan["output"] or engineering.read_text(encoding="utf-8")
+        planned_engineering = _sync_managed_workflow_text(
+            planned_engineering,
+            template_engineering.read_text(encoding="utf-8"),
+        )
         current_cfg, body = _parse_frontmatter_markdown_text(planned_engineering, engineering)
         template_cfg, _ = _read_frontmatter_markdown(template_engineering)
         merged_cfg = json.loads(json.dumps(current_cfg))
@@ -1223,7 +1273,7 @@ def _load_workflow_migration_policy(repo: Path) -> dict:
     for index, fragment in enumerate(policy["known_official_fragments"]):
         if not isinstance(fragment, dict):
             raise APError(f"Workflow migration policy fragment[{index}] must be an object")
-        if fragment.get("match") not in {"exact-line", "exact-block"}:
+        if fragment.get("match") not in {"exact-line", "exact-block", "heading-section"}:
             raise APError(f"Workflow migration policy fragment[{index}] has invalid match mode")
         if not _text(fragment.get("id")) or not isinstance(fragment.get("paths"), list):
             raise APError(f"Workflow migration policy fragment[{index}] is incomplete")
@@ -1292,6 +1342,30 @@ def _managed_document_span(text: str, kind: str, rel: str) -> Optional[tuple[int
     return starts[0].start(), ends[0].end()
 
 
+def _sync_managed_workflow_text(current: str, template: str) -> str:
+    """Install the canonical managed workflow while preserving project facts."""
+    template_span = _managed_document_span(template, "workflow", "template ENGINEERING.md")
+    if not template_span:
+        raise APError("Packaged ENGINEERING template has no managed workflow block")
+    block = template[template_span[0]:template_span[1]]
+    current_span = _managed_document_span(current, "workflow", "docs/ENGINEERING.md")
+    if current_span:
+        return current[:current_span[0]] + block + current[current_span[1]:]
+
+    frontmatter = _frontmatter_span(current, "docs/ENGINEERING.md")
+    body_start = frontmatter[1] if frontmatter else 0
+    body = current[body_start:]
+    heading = re.search(r"^# Engineering Workflow[^\n]*(?:\n|$)", body, flags=re.MULTILINE)
+    insertion = body_start + (heading.end() if heading else 0)
+    before = current[:insertion]
+    after = current[insertion:]
+    if before and not before.endswith("\n"):
+        before += "\n"
+    if after and not after.startswith("\n"):
+        after = "\n" + after
+    return before + block + after
+
+
 def _frontmatter_span(text: str, rel: str) -> Optional[tuple[int, int]]:
     if not text.startswith("---\n"):
         return None
@@ -1314,6 +1388,28 @@ def _known_fragment_spans(
         replacement = str(fragment.get("replacement") or "")
         match_mode = _text(fragment.get("match"))
         expected = str(fragment.get("text") or "").replace("\r\n", "\n")
+        if fragment.get("match") == "heading-section":
+            lines = visible.splitlines(keepends=True)
+            offsets: list[int] = []
+            cursor = 0
+            for line in lines:
+                offsets.append(cursor)
+                cursor += len(line)
+            for index, line in enumerate(lines):
+                heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*#*\s*$", line.rstrip("\n"))
+                if not heading or heading.group(2).strip() != expected.strip():
+                    continue
+                level = len(heading.group(1))
+                end_index = index + 1
+                while end_index < len(lines):
+                    next_heading = re.match(r"^\s*(#{1,6})\s+", lines[end_index])
+                    if next_heading and len(next_heading.group(1)) <= level:
+                        break
+                    end_index += 1
+                end = offsets[end_index] if end_index < len(offsets) else len(visible)
+                start = offsets[index]
+                found.append((start, end, fragment_id, visible.count("\n", 0, start) + 1, replacement, match_mode))
+            continue
         if fragment.get("match") == "exact-line":
             cursor = 0
             for line in visible.splitlines(keepends=True):
@@ -1330,7 +1426,17 @@ def _known_fragment_spans(
             end = start + len(expected)
             found.append((start, end, fragment_id, visible.count("\n", 0, start) + 1, replacement, match_mode))
             cursor = end
-    return found
+    section_spans = [
+        (start, end)
+        for start, end, _, _, _, match_mode in found
+        if match_mode == "heading-section"
+    ]
+    return [
+        item
+        for item in found
+        if item[5] == "heading-section"
+        or not any(start <= item[0] and item[1] <= end for start, end in section_spans)
+    ]
 
 
 def _workflow_document_plan(repo: Path, rel: str, policy: dict) -> dict:
@@ -1951,6 +2057,36 @@ def _path_is_owned(path: str, owned_paths: list[str]) -> bool:
         owner == "." or normalized == owner or normalized.startswith(owner.rstrip("/") + "/")
         for owner in owned_paths
     )
+
+
+def _owned_paths_overlap(left: list[str], right: list[str]) -> bool:
+    for first in left:
+        first = _normalize_owned_path(first)
+        for second in right:
+            second = _normalize_owned_path(second)
+            if (
+                first == "."
+                or second == "."
+                or first == second
+                or first.startswith(second.rstrip("/") + "/")
+                or second.startswith(first.rstrip("/") + "/")
+            ):
+                return True
+    return False
+
+
+_TERMINAL_LEDGER_PATTERNS = [
+    "docs/tasks/taskbook.md",
+    "docs/tasks/closure-log.md",
+    "docs/tasks/archive-index.md",
+    "docs/tasks/archives/**",
+    "docs/tasks/closures/**",
+    "docs/archive/design/**",
+]
+
+
+def _is_terminal_ledger_maintenance(paths: list[str]) -> bool:
+    return bool(paths) and all(_path_matches(path, _TERMINAL_LEDGER_PATTERNS) for path in paths)
 
 
 def _task_managed_paths(cfg: dict, manifest: dict) -> list[str]:
@@ -4208,9 +4344,10 @@ def _classification_for_categories(categories: set[str], file_count: int) -> dic
         "needs_dd": bool(
             categories
             & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config", "release_or_tooling"}
-        )
-        or file_count > 12,
-        "needs_adr": bool(categories & {"structure", "release_or_tooling"}) and not categories <= {"docs"},
+        ),
+        # Path names and file counts do not justify a durable architecture
+        # record. The model or an explicit project rule decides.
+        "needs_adr": False,
         "needs_browser": "ui" in categories,
         "needs_jenkins": bool(
             categories & {"release_or_tooling", "db", "auth", "payment", "gateway", "prod_config"}
@@ -4354,13 +4491,10 @@ def _agent_execution_plan(
     review_required: bool = False,
 ) -> dict:
     assignment_contract, result_contract = _agent_contract_shape()
+    # Classification reports useful capabilities but never auto-dispatches
+    # discovery roles. The model chooses delegation only when expected benefit
+    # exceeds coordination cost.
     discovery_roles: list[str] = []
-    if categories & {"api", "release_or_tooling"}:
-        discovery_roles.append("docs_researcher")
-    if classification.get("needs_browser"):
-        discovery_roles.append("browser_debugger")
-    if profile == "high-risk" and not discovery_roles:
-        discovery_roles.append("explorer")
 
     policies = {
         "one_writer_per_worktree": True,
@@ -4471,6 +4605,7 @@ def _resolve_execution_plan(
         (docs_only_paths and str(impact["selected_scope"]) != "full")
         or _tests_only(classification_inputs)
     )
+    terminal_maintenance = _is_terminal_ledger_maintenance(classification_inputs)
     if docs_or_tests_only and str(impact["selected_scope"]) != "full":
         detected_profile = "micro"
         profile_reasons.append("only docs/test files changed")
@@ -4503,9 +4638,6 @@ def _resolve_execution_plan(
         high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
     if "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
-    if len(classification_inputs) > 12 and not docs_or_tests_only:
-        high_signals.append("change spans more than 12 files")
-
     if high_signals:
         detected_profile = "high-risk"
         profile_reasons.extend(high_signals)
@@ -4552,12 +4684,22 @@ def _resolve_execution_plan(
         _text(rule.get("design")).lower() in {"required", "true", "yes"}
         for rule in matching_rules
     )
-    review_required = bool(effective_profile == "high-risk" or writer_count > 1 or cross_module or rule_review)
-    design_required = bool(rule_design or (effective_profile == "high-risk" and cross_module))
+    cross_module_contract_risk = bool(
+        cross_module
+        and categories & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config"}
+    )
+    review_required = bool(
+        not terminal_maintenance
+        and (effective_profile == "high-risk" or writer_count > 1 or cross_module_contract_risk or rule_review)
+    )
+    design_required = bool(
+        not terminal_maintenance
+        and (rule_design or (effective_profile == "high-risk" and cross_module))
+    )
     has_task_signal = bool(classification_inputs or _text(intent))
     workspace_dirty = bool(_working_tree_paths(repo))
     configured_isolation = _task_isolation(cfg)
-    if not has_task_signal:
+    if terminal_maintenance or not has_task_signal:
         execution_mode = "none"
     elif configured_isolation == "worktree" or writer_count > 1 or workspace_dirty:
         execution_mode = "isolated"
@@ -4595,6 +4737,7 @@ def _resolve_execution_plan(
         "requested_mode": requested_mode_value or None,
         "effective_mode": effective_mode,
         "execution_mode": execution_mode,
+        "terminal_maintenance": terminal_maintenance,
         "workspace_dirty": workspace_dirty,
         "parallel_writers": writer_count,
         "cross_module": cross_module,
@@ -4920,12 +5063,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
     profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
     completion = str(workflow_cfg.get("completion") or "").strip().lower()
+    skill_version = _text(workflow_cfg.get("skill_version"))
     if mode != "dev":
         missing.append("workflow.mode (must be dev; external verification is owner-managed)")
     if profile not in _WORKFLOW_PROFILES:
         missing.append("workflow.profile (must be auto, micro, standard, or high-risk)")
     if completion != "push":
         missing.append("workflow.completion (must be push)")
+    if skill_version.startswith("4.1") and _text(docs_cfg.get("framework")) != "engineering-centered":
+        missing.append("docs.framework (must be engineering-centered for auto-coding-skill 4.1)")
     isolation = _text(concurrency_cfg.get("isolation")).lower() or "adaptive"
     if isolation not in {"adaptive", "worktree"}:
         validation_errors.append(
@@ -5028,6 +5174,26 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         validation_errors.append(
             "validation.routes is empty and no 3.x commands.gate_changed compatibility fallback exists"
         )
+    tracked_validation_paths = [
+        path
+        for path in _tracked_files(repo)
+        if not _path_matches(
+            path,
+            [
+                "*.md",
+                "docs/**",
+                ".agents/**",
+                ".local/**",
+                "AGENTS.md",
+            ],
+        )
+    ]
+    if tracked_validation_paths:
+        try:
+            tracked_plan = _validation_plan(cfg, tracked_validation_paths)
+            _validate_validation_plan(cfg, tracked_plan)
+        except APError as exc:
+            validation_errors.append(f"tracked validation coverage: {exc}")
 
     repo_docs: dict[str, Path] = {}
     api_doc = Path(repo, str(docs_cfg.get("api_doc", "docs/interfaces/api.md")))
@@ -6300,6 +6466,30 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         owned_paths = sorted({_normalize_owned_path(item) for item in (args.owned_path or [])})
         if not owned_paths:
             raise APError("task-start requires at least one --owned-path.")
+        if _is_terminal_ledger_maintenance(owned_paths):
+            raise APError(
+                "Pure taskbook/closure/archive reconciliation is terminal maintenance and must not "
+                "create another task lifecycle. Run the targeted document check, commit once, and push."
+            )
+        writer_count = max(1, int(getattr(args, "writers", 1) or 1))
+        if writer_count != 1:
+            raise APError(
+                "task-start creates exactly one writer lease and one worktree. Start each parallel "
+                "writer as its own task ID; use --writers only with classify for planning."
+            )
+        registry_dir = _task_state_root(repo) / "tasks"
+        for manifest_path in sorted(registry_dir.glob("*.json")) if registry_dir.exists() else []:
+            active_manifest = _read_json_object(manifest_path) or {}
+            if _text(active_manifest.get("state")) in {"integrated", "cleanup-pending"}:
+                continue
+            active_owned = active_manifest.get("owned_paths") or []
+            if isinstance(active_owned, list) and _owned_paths_overlap(owned_paths, active_owned):
+                active_id = _text(active_manifest.get("task_id")) or manifest_path.stem
+                raise APError(
+                    f"Owned paths overlap active task {active_id}: "
+                    + ", ".join(active_owned)
+                    + ". Split ownership into non-overlapping task units or finish the active writer first."
+                )
         depends_on: list[str] = []
         prerequisite_shas: dict[str, str] = {}
         for raw_dependency in args.depends_on or []:
@@ -6321,7 +6511,6 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         if not owner:
             raise APError("task-start requires --owner or CODEX_THREAD_ID.")
         writer = _text(getattr(args, "writer", "")) or owner
-        writer_count = max(1, int(getattr(args, "writers", 1) or 1))
         plan = _resolve_execution_plan(
             cfg,
             repo,
@@ -6352,6 +6541,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             direct_base = _resolve_commit(repo, "HEAD")
             manifest = {
                 "schema": 3,
+                "skill_version": _text((cfg.get("workflow") or {}).get("skill_version")),
                 "execution_mode": "direct",
                 "review_required": review_required,
                 "task_id": task_id,
@@ -6431,6 +6621,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         )
         manifest = {
             "schema": 3,
+            "skill_version": _text((cfg.get("workflow") or {}).get("skill_version")),
             "execution_mode": "isolated",
             "review_required": review_required,
             "task_id": task_id,

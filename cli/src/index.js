@@ -111,11 +111,8 @@ function validateCommandArgs(args){
   if (invalid.length) {
     die(`${invalid.map(name => ARG_FLAGS[name] || name).join(", ")} not valid for '${args.cmd}'`);
   }
-  if (args.cmd === "sync" && !["all", "skill"].includes(args.components)) {
-    die("--components must be 'all' or 'skill'");
-  }
-  if (args.cmd === "sync" && args.components === "skill" && args.resetAgentModels) {
-    die("--reset-agent-models cannot be used with --components skill");
+  if (args.cmd === "sync" && args.components !== "all") {
+    die("partial Skill sync was removed in 4.1; use --components all so Skill, AGENTS.md, ENGINEERING.md, agents, and runtime converge together");
   }
 }
 
@@ -493,7 +490,33 @@ function applyKnownOfficialFragments(text, documentPath, policy){
   for (const fragment of policy.known_official_fragments) {
     if (!fragment.paths?.includes(documentPath) || !fragment.text) continue;
     let pattern;
-    if (fragment.match === "exact-line") {
+    if (fragment.match === "heading-section") {
+      const lines = output.match(/.*(?:\r?\n|$)/g).filter(Boolean);
+      const offsets = [];
+      let cursor = 0;
+      for (const line of lines) {
+        offsets.push(cursor);
+        cursor += line.length;
+      }
+      const spans = [];
+      for (let index = 0; index < lines.length; index += 1) {
+        const heading = lines[index].replace(/\r?\n$/, "").match(/^(\s*)(#{1,6})\s+(.+?)\s*#*\s*$/);
+        if (!heading || heading[3].trim() !== fragment.text.trim()) continue;
+        const level = heading[2].length;
+        let end = index + 1;
+        while (end < lines.length) {
+          const next = lines[end].replace(/\r?\n$/, "").match(/^\s*(#{1,6})\s+/);
+          if (next && next[1].length <= level) break;
+          end += 1;
+        }
+        spans.push([offsets[index], end < lines.length ? offsets[end] : output.length]);
+      }
+      if (spans.length) {
+        for (const [start, end] of spans.reverse()) output = output.slice(0, start) + output.slice(end);
+        migrations.push(fragment.id);
+      }
+      continue;
+    } else if (fragment.match === "exact-line") {
       pattern = new RegExp(`^[\\t ]*${escapeRegExp(fragment.text.trim())}[\\t ]*(?:\\r?\\n|$)`, "gm");
     } else if (fragment.match === "exact-block") {
       const source = fragment.text.split("\n").map(escapeRegExp).join("\\r?\\n");
@@ -656,6 +679,8 @@ function planEngineeringSync(project, assetSkill, policy = loadWorkflowMigration
         detail: "unknown workflow directives conflict with the managed fast-gate policy",
       };
     }
+    const sectionMigration = migrated.migrations.some(item => item.startsWith("engineering-section-"));
+    const archive = sectionMigration ? engineeringArchivePlan(root, current, templateRegion.version) : {};
     return {
       state: "legacy-custom",
       version: templateRegion.version,
@@ -664,6 +689,7 @@ function planEngineeringSync(project, assetSkill, policy = loadWorkflowMigration
       engineering,
       migrations: migrated.migrations,
       conflicts: [],
+      ...archive,
     };
   }
   const beforeParts = splitEngineeringDocument(current.slice(0, currentRegion.start));
@@ -689,6 +715,8 @@ function planEngineeringSync(project, assetSkill, policy = loadWorkflowMigration
   const migratedRegion = inspectManagedWorkflow(migratedCurrent);
   const output = replaceManagedBlock(migratedCurrent, migratedRegion, templateRegion.block);
   if (current === output) return { state: "current", version: templateRegion.version, output, engineering, migrations: [], conflicts: [] };
+  const sectionMigration = migrations.some(item => item.startsWith("engineering-section-"));
+  const archive = sectionMigration ? engineeringArchivePlan(root, current, templateRegion.version) : {};
   return {
     state: "stale",
     version: templateRegion.version,
@@ -697,6 +725,34 @@ function planEngineeringSync(project, assetSkill, policy = loadWorkflowMigration
     engineering,
     migrations,
     conflicts: [],
+    ...archive,
+  };
+}
+
+function engineeringArchivePlan(root, current, version){
+  const archiveHeader = [
+    `# Archived ENGINEERING.md before auto-coding-skill ${version} docs convergence`,
+    "",
+    "This file is historical and non-authoritative. Known duplicate workflow sections",
+    "were removed from docs/ENGINEERING.md. Move any still-current project facts into",
+    "docs/ENGINEERING.md project-fact sections or docs/project/.",
+    "",
+    "---",
+    "",
+  ].join("\n");
+  const archiveOutput = `${archiveHeader}${current}`;
+  const archiveDir = path.join(root, "docs", "archive", "workflow");
+  let archiveDocument = path.join(archiveDir, `ENGINEERING.pre-${version}.md`);
+  if (exists(archiveDocument) && fs.readFileSync(archiveDocument, "utf8") !== archiveOutput) {
+    archiveDocument = path.join(
+      archiveDir,
+      `ENGINEERING.pre-${version}-${engineeringBodyHash(current).slice(0, 12)}.md`,
+    );
+  }
+  return {
+    archiveDocument,
+    archiveOutput,
+    archiveRequired: !exists(archiveDocument),
   };
 }
 
@@ -713,71 +769,39 @@ function planAgentsDocumentSync(project, assetSkill, policy = loadWorkflowMigrat
     return { state: "missing", version: templateRegion.version, output: template, agentsDocument, migrations: [], conflicts: [] };
   }
   const current = fs.readFileSync(agentsDocument, "utf8");
-  const currentHash = engineeringBodyHash(current);
-  if (policy.known_official_agents_sha256.includes(currentHash)) {
-    return {
-      state: "legacy-official",
-      version: templateRegion.version,
-      output: template,
-      agentsDocument,
-      migrations: [`agents-sha256:${currentHash}`],
-      conflicts: [],
-    };
+  if (current === template) {
+    return { state: "current", version: templateRegion.version, output: template, agentsDocument, migrations: [], conflicts: [] };
+  }
+  const archiveHeader = [
+    `# Archived AGENTS.md before auto-coding-skill ${templateRegion.version}`,
+    "",
+    "This file is historical and non-authoritative. The root AGENTS.md is fully managed.",
+    "Move any still-current project facts into docs/ENGINEERING.md or docs/project/",
+    "without copying workflow rules back into the root AGENTS.md.",
+    "",
+    "---",
+    "",
+  ].join("\n");
+  const archiveOutput = `${archiveHeader}${current}`;
+  const archiveDir = path.join(root, "docs", "archive", "workflow");
+  let archiveDocument = path.join(archiveDir, `AGENTS.pre-${templateRegion.version}.md`);
+  if (exists(archiveDocument) && fs.readFileSync(archiveDocument, "utf8") !== archiveOutput) {
+    archiveDocument = path.join(
+      archiveDir,
+      `AGENTS.pre-${templateRegion.version}-${engineeringBodyHash(current).slice(0, 12)}.md`,
+    );
   }
   const currentRegion = inspectManagedAgentsDocument(current);
-  if (currentRegion.state === "invalid") return { ...currentRegion, agentsDocument };
-  if (currentRegion.state === "absent") {
-    const migrated = migrateDocumentText(current, "AGENTS.md", policy);
-    if (migrated.conflicts.length) {
-      return {
-        state: "conflict",
-        version: templateRegion.version,
-        agentsDocument,
-        migrations: migrated.migrations,
-        conflicts: migrated.conflicts,
-        detail: "unknown workflow directives conflict with the managed fast-gate policy",
-      };
-    }
-    const separator = migrated.output ? (migrated.output.startsWith("\n") ? "" : "\n") : "";
-    return {
-      state: "legacy-custom",
-      version: templateRegion.version,
-      preservedCustom: true,
-      output: `${templateRegion.block}${separator}${migrated.output}`,
-      agentsDocument,
-      migrations: migrated.migrations,
-      conflicts: [],
-    };
-  }
-  const migratedBefore = migrateDocumentText(current.slice(0, currentRegion.start), "AGENTS.md", policy);
-  const migratedAfter = migrateDocumentText(current.slice(currentRegion.endExclusive), "AGENTS.md", policy);
-  const conflicts = [
-    ...migratedBefore.conflicts,
-    ...offsetConflicts(migratedAfter.conflicts, lineCount(current.slice(0, currentRegion.endExclusive))),
-  ];
-  const migrations = [...migratedBefore.migrations, ...migratedAfter.migrations];
-  if (conflicts.length) {
-    return {
-      state: "conflict",
-      version: templateRegion.version,
-      previousVersion: currentRegion.version,
-      agentsDocument,
-      migrations,
-      conflicts,
-      detail: "unknown workflow directives conflict with the managed fast-gate policy",
-    };
-  }
-  const migratedCurrent = `${migratedBefore.output}${currentRegion.block}${migratedAfter.output}`;
-  const migratedRegion = inspectManagedAgentsDocument(migratedCurrent);
-  const output = replaceManagedBlock(migratedCurrent, migratedRegion, templateRegion.block);
-  if (current === output) return { state: "current", version: templateRegion.version, output, agentsDocument, migrations: [], conflicts: [] };
   return {
-    state: "stale",
+    state: currentRegion.state === "present" ? "stale" : "legacy-custom",
     version: templateRegion.version,
-    previousVersion: currentRegion.version,
-    output,
+    ...(currentRegion.state === "present" ? { previousVersion: currentRegion.version } : {}),
+    output: template,
     agentsDocument,
-    migrations,
+    archiveDocument,
+    archiveOutput,
+    archiveRequired: !exists(archiveDocument),
+    migrations: ["agents-whole-file-replacement"],
     conflicts: [],
   };
 }
@@ -797,13 +821,14 @@ function publicEngineeringPlan(plan){
     ...(plan.previousVersion ? { previousVersion: plan.previousVersion } : {}),
     ...(plan.previousBodyHash ? { previousBodyHash: plan.previousBodyHash } : {}),
     ...(plan.preservedCustom ? { preservedCustom: true } : {}),
+    ...(plan.archiveDocument ? { archive: plan.archiveDocument } : {}),
     ...(plan.migrations?.length ? { migrations: plan.migrations } : {}),
     ...(plan.conflicts?.length ? { conflicts: plan.conflicts } : {}),
     ...(plan.detail ? { detail: plan.detail } : {}),
   };
 }
 
-function registeredLegacyTasks(project){
+function registeredTasks(project){
   const root = path.resolve(project);
   let commonDir;
   try {
@@ -817,7 +842,7 @@ function registeredLegacyTasks(project){
   }
   const tasksDir = path.join(commonDir, "auto-coding-skill", "tasks");
   if (!exists(tasksDir)) return [];
-  const legacy = [];
+  const registered = [];
   for (const entry of fs.readdirSync(tasksDir, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const manifestPath = path.join(tasksDir, entry.name);
@@ -825,24 +850,22 @@ function registeredLegacyTasks(project){
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     } catch {
-      legacy.push({ project: root, manifest: entry.name, schema: "invalid" });
+      registered.push({ project: root, manifest: entry.name, schema: "invalid" });
       continue;
     }
     const schema = Number(manifest?.schema ?? 0);
-    if (!Number.isFinite(schema) || schema < 3) {
-      legacy.push({ project: root, manifest: entry.name, schema: Number.isFinite(schema) ? schema : "invalid" });
-    }
+    registered.push({ project: root, manifest: entry.name, schema: Number.isFinite(schema) ? schema : "invalid" });
   }
-  return legacy;
+  return registered;
 }
 
-function assertNoLegacyRegisteredTasks(projects){
-  const legacy = projects.flatMap(project => registeredLegacyTasks(project));
-  if (!legacy.length) return;
-  const locations = legacy.map(item => `${item.project}:${item.manifest}(schema=${item.schema})`).join(", ");
+function assertNoRegisteredTasks(projects){
+  const active = projects.flatMap(project => registeredTasks(project));
+  if (!active.length) return;
+  const locations = active.map(item => `${item.project}:${item.manifest}(schema=${item.schema})`).join(", ");
   die(
-    "refusing the entire sync batch because registered auto-coding tasks use schema < 3: "
-    + `${locations}\nFinish, integrate, and clean these tasks with the currently installed 3.x runtime before upgrading. `
+    "refusing the entire sync batch because registered auto-coding tasks are still active: "
+    + `${locations}\nFinish, integrate, or clean these tasks with the currently installed runtime before upgrading. `
     + "sync will not change the lifecycle semantics of an in-flight task.",
   );
 }
@@ -882,6 +905,36 @@ function frontmatterPathState(text, keyPath){
     stack.push({ indent, key });
   }
   return { present: false, value: "" };
+}
+
+function frontmatterSequenceHasItems(text, keyPath){
+  const frontmatter = extractFrontmatter(text);
+  if (!frontmatter) return false;
+  const lines = frontmatter.split(/\r?\n/);
+  const stack = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue;
+    const match = rawLine.match(/^(\s*)(["']?[^:"']+["']?)\s*:(.*)$/);
+    if (!match) continue;
+    const indent = match[1].replace(/\t/g, "  ").length;
+    const key = match[2].replace(/^["']|["']$/g, "").trim();
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+    const currentPath = [...stack.map(item => item.key), key];
+    if (currentPath.length === keyPath.length && currentPath.every((part, pathIndex) => part === keyPath[pathIndex])) {
+      const inline = match[3].trim();
+      if (/^\[(?:\s*[^\]])/.test(inline)) return true;
+      for (let child = index + 1; child < lines.length; child += 1) {
+        if (!lines[child].trim() || lines[child].trim().startsWith("#")) continue;
+        const childIndent = lines[child].match(/^\s*/)[0].replace(/\t/g, "  ").length;
+        if (childIndent <= indent) return false;
+        if (/^\s*-\s+\S/.test(lines[child])) return true;
+      }
+      return false;
+    }
+    stack.push({ indent, key });
+  }
+  return false;
 }
 
 function legacyGateEscalationTokens(text){
@@ -1029,10 +1082,10 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "concurrency.cleanup_merged", path: ["concurrency", "cleanup_merged"] },
     { label: "concurrency.delete_remote_branch", path: ["concurrency", "delete_remote_branch"] },
     { label: "concurrency.disposable_ignored", path: ["concurrency", "disposable_ignored"] },
-    { label: "commands.project_fast", path: ["commands", "project_fast"], filled: true },
     { label: "validation.on_unmapped", path: ["validation", "on_unmapped"] },
-    { label: "validation.routes", path: ["validation", "routes"] },
+    { label: "validation.routes", path: ["validation", "routes"], sequence: true },
     { label: "risk.rules", path: ["risk", "rules"] },
+    { label: "docs.framework", path: ["docs", "framework"], filled: true },
     { label: "project.name", path: ["project", "name"], filled: true },
     { label: "access.project.frontend.url", path: ["access", "project", "frontend", "url"], filled: true },
     { label: "access.project.frontend.username", path: ["access", "project", "frontend", "username"], filled: true },
@@ -1061,7 +1114,10 @@ function projectStatus(project, assetSkill, assetAgents){
     const states = requiredConfigPaths.map(item => ({ item, state: frontmatterPathState(text, item.path) }));
     missingConfigPaths = states.filter(({ state }) => !state.present).map(({ item }) => item.label);
     unfilledConfigTokens = states
-      .filter(({ item, state }) => state.present && item.filled === true && !frontmatterValueIsFilled(state.value))
+      .filter(({ item, state }) => state.present && (
+        (item.filled === true && !frontmatterValueIsFilled(state.value))
+        || (item.sequence === true && !frontmatterSequenceHasItems(text, item.path))
+      ))
       .map(({ item }) => item.label);
     const isolationState = frontmatterPathState(text, ["concurrency", "isolation"]);
     if (isolationState.present && !["adaptive", "worktree"].includes(frontmatterScalarValue(isolationState.value).toLowerCase())) {
@@ -1174,6 +1230,15 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
     fs.copyFileSync(path.join(assetSkill, "data", "templates", "tools", "ap.py"), path.join(toolDir, "ap.py"));
     for (const copied of copyMissingDocs(assetSkill, root)) actions.push({ action: "create", path: copied });
     if (plan.state !== "current") {
+      if (plan.archiveRequired) {
+        fs.mkdirSync(path.dirname(plan.archiveDocument), { recursive: true });
+        fs.writeFileSync(plan.archiveDocument, plan.archiveOutput);
+        actions.push({
+          action: "archive",
+          path: path.relative(root, plan.archiveDocument),
+          detail: "previous ENGINEERING.md before duplicate workflow cleanup",
+        });
+      }
       fs.mkdirSync(path.dirname(plan.engineering), { recursive: true });
       fs.writeFileSync(plan.engineering, plan.output);
       actions.push({
@@ -1183,6 +1248,15 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
       });
     }
     if (agentsDocumentPlan.state !== "current") {
+      if (agentsDocumentPlan.archiveRequired) {
+        fs.mkdirSync(path.dirname(agentsDocumentPlan.archiveDocument), { recursive: true });
+        fs.writeFileSync(agentsDocumentPlan.archiveDocument, agentsDocumentPlan.archiveOutput);
+        actions.push({
+          action: "archive",
+          path: path.relative(root, agentsDocumentPlan.archiveDocument),
+          detail: "previous root AGENTS.md; historical and non-authoritative",
+        });
+      }
       fs.writeFileSync(agentsDocumentPlan.agentsDocument, agentsDocumentPlan.output);
       actions.push({
         action: agentsDocumentPlan.state === "missing" ? "create" : "update",
@@ -1195,6 +1269,13 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
       if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
     }
     if (plan.state !== "current") {
+      if (plan.archiveRequired) {
+        actions.push({
+          action: "would-archive",
+          path: path.relative(root, plan.archiveDocument),
+          detail: "previous ENGINEERING.md before duplicate workflow cleanup",
+        });
+      }
       actions.push({
         action: plan.state === "missing" ? "would-create" : "would-update",
         path: path.join("docs", "ENGINEERING.md"),
@@ -1202,6 +1283,13 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
       });
     }
     if (agentsDocumentPlan.state !== "current") {
+      if (agentsDocumentPlan.archiveRequired) {
+        actions.push({
+          action: "would-archive",
+          path: path.relative(root, agentsDocumentPlan.archiveDocument),
+          detail: "previous root AGENTS.md; historical and non-authoritative",
+        });
+      }
       actions.push({
         action: agentsDocumentPlan.state === "missing" ? "would-create" : "would-update",
         path: "AGENTS.md",
@@ -1275,13 +1363,12 @@ autocoding - install auto-coding-skill into generic .agents paths
 Usage:
   autocoding init [--mode project|global] [--dest <repo-root|.agents-dir|skill-dir>] [--force] [--reset-agent-models]
   autocoding status --projects <path[,path...]> [--json]
-  autocoding sync --projects <path[,path...]> [--components all|skill] [--dry-run] [--json] [--reset-agent-models]
+  autocoding sync --projects <path[,path...]> [--dry-run] [--json] [--reset-agent-models]
 
 Examples:
   autocoding init
   autocoding status --projects /Users/elvis/Product/xjmate,/Users/elvis/Product/geesight
   autocoding sync --projects /Users/elvis/Product/xjmate --dry-run
-  autocoding sync --projects /Users/elvis/Product/geesight --components skill
 
 Compatibility:
   --ai <value> is accepted for old scripts and ignored.
@@ -1316,7 +1403,7 @@ Compatibility:
 
   if (args.cmd === "sync") {
     const projects = args.projects.length ? args.projects : [projectRoot()];
-    assertNoLegacyRegisteredTasks(projects);
+    assertNoRegisteredTasks(projects);
     const controlledPlans = new Map();
     for (const project of projects) {
       const root = path.resolve(project);

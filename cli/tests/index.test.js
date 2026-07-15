@@ -137,7 +137,18 @@ function fillRequiredAccess(repo, password = "local-dev-password") {
     `      password: ${JSON.stringify(password)}`,
   ].join("\n");
   const withAccess = text.replace(/^access:\r?\n[\s\S]*?(?=^concurrency:)/m, `${block}\n\n`);
-  const updated = withAccess.replace('  project_fast: ""', '  project_fast: "true"');
+  const updated = withAccess
+    .replace('  project_fast: ""', '  project_fast: "true"')
+    .replace(
+      "  routes: []",
+      [
+        "  routes:",
+        '    - name: "project-code"',
+        '      paths: ["**"]',
+        '      exclude: ["*.md", "docs/**"]',
+        '      commands: ["project_fast"]',
+      ].join("\n"),
+    );
   assert(updated !== text || text.includes(password), "required project values should be replaceable");
   fs.writeFileSync(engineering, updated);
 }
@@ -208,15 +219,15 @@ function testMinimalSyncConvergesWithinBudget() {
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
   assert(files.length <= 23, `minimal scaffold file budget exceeded: ${files.length}`);
-  assert(lines <= 10000, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(lines <= 10800, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: \"adaptive\""), "engineering should default to adaptive clean-branch/worktree isolation");
   assert(engineering.includes('completion: "push"'), "engineering should complete normal development at push");
-  assert(engineering.includes('project_fast: ""'), "generic projects should require an explicit project-fast command");
+  assert(engineering.includes('project_fast: ""'), "generic projects should expose an optional project-fast command");
   assert(engineering.includes(`name: "${path.basename(repo)}"`), "project name should be initialized automatically");
   assert(engineering.includes("## Design, review, and subagents"), "engineering should install adaptive orchestration guidance");
-  assert(engineering.includes("concurrent writers always use separate worktrees"), "engineering should enforce one writer per worktree");
+  assert(engineering.includes("concurrent writers always use separate task IDs/worktrees"), "engineering should enforce one writer per worktree");
   const fixer = fs.readFileSync(path.join(repo, ".agents", "agents", "fixer.toml"), "utf8");
   const reviewer = fs.readFileSync(path.join(repo, ".agents", "agents", "reviewer.toml"), "utf8");
   const browserDebugger = fs.readFileSync(path.join(repo, ".agents", "agents", "browser-debugger.toml"), "utf8");
@@ -471,14 +482,14 @@ function testBridgeIsGeneric() {
   run("python3", [assetAp, "--repo", repo, "install", "--bridges"]);
   assert(exists(path.join(repo, "AGENTS.md")), "generic bridge should be created");
   const bridge = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
-  assert(bridge.includes("isolated worktree per writer"), "bridge should expose writer isolation");
-  assert(bridge.includes("ordered integration"), "bridge should expose dependency ordering");
+  assert(bridge.includes("Each parallel writer gets one registered worktree"), "bridge should expose writer isolation");
+  assert(bridge.includes("integrates by dependency order"), "bridge should expose dependency ordering");
   for (const filename of [`CO${"DEX.md"}`, `CLA${"UDE.md"}`]) {
     assert(!exists(path.join(repo, filename)), "client-named bridge should not be created");
   }
 }
 
-function testUpgradeCleansManagedBridgeExtrasOnly() {
+function testUpgradeCleansAllManagedSkillExtras() {
   const repo = tmpdir("upgrade-extra");
   run("git", ["init", "-q"], { cwd: repo });
   run("node", [cli, "init", "--force"], { cwd: repo });
@@ -487,7 +498,7 @@ function testUpgradeCleansManagedBridgeExtrasOnly() {
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt"), "custom\n");
   run("python3", [assetAp, "--repo", repo, "upgrade", "--write"]);
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "data", "templates", "bridges", "OLD.md")), "managed bridge extra should be removed");
-  assert(exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt")), "non-managed extra should remain");
+  assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "custom.txt")), "fully managed Skill extras should be removed");
 }
 
 function testOptionalDocsAndLegacyToolsDoNotCauseDrift() {
@@ -718,7 +729,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.0\.0 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.0 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -737,7 +748,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "4.0.0", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "4.1.0", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
@@ -747,14 +758,14 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
   assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
   assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
-  assert(updated.includes("version=4.0.0"), "sync should install the current managed workflow version");
+  assert(updated.includes("version=4.1.0"), "sync should install the current managed workflow version");
   assert(updated.includes("## Delivery levels"), "sync should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "4.0.0", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "4.1.0", "status should expose the installed managed workflow version");
 
   const beforeSecondSync = fs.readFileSync(engineering, "utf8");
   const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
@@ -771,7 +782,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   const start = current.indexOf("<!-- auto-coding-skill:managed-workflow:start");
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   const end = current.indexOf(endMarker) + endMarker.length;
-  const legacyNote = "\n## Legacy project-specific workflow\n\nKeep this project note exactly.\n";
+  const legacyNote = "\n## Legacy project facts\n\nKeep this project note exactly.\n";
   const legacy = `${current.slice(0, start)}${legacyNote}${current.slice(end)}`;
   writeFile(engineering, legacy);
 
@@ -782,7 +793,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=4.0.0"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=4.1.0"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
   const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
   const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
@@ -847,44 +858,16 @@ function testMalformedManagedMarkersFailClosed() {
   }
 }
 
-function testSkillOnlySyncTouchesOnlySkill() {
-  const repo = tmpdir("skill-only-sync");
+function testPartialSkillSyncIsRejectedWithoutWrites() {
+  const repo = tmpdir("partial-skill-sync");
   run("git", ["init", "-q"], { cwd: repo });
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
-  const agent = path.join(repo, ".agents", "agents", "explorer.toml");
-  const engineering = path.join(repo, "docs", "ENGINEERING.md");
-  const launcher = path.join(repo, "docs", "tools", "autopipeline", "ap.py");
   writeFile(skill, "stale skill\n");
-  writeFile(agent, `${fs.readFileSync(agent, "utf8")}\n# user-agent-sentinel\n`);
-  writeFile(engineering, `${fs.readFileSync(engineering, "utf8")}\nproject-engineering-sentinel\n`);
-  writeFile(launcher, `${fs.readFileSync(launcher, "utf8")}\n# user-launcher-sentinel\n`);
-  const untouched = new Map([[agent, fs.readFileSync(agent)], [engineering, fs.readFileSync(engineering)], [launcher, fs.readFileSync(launcher)]]);
-
-  const dryRun = run("node", [cli, "sync", "--projects", repo, "--components", "skill", "--dry-run", "--json"]);
-  const dryResult = JSON.parse(dryRun.stdout).results[0];
-  assert(dryResult.components === "skill", "skill-only dry-run should expose its component scope");
-  assert(dryResult.actions.length === 1 && dryResult.actions[0].path === ".agents/skills/auto-coding-skill", "skill-only dry-run must plan only the skill directory");
-  assert(fs.readFileSync(skill, "utf8") === "stale skill\n", "skill-only dry-run must not write the skill");
-
-  run("node", [cli, "sync", "--projects", repo, "--components", "skill"]);
-  assert(fs.readFileSync(skill, "utf8").includes("# Auto Coding Skill"), "skill-only sync should refresh the managed skill");
-  for (const [file, content] of untouched) {
-    assert(fs.readFileSync(file).equals(content), `skill-only sync must not touch ${file}`);
-  }
-
-  const invalid = run("node", [cli, "sync", "--projects", repo, "--components", "docs"], { check: false });
-  assert(invalid.status !== 0 && invalid.stderr.includes("--components"), "sync should reject unknown component scopes");
-  const conflicting = run("node", [cli, "sync", "--projects", repo, "--components", "skill", "--reset-agent-models"], { check: false });
-  assert(conflicting.status !== 0, "skill-only sync should reject irrelevant agent reset options");
-
-  writeFile(skill, "legacy-task-sentinel\n");
-  writeFile(path.join(repo, ".git", "auto-coding-skill", "tasks", "T-LEGACY.json"), JSON.stringify({ schema: 1, task_id: "T-LEGACY" }));
-  const blocked = run("node", [cli, "sync", "--projects", repo, "--components", "skill"], { check: false });
-  assert(blocked.status !== 0 && blocked.stderr.includes("schema < 3"), "skill-only sync must block registered legacy tasks");
-  assert(blocked.stderr.includes("3.x runtime") && blocked.stderr.includes("lifecycle semantics"), "legacy task error should give safe completion guidance");
-  assert(fs.readFileSync(skill, "utf8") === "legacy-task-sentinel\n", "blocked skill-only sync must not write the skill");
+  const rejected = run("node", [cli, "sync", "--projects", repo, "--components", "skill"], { check: false });
+  assert(rejected.status !== 0 && rejected.stderr.includes("removed in 4.1"), "partial sync must explain whole-install convergence");
+  assert(fs.readFileSync(skill, "utf8") === "stale skill\n", "rejected partial sync must not write the skill");
 }
 
 function testLegacyTaskPreflightRejectsWholeBatchAtomically() {
@@ -900,7 +883,7 @@ function testLegacyTaskPreflightRejectsWholeBatchAtomically() {
   writeFile(firstSkill, "first-project-sentinel\n");
   writeFile(secondAgent, `${fs.readFileSync(secondAgent, "utf8")}\n# second-project-sentinel\n`);
   const secondAgentBefore = fs.readFileSync(secondAgent);
-  writeFile(path.join(second, ".git", "auto-coding-skill", "tasks", "T-V3.json"), JSON.stringify({ schema: 1, task_id: "T-V3" }));
+  writeFile(path.join(second, ".git", "auto-coding-skill", "tasks", "T-V3.json"), JSON.stringify({ schema: 3, task_id: "T-V3", state: "active" }));
 
   const result = run("node", [cli, "sync", "--projects", `${first},${second}`], { check: false });
   assert(result.status !== 0 && result.stderr.includes("entire sync batch"), "one legacy task should reject the complete multi-project batch");
@@ -908,13 +891,13 @@ function testLegacyTaskPreflightRejectsWholeBatchAtomically() {
   assert(fs.readFileSync(secondAgent).equals(secondAgentBefore), "batch preflight must not write the project containing the legacy task");
 }
 
-function testManagedAgentsMigrationPreservesCustomRules() {
+function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
   const repo = tmpdir("managed-agents-document");
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=4.0.0"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=4.1.0"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -927,13 +910,19 @@ function testManagedAgentsMigrationPreservesCustomRules() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const plan = JSON.parse(dryRun.stdout).results[0].managedAgentsDocument;
   assert(plan.state === "legacy-custom", `unmarked custom AGENTS should be migrated: ${dryRun.stdout}`);
-  assert(plan.migrations.includes("agents-v22-govchain-full"), "known official full-gate rule should be selected by exact migration id");
+  assert(plan.migrations.includes("agents-whole-file-replacement"), "AGENTS should use the whole-file convergence migration");
+  const dryActions = JSON.parse(dryRun.stdout).results[0].actions;
+  assert(dryActions.some(item => item.action === "would-archive"), "dry-run should expose the historical AGENTS archive");
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=4.0.0"), "AGENTS migration should install the current managed block");
-  assert(migrated.includes("Preserve this repository-specific rule exactly."), "AGENTS migration must preserve unrelated custom rules");
+  assert(migrated.includes("managed-agents:start version=4.1.0"), "AGENTS migration should install the current managed block");
+  assert(!migrated.includes("Preserve this repository-specific rule exactly."), "root AGENTS must contain no project-specific tail");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
+  const canonical = fs.readFileSync(path.join(repoRoot, "cli", "assets", "skill", "data", "templates", "bridges", "AGENTS.md"), "utf8");
+  assert(migrated === canonical, "root AGENTS must be byte-identical to the packaged canonical file");
+  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.0.md");
+  assert(fs.readFileSync(archive, "utf8").includes("Preserve this repository-specific rule exactly."), "previous AGENTS content must be archived once");
   const stable = fs.readFileSync(agents);
   run("node", [cli, "sync", "--projects", repo]);
   assert(fs.readFileSync(agents).equals(stable), "managed AGENTS sync should be idempotent");
@@ -949,14 +938,14 @@ function testUnknownWorkflowConflictFailsWholeBatchBeforeWrites() {
   }
   const firstSkill = path.join(first, ".agents", "skills", "auto-coding-skill", "SKILL.md");
   writeFile(firstSkill, "batch-sentinel\n");
-  const secondAgents = path.join(second, "AGENTS.md");
-  fs.appendFileSync(secondAgents, "\n- High-risk changes\n  must run the real full gate before push.\n");
+  const secondEngineering = path.join(second, "docs", "ENGINEERING.md");
+  fs.appendFileSync(secondEngineering, "\nHigh-risk changes must run the real full gate before push.\n");
 
   const status = run("node", [cli, "status", "--projects", second, "--json"], { check: false });
   assert(status.status !== 0, "status must be non-ok for an unknown conflicting workflow rule");
-  const statusPlan = JSON.parse(status.stdout).results[0].managedAgentsDocument;
+  const statusPlan = JSON.parse(status.stdout).results[0].managedWorkflow;
   assert(statusPlan.state === "conflict", `status should expose the document conflict: ${status.stdout}`);
-  assert(statusPlan.conflicts[0].file === "AGENTS.md" && statusPlan.conflicts[0].line > 0, "status conflict should include file and line");
+  assert(statusPlan.conflicts[0].file === "docs/ENGINEERING.md" && statusPlan.conflicts[0].line > 0, "status conflict should include file and line");
 
   const sync = run("node", [cli, "sync", "--projects", `${first},${second}`], { check: false });
   assert(sync.status !== 0 && sync.stderr.includes("entire sync batch before writes"), "one unknown conflict must reject the complete batch");
@@ -976,15 +965,41 @@ function testEngineeringMarkerBoundaryIsNormalized() {
   assert(normalized.includes(`${marker}\n# Project-specific workflow\n`), "sync should normalize a heading glued to the managed end marker");
 }
 
+function testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow() {
+  const repo = tmpdir("engineering-framework");
+  run("node", [cli, "init"], { cwd: repo });
+  run("node", [cli, "sync", "--projects", repo]);
+  fillRequiredAccess(repo);
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  fs.appendFileSync(engineering, "\n# Project Facts\n\n## Repository boundaries\n\n- backend owns APIs.\n");
+  const projectFactsStatus = run("node", [cli, "status", "--projects", repo, "--json"]);
+  assert(JSON.parse(projectFactsStatus.stdout).results[0].managedWorkflow.state === "current", "project fact sections should remain outside the managed block");
+
+  fs.appendFileSync(engineering, "\n## Delivery flow\n\n1. Known obsolete workflow.\n");
+  const migration = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const migrationResult = JSON.parse(migration.stdout).results[0];
+  assert(migrationResult.managedWorkflow.state === "stale", "known duplicate sections should use controlled migration");
+  assert(migrationResult.managedWorkflow.migrations.includes("engineering-section-delivery-flow"), "known section migration should be explicit");
+  assert(migrationResult.actions.some(item => item.action === "would-archive" && item.path.includes("ENGINEERING.pre-4.1.0")), "controlled section cleanup should archive the previous ENGINEERING file");
+  run("node", [cli, "sync", "--projects", repo]);
+  assert(!fs.readFileSync(engineering, "utf8").includes("Known obsolete workflow"), "known duplicate workflow section should be removed");
+
+  fs.appendFileSync(engineering, "\n## Team workflow\n\n1. Unknown competing workflow.\n");
+  const duplicateStatus = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(duplicateStatus.status !== 0, "duplicate workflow sections must make status non-current");
+  const plan = JSON.parse(duplicateStatus.stdout).results[0].managedWorkflow;
+  assert(plan.state === "conflict" && plan.conflicts.some(item => item.ruleId === "duplicate-managed-workflow-section"), "duplicate workflow conflict should identify the docs framework rule");
+}
+
 function testReleaseVersionMarkersStayInSync() {
-  const expected = "4.0.0";
+  const expected = "4.1.0";
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
   const policy = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "workflow-migrations-v1.json"),
     "utf8",
   ));
-  assert(pkg.version === expected, "package version must match the 4.0.0 release");
+  assert(pkg.version === expected, "package version must match the 4.1.0 release");
   assert(lock.version === expected && lock.packages[""].version === expected, "package-lock versions must match");
   assert(policy.managed_versions.engineering === expected && policy.managed_versions.agents === expected, "managed workflow versions must match");
   for (const rel of [
@@ -1011,7 +1026,7 @@ testInvalidManagedAgentModelsFailStatusAndAreDroppedOnSync();
 testModelTextInsideInstructionsIsNotPromotedToOverride();
 testCommandSpecificArgumentsAreRejectedBeforeWrites();
 testBridgeIsGeneric();
-testUpgradeCleansManagedBridgeExtrasOnly();
+testUpgradeCleansAllManagedSkillExtras();
 testOptionalDocsAndLegacyToolsDoNotCauseDrift();
 testOptionalScaffoldIsOnDemandAndIdempotent();
 testTestingScaffoldMatchesCheckMatrixSchema();
@@ -1027,11 +1042,12 @@ testManagedEngineeringSyncIsControlledAndIdempotent();
 testLegacyEngineeringMigrationPreservesExistingBody();
 testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication();
 testMalformedManagedMarkersFailClosed();
-testSkillOnlySyncTouchesOnlySkill();
+testPartialSkillSyncIsRejectedWithoutWrites();
 testLegacyTaskPreflightRejectsWholeBatchAtomically();
-testManagedAgentsMigrationPreservesCustomRules();
+testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules();
 testUnknownWorkflowConflictFailsWholeBatchBeforeWrites();
 testEngineeringMarkerBoundaryIsNormalized();
+testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow();
 testReleaseVersionMarkersStayInSync();
 
 console.log("cli-installer-regression-ok");

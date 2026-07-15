@@ -5,6 +5,41 @@ from __future__ import annotations
 
 
 TEMPLATES: dict[str, dict[str, str]] = {
+    "project": {
+        "docs/project/overview.md": """# Project Overview
+
+Record durable project facts, not workflow rules.
+
+## Product scope and non-goals
+## Domain boundaries and invariants
+## Users, roles, and critical journeys
+## External systems and safety boundaries
+## Current contracts and decision links
+""",
+        "docs/project/repository-map.md": """# Repository Map
+
+Map existing ownership and reuse points. Keep behavior details in code/tests.
+
+| Area | Paths | Responsibility | Generated / source | Validation route |
+| --- | --- | --- | --- | --- |
+
+## Cross-module dependencies
+## Shared components and helpers
+## Files or directories with special ownership
+""",
+        "docs/project/runtime.md": """# Runtime And Deployment Facts
+
+Record current environment topology and operating constraints, not normal
+development gate rules.
+
+## Local runtime
+## Shared services and dependencies
+## Jenkins and artifact flow
+## Deployment topology
+## External-device / production-write safeguards
+## Fixtures, simulators, and repeatable diagnostic entry points
+""",
+    },
     "api": {
         "docs/interfaces/api.md": """# API Contract
 
@@ -23,10 +58,10 @@ Record only current, externally relevant endpoints or events.
 """,
     },
     "design": {
-        "docs/design/_TEMPLATE-DD.md": """# DD — <Task ID> <Title>
+        "docs/design/_TEMPLATE-DD.md": """# DD — <Decision ID> <Title>
 
 - Status: Draft | Reviewed | Approved
-- Related task: `docs/tasks/taskbook.md`
+- Related requirement / commit:
 
 ## Context and goal
 ## Scope and non-goals
@@ -56,7 +91,7 @@ Project conventions are authoritative. The generic checker is advisory unless
 
 - Status: Proposed | Accepted | Superseded
 - Date: YYYY-MM-DD
-- Related task: <task id>
+- Related requirement / commit:
 
 ## Context
 ## Decision
@@ -67,7 +102,7 @@ Project conventions are authoritative. The generic checker is advisory unless
 """,
     },
     "review": {
-        "docs/reviews/_TEMPLATE-REVIEW.md": """# Review — <Task ID>
+        "docs/reviews/_TEMPLATE-REVIEW.md": """# Review — <Change ID>
 
 - Scope:
 - Evidence:
@@ -79,7 +114,7 @@ List P0/P1/P2/P3 findings with impact, evidence, and remediation.
 
 ## Verdict
 
-PASS | PARTIAL | FAIL
+approved | changes-requested
 """,
     },
     "testing": {

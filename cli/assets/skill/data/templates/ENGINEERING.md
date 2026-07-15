@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.0.0"
+  skill_version: "4.1.0"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -50,17 +50,16 @@ concurrency:
   disposable_ignored: []
 
 commands:
-  # Configure one real, fast project-native command. `autocoding sync` fills
-  # this automatically only when package.json declares `test:changed`.
+  # Optional convenience command. Projects may instead define only the named
+  # commands referenced by validation.routes. `autocoding sync` fills this only
+  # when package.json declares `test:changed`.
   project_fast: ""
 
 validation:
   on_unmapped: "error"
-  routes:
-    - name: "project-code"
-      paths: ["**"]
-      exclude: ["*.md", "docs/**"]
-      commands: ["project_fast"]
+  # Initialization must replace this with explicit project path-to-command
+  # mappings. An empty list is intentionally fail-closed for code changes.
+  routes: []
 
 risk:
   rules: []
@@ -80,6 +79,7 @@ optimization:
   report_accepted_debt_as_findings: false
 
 docs:
+  framework: "engineering-centered"
   design_dir: "docs/design"
   health_baseline: "docs/reviews/project-health-baseline.md"
   optimization_backlog: "docs/reviews/optimization-backlog.md"
@@ -91,7 +91,7 @@ docs:
 
 # Engineering Workflow
 
-<!-- auto-coding-skill:managed-workflow:start version=4.0.0 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.1.0 -->
 
 This file contains project facts and the small amount of configuration the
 generic workflow cannot infer. Normal delivery is:
@@ -99,8 +99,16 @@ generic workflow cannot infer. Normal delivery is:
 `analysis → decomposition → necessary design → development → one final fast
 changed-scope gate → commit/push`.
 
-Target-branch push ends the coding task. Jenkins, deployment, and owner
-acceptance happen later unless the user opens an explicit diagnostic task.
+Target-branch push ends normal coding. Jenkins, deployment, and owner acceptance
+happen later. When the user explicitly asks to diagnose a failure caused by the
+pushed change, diagnosis and repair may continue in the same conversation and
+task scope without creating another taskbook/lifecycle entry.
+
+The Skill is a selectable set of guardrails, not a requirement to execute every
+command on every task. Read-only work, obvious clean-checkout changes, and pure
+ledger/archive reconciliation normally skip classify, task-start, durable design,
+reviewer, and subagents. Use each mechanism only when its expected quality or
+throughput benefit is greater than its coordination cost.
 
 ## Delivery levels
 
@@ -127,8 +135,8 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto \
 - A clean checkout with one writer uses the current branch directly.
 - A checkout that already contains unrelated changes uses an isolated task
   branch/worktree.
-- Two or more concurrent writers always use separate worktrees with
-  non-overlapping owned paths.
+- Two or more concurrent writers always use separate task IDs/worktrees with
+  non-overlapping owned paths; each `task-start` creates exactly one writer lease.
 - A task that produces no diff creates no commit or push; direct mode creates no
   temporary branch at all.
 - Never restore, reset, stash, clean, or otherwise modify unknown user or task
@@ -185,9 +193,9 @@ python3 docs/tools/autopipeline/ap.py validation-map-check --tracked
 
 Focused tests may be run and rerun during implementation. The "one gate" rule
 means one final routed closure gate after the diff is stable; it does not prohibit
-reasonable test/fix/retest cycles. Do not install dependencies automatically.
-If the final routed command needs a dependency already locked by the repository,
-restore the locked dependency once and retry that same command only.
+reasonable test/fix/retest cycles. Do not install dependencies proactively. Only
+after the selected final route fails because a repository-locked dependency is
+absent may it be restored once; then retry only that affected route.
 
 ## Design, review, and subagents
 
@@ -204,7 +212,19 @@ restore the locked dependency once and retry that same command only.
 - The main agent alone owns the final gate, commit, push, ordered integration,
   and temporary-branch cleanup.
 
-## Lightweight records
+## Documentation framework and lightweight records
+
+This managed block and the installed Skill define the shared workflow. Content
+outside this block may describe project facts only: product/domain boundaries,
+repository ownership, runtime/deployment topology, external-system safety,
+validation commands, and links to current contracts/decisions. It must not
+duplicate delivery levels, agent roles, task lifecycle, gate semantics, or
+completion rules.
+
+When project facts are too large for this file, scaffold `docs/project/` and link
+those documents here. Code, tests, schemas, migrations, and runtime configuration
+remain authoritative for behavior that exists now; historical records never
+override them.
 
 Ordinary tasks do not create taskbook, closure Markdown, evidence JSONL, or active
 task documents. Isolated-task coordination state lives under the Git common
@@ -212,6 +232,11 @@ directory and gate timing lives under `.local/auto-coding-skill`. Existing proje
 ledgers are user data: upgrades preserve them but do not require or update them.
 Use `record-closure`, documentation scaffolds, or a baseline only when the user or
 task genuinely needs a durable artifact.
+
+Pure taskbook, closure, archive, or ledger consistency work is a terminal
+maintenance action. Validate the affected documents and commit once; do not
+create a new active task, review cycle, closure record, or evidence chain for the
+act of closing the previous record.
 
 Historical debt does not block product work. Block only new or worsened P0/P1
 issues; keep accepted debt in an optional backlog and address it through explicit
@@ -224,7 +249,9 @@ initialization. Direct plaintext values are allowed. The generic workflow neithe
 forbids them nor rewrites a project's credential policy.
 
 Full regression, structure scans, Docker, Jenkins, API checks, target verification,
-and deployment remain explicit diagnostic commands. Do not run them during normal
-closure unless the user explicitly requests that diagnostic scope.
+and deployment remain explicit diagnostic commands. Do not run or poll them
+during normal closure. An explicitly requested diagnosis of a failure caused by
+the just-pushed change may stay in the same conversation/task; it does not require
+an artificial second lifecycle record.
 
 <!-- auto-coding-skill:managed-workflow:end -->

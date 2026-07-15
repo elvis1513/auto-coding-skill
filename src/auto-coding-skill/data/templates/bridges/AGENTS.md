@@ -1,16 +1,29 @@
-<!-- auto-coding-skill:managed-agents:start version=3.0.3 -->
+<!-- auto-coding-skill:managed-agents:start version=4.0.0 -->
 
-Follow `docs/ENGINEERING.md` strictly. Source of truth: `docs/ENGINEERING.md`.
-At task start, use `ap.py classify --scope auto` when changed-file impact is not obvious.
-Before code changes, read the configured structure standard and place new code in the correct layer; do not add new responsibilities to already-large files.
-Obey `structure.layer_rules` import boundaries unless a DD/ADR explicitly records the exception.
-Before optimization reviews, read the project health baseline and optimization backlog, and report only new, worsened, unrecorded P0/P1, or upgraded-priority items.
-Route work through already available MCP servers, installed skills, plugins, and app connectors when they provide current docs, design context, browser evidence, GitHub/CI state, security review, or artifact rendering.
-Use the `.agents/agents` role model when available. The main agent decomposes and fans out independent explorer/docs_researcher/browser_debugger work, then fans evidence into one design. For one serial writer, use the current branch when its checkout is clean; create registered task branches/worktrees only when that checkout is already dirty or multiple writers run concurrently. Give every writer explicit non-overlapping paths, route stable diffs through reviewer, then let the main agent run the one fast gate, commit, integrate, push, and clean temporary branches. Never run two writers in one worktree; start dependent write work only after its prerequisite is integrated.
-Use exactly one fast changed-scope local gate before pushing. Keep advisory structure, docs-ledger, full regression, Docker, API, Jenkins, and target checks outside the default development gate.
-Keep active docs ledgers small: `taskbook.md`, `closure-log.md`, and top-level `docs/design/T*.md` must be physically archived when over budget. Use `docs-ledger-archive --plan` before `--write`; `archive-index.md` is only navigation.
-Keep `docs/tasks/evidence.jsonl` and closure Markdown aligned with actual executed checks.
-Treat target-branch push as coding completion. Do not wait for, poll, diagnose, or fix Jenkins/build/deploy results unless the user starts a separate diagnostic task; the project owner performs acceptance.
-Use the direct URL, username, and password values configured under `access.*` in `docs/ENGINEERING.md`; do not invent credentials.
+Follow `docs/ENGINEERING.md` for project facts, risk rules, and validation routes.
+Use the delivery-first flow: analyze, decompose, design only when needed, develop,
+run one final changed-scope gate, then commit and push. Push ends coding; do not
+wait for Jenkins, deployment, or owner acceptance unless the user opens a
+diagnostic task.
+
+Before writing, inspect the checkout. A clean single-writer task stays on the
+current branch. Pre-existing unrelated changes or multiple writers require one
+isolated worktree per writer with non-overlapping owned paths. If no diff is
+produced, do not commit or push and do not create a temporary branch. Never
+restore, reset, stash, clean, or overwrite unknown changes.
+
+Delegate only when independent work has a clear benefit. Ordinary tasks default
+to the main agent. Require fingerprinted review for high-risk, cross-module,
+parallel, or explicitly configured work. The main agent owns the final gate,
+commit, push, ordered integration, and cleanup.
+
+Run all matching `validation.routes` commands once in stable order. Unmapped code
+must fail; docs-only changes may use the built-in diff check. Focused tests may be
+rerun during development, but do not repeat expensive full gates. Do not create
+taskbook, closure, evidence, or design documents unless the task genuinely needs
+a durable artifact.
+
+Use configured `access.*` values when needed. Plaintext credentials are allowed;
+do not invent or echo them unnecessarily.
 
 <!-- auto-coding-skill:managed-agents:end -->

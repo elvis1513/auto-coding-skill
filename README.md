@@ -1,109 +1,14 @@
 # auto-coding-skill
 
-A generic `.agents` engineering workflow with isolated parallel worktrees, fast
-local validation, push-based completion, required access configuration, and safe
-branch cleanup.
+A delivery-first Codex engineering workflow:
 
-## What changed in v3.0.4
+`analysis → decomposition → necessary design → development → one final fast
+changed-scope gate → commit/push`.
 
-- Fixed the GeeSight legacy workflow replacement so the migrated owner-managed
-  diagnostic wording does not trigger its own post-push conflict rule.
-
-## What changed in v3.0.3
-
-- Made workspace isolation adaptive: one serial task uses a clean current branch;
-  dirty checkouts or concurrent writers use isolated task branches/worktrees.
-- Kept one changed-scope fast gate as the complete local validation step and
-  avoided temporary branches when they provide no isolation benefit.
-- Fixed quoted and inline legacy gate YAML detection in CLI status.
-
-## What changed in v3.0.2
-
-- Added controlled synchronization for the root `AGENTS.md` workflow bridge as
-  well as the managed `ENGINEERING.md` workflow block.
-- Migrated known legacy rules that required full local gates, verify mode, or
-  Jenkins polling during normal development while preserving project facts and
-  unrelated custom instructions.
-- Made project status, sync, doctor, and task lifecycle commands fail closed on
-  unknown workflow instructions that conflict with the changed-scope fast gate.
-- Removed legacy YAML escalation fields during upgrade while keeping explicit
-  full-gate commands available for user-requested diagnostics.
-- Clarified that locked dependencies may be restored only when the configured
-  changed-scope gate actually needs them, after which only that same fast gate is
-  rerun.
-
-## What changed in v3.0.1
-
-- Fixed normal development to analysis → decomposition → design → development →
-  one changed-scope fast gate → push.
-- Kept risk profiles for planning/review depth without promoting local work to a
-  standard/full gate or verify mode.
-- Ended coding tasks immediately after safe target-branch push; Jenkins owns
-  later build/deploy work and the project owner owns acceptance.
-- Removed repeated integration gates and all automatic post-push Jenkins/target
-  polling from `commit-push`.
-- Required all project/Jenkins/GitLab/Nexus URLs, usernames, and direct passwords
-  under `access.*` during project initialization.
-- Removed the shared-checkout `legacy` escape hatch; worktree isolation is now
-  mandatory for every write task.
-- Added a structured subagent plan with parallel discovery, one-writer worktree
-  ownership, reviewer feedback loops, and main-agent Git lifecycle ownership.
-- Enforced task-owned paths, dependency revisions, writer leases, and
-  fingerprint-bound review approvals in the task runtime.
-- Added review, writer handoff, and conflicted-rebase resume lifecycle commands.
-- Added planned paths and task intent to pre-development classification and
-  published a stable orchestration contract.
-- Added controlled `ENGINEERING.md` workflow synchronization while preserving
-  project configuration and custom content.
-
-## What changed in v3.0.0
-
-- Isolated every write task in a registered Git worktree and task branch.
-- Added `task-start`, `task-status`, `task-submodule-sync`, `task-integrate`,
-  `task-finish`, and `task-prune` lifecycle commands.
-- Made `commit-push` validate the task manifest before any gate or ledger write,
-  stage only the task worktree's exact paths, and detect gate-time mutations.
-- Added task-scoped active, closure, and evidence records to avoid shared append
-  conflicts.
-- Serialized target-branch integration and re-ran the resolved gate after
-  updating to the latest remote target.
-- Automatically removed integrated worktrees and local task branches, with safe
-  lease-based remote task-branch cleanup and merged-branch pruning.
-- Initially kept a `legacy` compatibility escape hatch; v3.0.1 removes that path and
-  migrates existing configuration to mandatory worktree isolation.
-
-## What changed in v2.2.1
-
-- Made same-period ledger archiving update one cumulative archive-index entry
-  instead of appending duplicate month headings.
-- Recognized Markdown-wrapped and localized settled statuses such as
-  `` `Done / PASS` `` and `Done（PASS）` during physical history archiving.
-- Added regression coverage for repeated same-month archives and these status
-  formats.
-
-## What changed in v2.2.0
-
-- Added `micro`, `standard`, and `high-risk` execution profiles.
-- `workflow.profile: auto` classifies changed work and cannot downgrade detected
-  high-risk changes.
-- High-risk and explicit verify work now require a real `gate_full`/`full_gate`;
-  light and standard commands are no longer accepted as full-gate fallbacks.
-- Generic structure checks are advisory by default. Projects can opt into
-  blocking enforcement.
-- Reduced a new project scaffold from 46 files / about 10,120 lines to 20 files /
-  about 5,300 lines.
-- Replaced duplicated repository-side Python tools with a small launcher that
-  delegates to the single project-local skill runtime.
-- Kept only ENGINEERING, taskbook, and closure log in the default documentation
-  scaffold; all specialized documents are materialized on demand.
-- Removed hard-coded model names from managed Agent templates. New installs
-  inherit the active client model; existing project model overrides survive sync.
-- Added behavioral regression tests for profile resolution, strict full gates,
-  advisory structure checks, minimal scaffold budgets, on-demand docs, and Agent
-  model inheritance.
-
-This section records historical v2 behavior. The v3.0.3 workflow above supersedes
-its full-gate and verify-mode rules for normal development.
+Version 4.0 replaces the 3.x governance-first defaults with progressive
+guardrails. Clean single-writer work stays on the current branch. Worktrees,
+parallel fixers, fingerprint review, durable design records, and stronger
+affected-scope checks are enabled only when concurrency or risk justifies them.
 
 ## Install
 
@@ -114,285 +19,182 @@ autocoding sync --projects .
 pip install pyyaml requests
 ```
 
-`autocoding init` installs the project-local skill and five managed roles under
-`.agents`. `autocoding sync` installs the minimal project scaffold:
+The project install contains:
 
 ```text
 .agents/skills/auto-coding-skill/
 .agents/agents/
 docs/ENGINEERING.md
-docs/tasks/taskbook.md
-docs/tasks/closure-log.md
 docs/tools/autopipeline/ap.py
+AGENTS.md (managed bridge only; project content is preserved)
 ```
 
-The `docs/tools` entry point is a compatibility launcher. Runtime code lives only
-under `.agents/skills/auto-coding-skill/scripts`.
+Ordinary projects no longer receive taskbook or closure logs. Existing optional
+documents are preserved during upgrades but are not required or updated by the
+normal workflow.
 
-## Execution profiles
-
-Configure the selector in `docs/ENGINEERING.md`:
-
-```yaml
-workflow:
-  mode: dev
-  profile: auto
-  completion: push
-```
-
-| Effective profile | Intended work | Local gate | Completion |
-| --- | --- | --- | --- |
-| `micro` | docs/tests-only or explicitly isolated work | changed/quick | pushed |
-| `standard` | normal feature and defect work | changed/quick | pushed |
-| `high-risk` | sensitive, broad, deploy/build, or structural work | changed/quick | pushed |
-
-`auto` is a selector, not a fourth effective profile. Profiles affect analysis,
-design depth, and reviewer recommendations only. They never expand the automatic
-local gate or turn Jenkins/target verification into a completion condition.
-
-An explicit configured `micro`, `standard`, or `high-risk` profile replaces
-auto's low/normal baseline and acts as a floor for CLI overrides. Independently
-detected high-risk signals still force `high-risk`.
-
-Inspect the plan:
+Fill the project/Jenkins/GitLab/Nexus URL, username, and password fields under
+`access.*`, then configure one real fast validation command and run:
 
 ```bash
-python3 docs/tools/autopipeline/ap.py classify --scope auto
-python3 docs/tools/autopipeline/ap.py impact --scope auto --json
+python3 docs/tools/autopipeline/ap.py upgrade --write
+python3 docs/tools/autopipeline/ap.py doctor
 ```
 
-Each result includes the effective profile, fixed fast gate scope, reasons,
-recommended Agent roles, and a machine-readable `agent_plan` describing stages,
-dependencies, assignment/result contracts, and lifecycle ownership.
+Plaintext credential values are allowed by the generic workflow.
 
-## Parallel write isolation
+## Adaptive development
 
-Each task that may write files runs in its own registered Git worktree and
-`codex/` task branch. `worktree` is the only supported isolation value. Each
-worktree has exactly one writer; read-only discovery may remain in the primary
-worktree.
-
-```yaml
-concurrency:
-  isolation: adaptive
-  base_ref: origin/dev
-  target_branch: dev
-  branch_prefix: codex/
-  worktree_root: ../.worktrees
-  cleanup_merged: true
-  delete_remote_branch: true
-  disposable_ignored: []
-```
+Inspect a task before writing:
 
 ```bash
-python3 docs/tools/autopipeline/ap.py task-start T0001 --owned-path src --writer "$FIXER"
-# Continue in the worktree path printed by task-start.
-python3 docs/tools/autopipeline/ap.py task-status T0001
-python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
-python3 docs/tools/autopipeline/ap.py task-review T0001 --verdict approved --diff-fingerprint "$SHA256"
-python3 docs/tools/autopipeline/ap.py task-handoff T0001 --from "$FIXER" --to "$CODEX_THREAD_ID" --generation 1
-python3 docs/tools/autopipeline/ap.py commit-push T0001 --writer "$CODEX_THREAD_ID" --msg "T0001: summary"
-python3 docs/tools/autopipeline/ap.py task-integrate T0001 --writer "$CODEX_THREAD_ID"
+python3 docs/tools/autopipeline/ap.py classify --scope auto \
+  --planned-path backend/internal/orders/service.go \
+  --intent "fix order retry" \
+  --writers 1
 ```
 
-`commit-push` runs only inside the task worktree recorded in the repository
-manifest and stages only that task's changes. Unknown changes stop the command;
-the workflow never restores, resets, stashes, or cleans them.
+The result includes:
 
-Before upgrading a v3.0.0 project, finish and clean every registered in-flight
-task with its currently installed runtime. `autocoding sync` refuses to replace
-that runtime while a schema-1 task remains, because 3.0.1 cannot safely infer
-its path ownership, dependencies, writer lease, or review state.
+- `execution_mode=direct`: clean checkout and one writer; stay on the current branch.
+- `execution_mode=isolated`: dirty checkout, explicit isolation, or multiple writers.
+- `execution_mode=none`: no task signal or change; create no branch/worktree.
+- `review_required` and `design_required`: risk-based escalation decisions.
+- an adaptive agent plan that does not force fan-out for ordinary work.
 
-`commit-push` runs the only local gate. `task-integrate` is the rest of the same
-push stage: it fetches/rebases, CAS-pushes the configured target, confirms the
-remote SHA, and cleans up without repeating the gate. Successful integration
-ends the coding task; do not wait for Jenkins, deployment, or acceptance results.
-The task commit runs project commit hooks once. Its internal backup-branch push
-skips the pre-push hook, while the final target-branch push runs that hook once.
-Integration does not create a second evidence commit.
+Use a machine-enforced task lifecycle when useful:
 
-Successful integration removes the clean worktree and merged local branch, and
-deletes the merged remote task branch by default. `task-finish T0001` retries
-cleanup for one integrated task; `task-prune` removes registered merged tasks
-left behind. Dirty worktrees and unmerged branches are never removed. Integration
-does not update the primary checkout; pull it explicitly when its local state is
-ready. Cleanup also refuses unknown ignored files such as local secrets; list
-only disposable project cache/build paths under `concurrency.disposable_ignored`.
-Initialized submodules are recursively checked before forced task-worktree
-removal: they must be clean and contain no unknown ignored data, local-only
-commits, unmirrored local branches, or additional linked worktrees. Their
-remotes are refreshed before that decision. A durable snapshot
-of refs and reflog commits is stored under Git's
-`auto-coding-skill/submodule-recovery` state before forced worktree removal, so
-a remote deletion race cannot destroy the last copy of a commit. Cleanup never
-deinitializes the primary checkout's shared submodule configuration.
-`task-start` enables Git worktree-scoped config and seeds each task's submodule
-URLs. After changing `.gitmodules`, run `task-submodule-sync` before initializing
-or syncing modules. Relative URLs follow Git's current-worktree default-remote
-rules, including task bases whose `.gitmodules` differs from the control checkout.
-Shared/common submodule config changes are reported and never overwritten.
-Residual Git directories from modules manually deinitialized inside a task block
-forced cleanup until they are reinitialized or recovered.
+```bash
+python3 docs/tools/autopipeline/ap.py task-start T0001 \
+  --owned-path backend/internal/orders
+python3 docs/tools/autopipeline/ap.py commit-push T0001 \
+  --msg "T0001: fix order retry"
+```
 
-## Gate configuration
+On a clean single-writer checkout, `task-start` records a lightweight direct
+manifest in the Git common directory and creates no branch or worktree.
+`commit-push` runs the final gate, commits, and pushes the current target branch.
+If no diff was produced, it clears the manifest without commit or push.
+
+Dirty or parallel work receives an isolated task branch/worktree:
+
+```bash
+python3 docs/tools/autopipeline/ap.py task-start T0002 \
+  --owned-path backend --writers 2 --review-required
+# implement in the printed worktree
+python3 docs/tools/autopipeline/ap.py task-review T0002 \
+  --verdict approved --diff-fingerprint "$SHA256"
+python3 docs/tools/autopipeline/ap.py commit-push T0002 \
+  --msg "T0002: bounded change"
+python3 docs/tools/autopipeline/ap.py task-integrate T0002
+```
+
+Integration serializes the target push and removes clean merged worktrees and
+temporary branches. Unknown changes, unmerged history, unsafe ignored data, or
+dirty submodules block cleanup rather than being discarded.
+
+## Real changed-scope validation
+
+Risk classification and validation execution are deliberately separate:
 
 ```yaml
 commands:
-  gate_changed: "git diff --check"
+  backend_fast: "cd backend && go test ./internal/orders/..."
+  frontend_fast: "cd frontend && npm run test:changed"
 
-gate:
-  default_scope: auto
+validation:
+  on_unmapped: error
+  routes:
+    - name: backend
+      paths: ["backend/**", "contracts/**"]
+      commands: [backend_fast]
+    - name: frontend
+      paths: ["frontend/**"]
+      commands: [frontend_fast]
+
+risk:
   rules:
-    - name: payments
-      paths: ["src/payments/**"]
+    - name: auth
+      paths: ["backend/**/auth/**"]
       profile: high-risk
+      review: required
 ```
 
-Rules affect classification and planning only. Legacy `scope` or `commands`
-inside a rule never execute automatically; invoke an explicitly configured
-diagnostic with `ap.py run <name>` when the user asks for it.
+Every path may match multiple routes. All referenced commands are collected in
+configuration order, de-duplicated, and executed once. Unmapped code and missing
+commands fail before staging. Documentation-only changes may use the built-in
+diff check. `git diff --check` remains an additional hygiene check and is never
+treated as business validation.
 
-For Node projects, a new scaffold selects `npm run test:changed` only when that
-dedicated quick script exists. It never promotes ordinary `npm test`, builds, or
-full regression into the automatic changed gate. Standard/full commands may be
-kept as explicit diagnostics, but normal development does not invoke them.
-
-## Structure policy
-
-The generic checker remains useful for surfacing large files, large additions,
-function-size signals, and import-direction heuristics, but it is not universally
-authoritative:
-
-```yaml
-structure:
-  enabled: true
-  enforcement: advisory # advisory | blocking
-  architecture_standard: project-defined
-```
-
-`advisory` reports findings without blocking. Projects with reliable, tailored
-rules can opt into `blocking`. Repository-native architecture, compiler output,
-tests, and real dependency graphs take precedence over generic path heuristics.
-
-## Optional documentation
-
-Specialized templates are created only when required:
+Check coverage without running project commands:
 
 ```bash
-python3 docs/tools/autopipeline/ap.py scaffold api --write
-python3 docs/tools/autopipeline/ap.py scaffold design --write
-python3 docs/tools/autopipeline/ap.py scaffold architecture --write
-python3 docs/tools/autopipeline/ap.py scaffold review --write
-python3 docs/tools/autopipeline/ap.py scaffold testing --write
-python3 docs/tools/autopipeline/ap.py scaffold deployment --write
-python3 docs/tools/autopipeline/ap.py scaffold bugs --write
-python3 docs/tools/autopipeline/ap.py scaffold all --write
+python3 docs/tools/autopipeline/ap.py validation-map-check --path contracts/api.yaml
+python3 docs/tools/autopipeline/ap.py validation-map-check --tracked
 ```
 
-The command is idempotent and does not overwrite existing project documents
-unless `--force` is supplied. `baseline init` and `gen-summary` generate their
-outputs directly without static templates.
+Focused tests may be run and rerun during implementation. Only the final routed
+closure gate is limited to one stable-diff run. Full regression, Docker, builds,
+Jenkins, deployment, API verification, and target checks remain explicit
+diagnostics outside normal closure.
 
-For a one-step legacy-style full scaffold:
+## Risk and subagent policy
 
-```bash
-python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install --full
-```
+- Micro and standard work default to the main agent.
+- Read-only explorer/docs/browser roles run only for independent questions with
+  clear value.
+- Parallel fixers require separate worktrees and non-overlapping paths.
+- Reviewer fingerprint approval is required for high-risk, cross-module,
+  explicitly configured, or parallel integration work.
+- DD/ADR is created only for lasting cross-module, API, data, security,
+  deployment, or key user-flow decisions.
+- Historical debt does not block product work unless the current change worsens it.
 
-## Dynamic Agents and models
-
-Managed role templates define role instructions, permissions, and reasoning
-effort but do not pin a model. The current client therefore supplies a supported
-model automatically.
-
-Existing project-local `model = "..."` lines are treated as explicit overrides:
-
-- `status` reports them but does not mark the project stale for model-only drift.
-- `sync` updates managed instructions while preserving the override.
-- `sync --reset-agent-models` removes managed-role overrides and returns to
-  client inheritance.
-- Custom Agent files are always preserved byte-for-byte.
-
-The effective profile emits an executable collaboration shape:
-
-- micro: main Agent only unless useful independent work exceeds dispatch overhead
-- standard/high-risk: main decomposition → parallel justified explorer/docs/browser
-  discovery → main design → dependency waves of isolated fixers → read-only
-  reviewers → main fast gate/integration, followed by final push/cleanup
-
-Only dependency-free fixer units with explicitly non-overlapping paths may run
-in parallel. A dependent writer starts after its prerequisite is integrated.
-Subagents do not commit, push, integrate, clean branches, or run the project gate.
-Reviewer findings return to the owning fixer. Verdicts bind to a diff fingerprint,
-so any edit requires re-review before the main Agent may run the gate.
-
-## Required access configuration
-
-For a new project, `autocoding sync` creates `access.project`, `access.jenkins`,
-`access.gitlab`, and `access.nexus` in `docs/ENGINEERING.md`. Existing projects
-must run `ap.py upgrade --write` to merge newly required fields into their manual
-configuration. Fill every URL, username, and direct password during
-initialization as an inline YAML string; quote values that resemble numbers,
-dates, booleans, or YAML collections. `status` rejects blank/TODO fields;
-`doctor` and `task-start`
-also validate URL shape locally. These access checks never contact the listed
-service endpoints; after validation, `task-start` may still fetch the configured
-Git remote unless `--no-fetch` is used. Configuration presence does not enable
-Jenkins/build/deploy verification.
-
-## Core commands
-
-```bash
-python3 docs/tools/autopipeline/ap.py doctor
-python3 docs/tools/autopipeline/ap.py classify --scope auto
-python3 docs/tools/autopipeline/ap.py light-gate --scope auto --explain
-python3 docs/tools/autopipeline/ap.py structure-check --scope auto
-python3 docs/tools/autopipeline/ap.py task-start T0001 --owned-path src --writer "$FIXER"
-python3 docs/tools/autopipeline/ap.py task-status T0001
-python3 docs/tools/autopipeline/ap.py task-submodule-sync T0001
-python3 docs/tools/autopipeline/ap.py task-review T0001 --verdict approved --diff-fingerprint "$SHA256"
-python3 docs/tools/autopipeline/ap.py task-handoff T0001 --from "$FIXER" --to "$CODEX_THREAD_ID" --generation 1
-python3 docs/tools/autopipeline/ap.py docs-ledger-check
-python3 docs/tools/autopipeline/ap.py gate-profile
-python3 docs/tools/autopipeline/ap.py commit-push T0001 --writer "$CODEX_THREAD_ID" --msg "T0001: summary"
-python3 docs/tools/autopipeline/ap.py task-integrate T0001 --writer "$CODEX_THREAD_ID"
-python3 docs/tools/autopipeline/ap.py task-finish T0001
-python3 docs/tools/autopipeline/ap.py task-prune
-```
+The main agent owns architecture, final validation, Git closure, ordered
+integration, push, and cleanup. Push ends the coding task; later CI/acceptance is
+handled only through a separately requested diagnostic task.
 
 ## Upgrade and multi-project sync
 
+Finish all in-flight schema-1/schema-2 registered tasks using their installed 3.x
+runtime before syncing 4.0. Batch sync fails before any writes when it finds an
+incompatible active task.
+
 ```bash
-autocoding sync --projects /path/a,/path/b
-
-python3 docs/tools/autopipeline/ap.py upgrade --dry-run
-python3 docs/tools/autopipeline/ap.py upgrade --write
-
 autocoding status --projects /path/a,/path/b
 autocoding sync --projects /path/a,/path/b --dry-run
+autocoding sync --projects /path/a,/path/b
 ```
 
-For a v2.1 project, run the new CLI sync first; invoking its old project-local
-`upgrade` command would still execute v2.1 logic. Upgrade and sync preserve
-existing optional docs, legacy `core.py` /
-`http_checks.py` tool copies, custom Agents, and project-specific configuration.
-Retired template files do not count as drift.
+Sync replaces the managed Skill directory, so missing files are restored and
+obsolete managed files are removed. It preserves project frontmatter, access
+values, custom agents, explicit model overrides, optional documents, and content
+outside managed AGENTS/ENGINEERING blocks.
 
-## Development
+## What changed in 4.0.0
 
-Normal changes should use the configured changed-scope gate only. The commands
-below are explicit package-maintainer diagnostics, not the default project
-development gate:
+- Added real `direct` and `isolated` runtime execution modes.
+- Stopped creating branches/worktrees for clean serial or no-diff work.
+- Added multi-match `validation.routes`, stable command de-duplication,
+  fail-closed unmapped code, and `validation-map-check`.
+- Separated `risk.rules` from executable validation.
+- Made ordinary tasks main-agent-first and review/design conditional.
+- Kept advanced worktree ownership, dependency SHA, lease, fingerprint,
+  integration, submodule safety, and branch cleanup for parallel/high-risk work.
+- Removed taskbook, closure, evidence, and active-task documents from the default
+  scaffold and normal closure path.
+- Changed structure/debt policy to no-new-debt and kept full/CI/runtime checks as
+  explicit diagnostics.
+- Added schema-3 task manifests and atomic sync refusal for in-flight pre-4.0 tasks.
+
+## Maintainer commands
 
 ```bash
-npm run test:src
-npm test
+npm run sync-assets
 npm run release:check
 ```
 
-Run `npm run sync-assets` explicitly after source changes. `release:check` is a
-read-only release gate: it rejects asset drift, validates Python 3.11 grammar and
-TOML, runs the broader regressions, and performs `npm pack --dry-run`.
+`release:check` validates source/assets, Python 3.11 grammar, managed Agent TOML,
+CLI/profile/concurrency regressions, and the npm package contents.
 
 License: MIT.

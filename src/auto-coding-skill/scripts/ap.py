@@ -49,7 +49,7 @@ _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "3.0.3", "engineering": "3.0.3"},
+    "managed_versions": {"agents": "4.0.0", "engineering": "4.0.0"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -170,10 +170,12 @@ def _append_jsonl(path: Path, payload: dict) -> None:
 
 def _evidence_log_path(repo: Path, cfg: dict) -> Path:
     manifest = _active_task_manifest(repo)
-    if manifest:
-        docs_cfg = cfg.get("docs") or {}
+    docs_cfg = cfg.get("docs") or {}
+    if manifest and _bool_config(docs_cfg.get("track_task_evidence"), False):
         task_dir = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
         return Path(repo, task_dir, f"{manifest['task_id']}.jsonl")
+    if _bool_config(docs_cfg.get("track_evidence"), False) and _text(docs_cfg.get("evidence_log")):
+        return Path(repo, _text(docs_cfg.get("evidence_log")))
     return Path(repo, ".local/auto-coding-skill/evidence.jsonl")
 
 
@@ -577,10 +579,7 @@ _MANAGED_EXTRA_CLEANUP_DIRS = {
     Path("data/templates/bridges"),
 }
 
-_CORE_DOC_TEMPLATES = [
-    Path("tasks/taskbook.md"),
-    Path("tasks/closure-log.md"),
-]
+_CORE_DOC_TEMPLATES: list[Path] = []
 
 
 def _inferred_gate_commands(repo: Path) -> dict[str, str]:
@@ -595,7 +594,7 @@ def _inferred_gate_commands(repo: Path) -> dict[str, str]:
     if not isinstance(scripts, dict):
         return {}
     if isinstance(scripts.get("test:changed"), str) and scripts["test:changed"].strip():
-        return {"gate_changed": "npm run test:changed"}
+        return {"project_fast": "npm run test:changed"}
     return {}
 
 
@@ -635,17 +634,25 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
+    if _text(workflow_cfg.get("skill_version")) != "4.0.0":
+        workflow_cfg["skill_version"] = "4.0.0"
+        changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
     if not isinstance(commands_cfg, dict):
         commands_cfg = {}
         cfg["commands"] = commands_cfg
     current_changed_gate = _text(commands_cfg.get("gate_changed"))
-    if current_changed_gate in {"", "npm test"}:
-        replacement = _inferred_gate_commands(repo).get("gate_changed", "git diff --check")
-        if current_changed_gate != replacement:
-            commands_cfg["gate_changed"] = replacement
-            changed.append("commands.gate_changed")
+    project_fast = _text(commands_cfg.get("project_fast"))
+    inferred_fast = _inferred_gate_commands(repo).get("project_fast", "")
+    if not project_fast:
+        replacement = (
+            current_changed_gate
+            if current_changed_gate and current_changed_gate not in {"git diff --check", "npm test"}
+            else inferred_fast
+        )
+        commands_cfg["project_fast"] = replacement
+        changed.append("commands.project_fast")
 
     gate_cfg = cfg.setdefault("gate", {})
     if not isinstance(gate_cfg, dict):
@@ -662,21 +669,63 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
         del gate_cfg["full_on"]
         changed.append("gate.full_on")
     raw_rules = gate_cfg.get("rules")
+    risk_cfg = cfg.setdefault("risk", {})
+    if not isinstance(risk_cfg, dict):
+        risk_cfg = {}
+        cfg["risk"] = risk_cfg
+    risk_rules = risk_cfg.setdefault("rules", [])
+    if not isinstance(risk_rules, list):
+        risk_rules = []
+        risk_cfg["rules"] = risk_rules
+    validation_cfg = cfg.setdefault("validation", {})
+    if not isinstance(validation_cfg, dict):
+        validation_cfg = {}
+        cfg["validation"] = validation_cfg
+    if _text(validation_cfg.get("on_unmapped")).lower() != "error":
+        validation_cfg["on_unmapped"] = "error"
+        changed.append("validation.on_unmapped")
+    validation_routes = validation_cfg.setdefault("routes", [])
+    if not isinstance(validation_routes, list):
+        validation_routes = []
+        validation_cfg["routes"] = validation_routes
     if isinstance(raw_rules, list):
         migrated_rules: list = []
         for index, rule in enumerate(raw_rules):
             if not isinstance(rule, dict):
                 migrated_rules.append(rule)
                 continue
-            migrated_rule = dict(rule)
-            for legacy_key in ["scope", "commands"]:
-                if legacy_key in migrated_rule:
-                    del migrated_rule[legacy_key]
-                    changed.append(f"gate.rules[{index}].{legacy_key}")
-            if migrated_rule:
-                migrated_rules.append(migrated_rule)
+            migrated_rule = {
+                key: value
+                for key, value in rule.items()
+                if key in {"name", "paths", "profile", "review", "design"}
+            }
+            if migrated_rule and migrated_rule not in risk_rules:
+                risk_rules.append(migrated_rule)
+                changed.append(f"risk.rules[{len(risk_rules) - 1}]")
+            legacy_commands = _as_list(rule.get("commands"))
+            if legacy_commands and _as_list(rule.get("paths")):
+                route = {
+                    "name": _text(rule.get("name")) or f"migrated-{index + 1}",
+                    "paths": _as_list(rule.get("paths")),
+                    "commands": [_command_name(item) for item in legacy_commands if _command_name(item)],
+                }
+                if route["commands"] and route not in validation_routes:
+                    validation_routes.append(route)
+                    changed.append(f"validation.routes[{len(validation_routes) - 1}]")
         if migrated_rules != raw_rules:
-            gate_cfg["rules"] = migrated_rules
+            gate_cfg["rules"] = []
+            changed.append("gate.rules")
+
+    if not validation_routes:
+        validation_routes.append(
+            {
+                "name": "project-code",
+                "paths": ["**"],
+                "exclude": ["*.md", "docs/**"],
+                "commands": ["project_fast"],
+            }
+        )
+        changed.append("validation.routes[0]")
 
     concurrency_cfg = cfg.setdefault("concurrency", {})
     if not isinstance(concurrency_cfg, dict):
@@ -1607,11 +1656,14 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
             "owned_paths for an in-flight task. Finish or clean it with the previously installed "
             "runtime before running autocoding sync, or restore the 3.0.0 runtime."
         )
+    execution_mode = _text(manifest.get("execution_mode")).lower() or "isolated"
+    if execution_mode not in {"direct", "isolated"}:
+        raise APError(f"Task {task_id} has an invalid execution_mode: {execution_mode!r}")
     task_uuid = _text(manifest.get("task_uuid"))
     if not re.fullmatch(r"[0-9a-f]{32}", task_uuid):
         raise APError(f"Invalid task manifest UUID for {task_id}; refusing Git operations.")
     task_branch = _text(manifest.get("task_branch"))
-    if not task_branch.endswith(f"/{task_id}") or run(
+    if (execution_mode == "isolated" and not task_branch.endswith(f"/{task_id}")) or run(
         ["git", "check-ref-format", "--branch", task_branch],
         cwd=repo,
         check=False,
@@ -1638,7 +1690,11 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         raise APError(f"Task manifest paths must be absolute for {task_id}.")
     worktree = worktree.resolve()
     control = control.resolve()
-    if worktree == control or control in worktree.parents or worktree in control.parents:
+    if execution_mode == "direct" and worktree != control:
+        raise APError(f"Direct task {task_id} must use its control checkout.")
+    if execution_mode == "isolated" and (
+        worktree == control or control in worktree.parents or worktree in control.parents
+    ):
         raise APError(
             f"Task worktree must be outside its control checkout for {task_id}: {worktree}"
         )
@@ -1669,6 +1725,9 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         "changes-requested",
     }:
         raise APError(f"Task {task_id} has an invalid review contract.")
+    review_required = manifest.get("review_required", schema < 3)
+    if not isinstance(review_required, bool):
+        raise APError(f"Task {task_id} has an invalid review_required flag.")
     return manifest
 
 
@@ -1767,12 +1826,12 @@ def _task_runtime_paths(repo: Path, cfg: dict, manifest: Optional[dict]) -> set[
     paths = {
         _text(gate_cfg.get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl",
     }
-    if manifest:
+    if manifest and _bool_config(docs_cfg.get("track_task_evidence"), False):
         task_id = _validate_task_id(_text(manifest.get("task_id")))
         evidence_dir = _text(docs_cfg.get("task_evidence_dir")) or "docs/tasks/evidence"
         paths.add(f"{evidence_dir.rstrip('/')}/{task_id}.jsonl")
     else:
-        paths.add(_text(docs_cfg.get("evidence_log")) or "docs/tasks/evidence.jsonl")
+        paths.add(".local/auto-coding-skill/evidence.jsonl")
     normalized: set[str] = set()
     for path in paths:
         value = path.replace("\\", "/")
@@ -1895,6 +1954,8 @@ def _path_is_owned(path: str, owned_paths: list[str]) -> bool:
 
 
 def _task_managed_paths(cfg: dict, manifest: dict) -> list[str]:
+    if int(manifest.get("schema") or 2) >= 3:
+        return []
     docs_cfg = cfg.get("docs") or {}
     task_id = _validate_task_id(_text(manifest.get("task_id")))
     return sorted(
@@ -2020,6 +2081,8 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
     if unowned:
         raise APError("Changes outside task owned_paths:\n- " + "\n- ".join(unowned))
     fingerprint = _task_review_fingerprint(repo, manifest)
+    if not bool(manifest.get("review_required", int(manifest.get("schema") or 2) < 3)):
+        return fingerprint
     review = manifest.get("review") or {}
     if _text(review.get("verdict")) != "approved":
         raise APError("Task review must be approved before commit-push or integration.")
@@ -2058,9 +2121,9 @@ def _require_task_context(repo: Path, cfg: dict, task_id: str) -> dict:
                 "return to the primary checkout and create or recover the task with task-start."
             )
         raise APError(
-            "This project requires an isolated task worktree. "
+            "This checkout has no active task. "
             f"Run `python3 docs/tools/autopipeline/ap.py task-start {task_id}` from the main checkout, "
-            "then continue in the returned worktree."
+            "then continue in the current checkout or returned worktree."
         )
     expected_task = _validate_task_id(task_id)
     actual_task = _text(manifest.get("task_id"))
@@ -2289,6 +2352,16 @@ def _gate_cfg(cfg: dict) -> dict:
     return gate_cfg if isinstance(gate_cfg, dict) else {}
 
 
+def _risk_cfg(cfg: dict) -> dict:
+    value = cfg.get("risk") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _validation_cfg(cfg: dict) -> dict:
+    value = cfg.get("validation") or {}
+    return value if isinstance(value, dict) else {}
+
+
 def _as_list(value: object) -> list:
     if value is None:
         return []
@@ -2330,8 +2403,8 @@ def _run_configured_command_list(repo: Path, cfg: dict, names: list) -> list[str
             executed.append(name)
         else:
             missing.append(name)
-    if missing and not executed:
-        raise APError("Gate rule references missing commands: " + ", ".join(missing))
+    if missing:
+        raise APError("Validation route references missing commands: " + ", ".join(missing))
     return executed
 
 
@@ -2457,6 +2530,14 @@ def _gate_rules(gate_cfg: dict) -> list[dict]:
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
+def _risk_rules(cfg: dict) -> list[dict]:
+    rules = _risk_cfg(cfg).get("rules") or []
+    current = [rule for rule in rules if isinstance(rule, dict)]
+    # Keep reading 3.x gate.rules while projects migrate.  They remain planning
+    # metadata only and never execute validation commands.
+    return current or _gate_rules(_gate_cfg(cfg))
+
+
 def _matching_gate_rules(paths: list[str], gate_cfg: dict) -> list[dict]:
     matches = []
     for rule in _gate_rules(gate_cfg):
@@ -2464,6 +2545,106 @@ def _matching_gate_rules(paths: list[str], gate_cfg: dict) -> list[dict]:
         if patterns and any(_path_matches(path, patterns) for path in paths):
             matches.append(rule)
     return matches
+
+
+def _matching_risk_rules(paths: list[str], cfg: dict) -> list[dict]:
+    matches: list[dict] = []
+    for rule in _risk_rules(cfg):
+        patterns = _as_list(rule.get("paths"))
+        if patterns and any(_path_matches(path, patterns) for path in paths):
+            matches.append(rule)
+    return matches
+
+
+def _validation_routes(cfg: dict) -> list[dict]:
+    routes = _validation_cfg(cfg).get("routes") or []
+    return [route for route in routes if isinstance(route, dict)]
+
+
+def _validation_route_matches(path: str, route: dict) -> bool:
+    patterns = _as_list(route.get("paths"))
+    excludes = _as_list(route.get("exclude"))
+    return bool(patterns) and _path_matches(path, patterns) and not _path_matches(path, excludes)
+
+
+def _validation_plan(cfg: dict, paths: list[str]) -> dict:
+    """Resolve one deterministic changed-scope validation plan.
+
+    Risk rules deliberately live under ``risk.rules``.  Validation routes are a
+    separate execution surface so classification cannot silently turn into an
+    expensive full gate and a documentation check cannot masquerade as code
+    validation.
+    """
+    normalized = _unique_paths(paths)
+    routes = _validation_routes(cfg)
+    command_names: list[str] = []
+    matched_routes: list[str] = []
+    coverage: dict[str, list[str]] = {}
+    unmapped: list[str] = []
+
+    for path in normalized:
+        names: list[str] = []
+        for index, route in enumerate(routes):
+            if not _validation_route_matches(path, route):
+                continue
+            route_name = _text(route.get("name")) or f"route-{index + 1}"
+            names.append(route_name)
+            if route_name not in matched_routes:
+                matched_routes.append(route_name)
+            for command_ref in _as_list(route.get("commands")):
+                command_name = _command_name(command_ref)
+                if command_name and command_name not in command_names:
+                    command_names.append(command_name)
+        coverage[path] = names
+        if not names and not _path_matches(path, _DOC_PATH_PATTERNS):
+            unmapped.append(path)
+
+    validation_cfg = _validation_cfg(cfg)
+    compatibility_command = ""
+    if not routes:
+        compatibility_command = _command_name(validation_cfg.get("fallback_command"))
+        if not compatibility_command and _configured_command(cfg, "gate_changed"):
+            compatibility_command = "gate_changed"
+        if compatibility_command:
+            command_names.append(compatibility_command)
+            matched_routes.append("3.x-compatibility-fallback")
+            unmapped = []
+
+    on_unmapped = _text(validation_cfg.get("on_unmapped")).lower() or "error"
+    if on_unmapped not in {"error", "fallback"}:
+        raise APError("validation.on_unmapped must be error or fallback")
+    if unmapped and on_unmapped == "fallback":
+        fallback = _command_name(validation_cfg.get("fallback_command"))
+        if fallback and fallback not in command_names:
+            command_names.append(fallback)
+            matched_routes.append("unmapped-fallback")
+            unmapped = []
+
+    return {
+        "paths": normalized,
+        "commands": command_names,
+        "matched_routes": matched_routes,
+        "coverage": coverage,
+        "unmapped": unmapped,
+        "docs_only": _docs_only(normalized),
+        "compatibility_fallback": compatibility_command,
+    }
+
+
+def _validate_validation_plan(cfg: dict, plan: dict) -> None:
+    missing = [name for name in plan["commands"] if not _configured_command(cfg, name)]
+    if missing:
+        raise APError("Validation route references missing commands: " + ", ".join(missing))
+    if plan["unmapped"]:
+        raise APError(
+            "Changed code paths have no validation route:\n- "
+            + "\n- ".join(plan["unmapped"])
+            + "\nAdd validation.routes entries in docs/ENGINEERING.md."
+        )
+    if plan["paths"] and not plan["docs_only"] and not plan["commands"]:
+        raise APError(
+            "Changed code has no fast validation command. Add validation.routes with project-native commands."
+        )
 
 
 def _gate_full_patterns(gate_cfg: dict) -> list:
@@ -2518,7 +2699,8 @@ def _impact_summary(
         for path in ignored_runtime_paths
     }
     paths = [path for path in paths if path not in ignored_runtime_paths]
-    scope, reasons, matching_rules = _select_gate_scope(cfg, requested_scope, paths)
+    scope, reasons, _ = _select_gate_scope(cfg, requested_scope, paths)
+    matching_rules = _matching_risk_rules(paths, cfg)
     return {
         "requested_scope": requested_scope or _text(_gate_cfg(cfg).get("default_scope")) or "standard",
         "selected_scope": scope,
@@ -2551,31 +2733,54 @@ def _print_impact(summary: dict, as_json: bool = False) -> None:
 
 
 def _run_changed_gate(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
-    # The generic scaffold uses this command as its whole fast gate. The
-    # built-in diff check below covers working tree, index, and task commits, so
-    # do not execute the narrower configured spelling first as a duplicate.
-    if _configured_command(cfg, "gate_changed").strip() == "git diff --check":
-        print("[gate] gate_changed is handled by the built-in diff check")
-        return []
-
-    fallback_commands = ["gate_changed"]
-    if _docs_only(paths):
-        fallback_commands.append("docs_check")
-    command = _run_first_configured_command(repo, cfg, fallback_commands)
-    if command:
-        return [command]
-
-    if _docs_only(paths):
-        print("[gate] docs-only change with no changed-gate command configured; running built-in post checks only.")
+    plan = _validation_plan(cfg, paths)
+    _validate_validation_plan(cfg, plan)
+    if not paths:
+        print("[validation] no changed files; no project command needed")
+        return ["no_changes"]
+    if plan["docs_only"] and not plan["commands"]:
+        print("[validation] docs-only change; built-in diff check is sufficient")
         return ["docs_only_builtin"]
+    if plan["compatibility_fallback"]:
+        print(
+            "[validation] WARN: using 3.x compatibility fallback; migrate to validation.routes",
+            file=sys.stderr,
+        )
+    executed = _run_configured_command_list(repo, cfg, plan["commands"])
+    print(
+        "[validation] routes="
+        + (", ".join(plan["matched_routes"]) or "(none)")
+        + " commands="
+        + (", ".join(executed) or "(none)")
+    )
+    return executed
 
-    fallback = _run_first_configured_command(repo, cfg, ["quick_test"])
-    if fallback:
-        return [fallback]
 
-    raise APError(
-        "Changed gate has no fast command. Add commands.gate_changed or commands.quick_test. "
-        "gate.rules commands are never executed by the automatic development flow."
+def cmd_validation_map_check(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    explicit_paths = list(getattr(args, "path", []) or [])
+    if explicit_paths:
+        paths = _unique_paths(explicit_paths)
+    elif bool(getattr(args, "tracked", False)):
+        paths = _tracked_files(repo)
+    else:
+        paths = _changed_files(repo, _text(getattr(args, "base", "")))
+    plan = _validation_plan(cfg, paths)
+    _validate_validation_plan(cfg, plan)
+    result = {
+        "paths": plan["paths"],
+        "commands": plan["commands"],
+        "matched_routes": plan["matched_routes"],
+        "coverage": plan["coverage"],
+        "docs_only": plan["docs_only"],
+    }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(
+        f"[validation-map] OK paths={len(plan['paths'])} "
+        f"routes={len(plan['matched_routes'])} commands={len(plan['commands'])}"
     )
 
 
@@ -4050,9 +4255,22 @@ def _configured_workflow_profile(cfg: dict) -> str:
     return _normalize_workflow_profile((cfg.get("workflow") or {}).get("profile"))
 
 
-def _recommended_agents(profile: str, categories: set[str], classification: dict) -> list[str]:
+def _recommended_agents(
+    profile: str,
+    categories: set[str],
+    classification: dict,
+    *,
+    parallel_writers: int = 1,
+    review_required: bool = False,
+) -> list[str]:
     roles: list[str] = []
-    for stage in _agent_execution_plan(profile, categories, classification)["stages"]:
+    for stage in _agent_execution_plan(
+        profile,
+        categories,
+        classification,
+        parallel_writers=parallel_writers,
+        review_required=review_required,
+    )["stages"]:
         for role in stage["roles"]:
             if role != "main" and role not in roles:
                 roles.append(role)
@@ -4127,122 +4345,84 @@ def _validate_agent_plan(plan: dict) -> dict:
     return plan
 
 
-def _agent_execution_plan(profile: str, categories: set[str], classification: dict) -> dict:
+def _agent_execution_plan(
+    profile: str,
+    categories: set[str],
+    classification: dict,
+    *,
+    parallel_writers: int = 1,
+    review_required: bool = False,
+) -> dict:
     assignment_contract, result_contract = _agent_contract_shape()
-    if profile == "micro":
-        return _validate_agent_plan({
-            "contract_version": _AGENT_CONTRACT_VERSION,
-            "contract_schema": _AGENT_CONTRACT_SCHEMA,
-            "strategy": "main-only",
-            "policies": {
-                "one_writer_per_worktree": True,
-                "workspace_isolation": "adaptive-clean-current-or-isolated",
-                "path_ownership": "explicit-non-overlapping",
-                "dependency_policy": "integrate-before-dependent-start",
-                "review_feedback_owner": "main",
-                "review_binding": "diff-fingerprint",
-                "lifecycle_owner": "main",
-                "gate_owner": "main",
-            },
-            "assignment_contract": assignment_contract,
-            "result_contract": result_contract,
-            "stages": [
-                {
-                    "id": "delivery",
-                    "mode": "serial",
-                    "roles": ["main"],
-                    "depends_on": [],
-                }
-            ],
-            "constraints": [
-                "Do not create subagents when the task has no independent work worth delegating.",
-                "The main agent owns the fast gate, Git integration, push, and cleanup.",
-            ],
-        })
-
-    discovery_roles = ["explorer"]
+    discovery_roles: list[str] = []
     if categories & {"api", "release_or_tooling"}:
         discovery_roles.append("docs_researcher")
     if classification.get("needs_browser"):
         discovery_roles.append("browser_debugger")
+    if profile == "high-risk" and not discovery_roles:
+        discovery_roles.append("explorer")
+
+    policies = {
+        "one_writer_per_worktree": True,
+        "workspace_isolation": "adaptive-clean-current-or-isolated",
+        "path_ownership": "explicit-only-for-isolated-or-delegated-work",
+        "dependency_policy": "integrate-before-dependent-start",
+        "review_feedback_owner": "owning-fixer" if review_required else "main",
+        "review_binding": "diff-fingerprint-when-required",
+        "lifecycle_owner": "main",
+        "gate_owner": "main",
+    }
+    constraints = [
+        "Delegate only when independent work has a clear latency or expertise benefit.",
+        "A clean single-writer checkout stays on its current branch; dirty or parallel work is isolated.",
+        "Never run two writers in one worktree.",
+        "The main agent runs one final changed-scope gate, pushes, and cleans only temporary branches actually created.",
+    ]
+
+    if parallel_writers <= 1 and not discovery_roles and not review_required:
+        stages = [{"id": "delivery", "mode": "serial", "roles": ["main"], "depends_on": []}]
+        strategy = "main-only"
+    else:
+        stages = [
+            {"id": "decomposition", "mode": "serial", "roles": ["main"], "depends_on": []}
+        ]
+        previous = "decomposition"
+        if discovery_roles:
+            stages.append(
+                {
+                    "id": "discovery",
+                    "mode": "parallel" if len(discovery_roles) > 1 else "serial",
+                    "roles": discovery_roles,
+                    "depends_on": [previous],
+                }
+            )
+            previous = "discovery"
+        delivery_roles = ["main"]
+        delivery_mode = "serial"
+        if parallel_writers > 1:
+            delivery_roles = ["fixer", "main"]
+            delivery_mode = "parallel-isolated"
+        if review_required:
+            delivery_roles.append("reviewer")
+        stages.append(
+            {
+                "id": "delivery",
+                "mode": delivery_mode,
+                "roles": delivery_roles,
+                "depends_on": [previous],
+            }
+        )
+        strategy = "parallel-writers" if parallel_writers > 1 else "risk-assisted"
 
     return _validate_agent_plan({
         "contract_version": _AGENT_CONTRACT_VERSION,
         "contract_schema": _AGENT_CONTRACT_SCHEMA,
-        "strategy": "orchestrated-subagents",
-        "policies": {
-            "one_writer_per_worktree": True,
-            "workspace_isolation": "adaptive-clean-current-or-isolated",
-            "path_ownership": "explicit-non-overlapping",
-            "dependency_policy": "integrate-before-dependent-start",
-            "review_feedback_owner": "owning-fixer",
-            "review_binding": "diff-fingerprint",
-            "lifecycle_owner": "main",
-            "gate_owner": "main",
-        },
+        "strategy": strategy,
+        "policies": policies,
         "assignment_contract": assignment_contract,
         "result_contract": result_contract,
-        "stages": [
-            {
-                "id": "decomposition",
-                "mode": "serial",
-                "roles": ["main"],
-                "depends_on": [],
-            },
-            {
-                "id": "discovery",
-                "mode": "parallel",
-                "roles": discovery_roles,
-                "depends_on": ["decomposition"],
-            },
-            {
-                "id": "design",
-                "mode": "serial",
-                "roles": ["main"],
-                "depends_on": ["discovery"],
-            },
-            {
-                "id": "delivery",
-                "mode": "dependency-waves",
-                "roles": ["fixer", "reviewer", "main"],
-                "depends_on": ["design"],
-                "scale": "one fixer per independent development unit in the current dependency layer",
-                "wave_phases": [
-                    {
-                        "id": "implementation",
-                        "mode": "parallel-isolated",
-                        "roles": ["fixer"],
-                    },
-                    {
-                        "id": "review",
-                        "mode": "parallel-read-only",
-                        "roles": ["reviewer"],
-                        "feedback_to": "owning fixer",
-                    },
-                    {
-                        "id": "gate-integrate",
-                        "mode": "serial",
-                        "roles": ["main"],
-                    },
-                ],
-                "next_wave": "start only after every prerequisite in the next layer is integrated",
-            },
-            {
-                "id": "closure",
-                "mode": "serial",
-                "roles": ["main"],
-                "depends_on": ["delivery"],
-            },
-        ],
-        "constraints": [
-            "Delegate only independent bounded work and declare dependencies before dispatch.",
-            "One serial fixer may use a clean current branch; dirty or parallel writers require registered task branches/worktrees.",
-            "Never run two writers in one worktree or let the main agent edit a fixer-owned worktree concurrently.",
-            "Start a dependent write task only after its prerequisite has been integrated into the target branch.",
-            "Subagents do not commit, push, integrate, or clean task branches.",
-            "Reviewers inspect a stable diff; changes-requested returns to the owning fixer and any edit requires re-review.",
-            "The main agent routes review feedback, runs one fast gate, pushes, and cleans only temporary branches/worktrees that were actually created.",
-        ],
+        "stages": stages,
+        "constraints": constraints,
     })
 
 
@@ -4257,6 +4437,7 @@ def _resolve_execution_plan(
     changed_paths: Optional[list[str]] = None,
     planned_paths: Optional[list[str]] = None,
     intent: str = "",
+    parallel_writers: int = 1,
 ) -> dict:
     impact = _impact_summary(
         cfg,
@@ -4275,7 +4456,7 @@ def _resolve_execution_plan(
     merged_categories = set(classification["categories"]) | set(intent_categories)
     classification = _classification_for_categories(merged_categories, len(classification_inputs))
     categories = set(classification["categories"])
-    matching_rules = _matching_gate_rules(classification_inputs, _gate_cfg(cfg))
+    matching_rules = _matching_risk_rules(classification_inputs, cfg)
     configured_profile = _configured_workflow_profile(cfg)
     requested_profile_value = _normalize_workflow_profile(requested_profile) if requested_profile else ""
     configured_mode = _workflow_mode(cfg)
@@ -4353,11 +4534,50 @@ def _resolve_execution_plan(
     execution_reasons = list(impact.get("reasons") or [])
     execution_reasons.append("Jenkins/build/deploy and owner acceptance happen after coding completion")
 
+    try:
+        writer_count = max(1, int(parallel_writers or 1))
+    except (TypeError, ValueError) as exc:
+        raise APError("parallel writer count must be a positive integer") from exc
+    module_roots = {
+        path.split("/", 1)[0]
+        for path in classification_inputs
+        if path and not _path_matches(path, _DOC_PATH_PATTERNS)
+    }
+    cross_module = len(module_roots) > 1
+    rule_review = any(
+        _text(rule.get("review")).lower() in {"required", "true", "yes"}
+        for rule in matching_rules
+    )
+    rule_design = any(
+        _text(rule.get("design")).lower() in {"required", "true", "yes"}
+        for rule in matching_rules
+    )
+    review_required = bool(effective_profile == "high-risk" or writer_count > 1 or cross_module or rule_review)
+    design_required = bool(rule_design or (effective_profile == "high-risk" and cross_module))
+    has_task_signal = bool(classification_inputs or _text(intent))
+    workspace_dirty = bool(_working_tree_paths(repo))
+    configured_isolation = _task_isolation(cfg)
+    if not has_task_signal:
+        execution_mode = "none"
+    elif configured_isolation == "worktree" or writer_count > 1 or workspace_dirty:
+        execution_mode = "isolated"
+    else:
+        execution_mode = "direct"
+    execution_reasons.append(
+        "execution mode is adaptive: clean single-writer work is direct; dirty or parallel work is isolated"
+    )
+
     needs_jenkins = False
     needs_target = False
-    needs_dd = bool(classification["needs_dd"] or effective_profile == "high-risk")
+    needs_dd = design_required
 
-    agent_plan = _agent_execution_plan(effective_profile, categories, classification)
+    agent_plan = _agent_execution_plan(
+        effective_profile,
+        categories,
+        classification,
+        parallel_writers=writer_count,
+        review_required=review_required,
+    )
     return {
         **impact,
         "contract_version": _AGENT_CONTRACT_VERSION,
@@ -4374,6 +4594,12 @@ def _resolve_execution_plan(
         "configured_mode": configured_mode,
         "requested_mode": requested_mode_value or None,
         "effective_mode": effective_mode,
+        "execution_mode": execution_mode,
+        "workspace_dirty": workspace_dirty,
+        "parallel_writers": writer_count,
+        "cross_module": cross_module,
+        "review_required": review_required,
+        "design_required": design_required,
         "selected_scope": selected_scope,
         "categories": sorted(categories),
         "needs_dd": needs_dd,
@@ -4381,7 +4607,13 @@ def _resolve_execution_plan(
         "needs_browser": classification["needs_browser"],
         "needs_jenkins": needs_jenkins,
         "needs_target": needs_target,
-        "recommended_agents": _recommended_agents(effective_profile, categories, classification),
+        "recommended_agents": _recommended_agents(
+            effective_profile,
+            categories,
+            classification,
+            parallel_writers=writer_count,
+            review_required=review_required,
+        ),
         "agent_plan": agent_plan,
     }
 
@@ -4410,6 +4642,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
         base_ref=_text(getattr(args, "base", "")),
         planned_paths=list(getattr(args, "planned_path", []) or []),
         intent="\n".join(part for part in intent_parts if part),
+        parallel_writers=int(getattr(args, "writers", 1) or 1),
     )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands: list[str] = []
@@ -4426,6 +4659,9 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"[classify] risk={risk}")
         print(f"[classify] profile={result['profile']}")
         print(f"[classify] effective_mode={result['effective_mode']}")
+        print(f"[classify] execution_mode={result['execution_mode']}")
+        print(f"[classify] review_required={str(result['review_required']).lower()}")
+        print(f"[classify] design_required={str(result['design_required']).lower()}")
         print(f"[classify] selected_scope={result['selected_scope']}")
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
         print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
@@ -4741,13 +4977,59 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 f"gate.rules[{index}].commands is legacy automatic gate escalation; run ap.py upgrade"
             )
 
-    if not (_configured_command(cfg, "gate_changed") or _configured_command(cfg, "quick_test")):
-        missing.append("fast gate command: commands.gate_changed or commands.quick_test")
+    risk_rules = _risk_cfg(cfg).get("rules") or []
+    if not isinstance(risk_rules, list):
+        validation_errors.append("risk.rules must be a list")
+        risk_rules = []
+    for index, rule in enumerate(risk_rules):
+        if not isinstance(rule, dict):
+            validation_errors.append(f"risk.rules[{index}] must be a mapping")
+            continue
+        if not _as_list(rule.get("paths")):
+            validation_errors.append(f"risk.rules[{index}].paths must not be empty")
+        rule_profile = _text(rule.get("profile")).lower()
+        if rule_profile and rule_profile not in _WORKFLOW_PROFILES - {"auto"}:
+            validation_errors.append(
+                f"risk.rules[{index}].profile must be micro, standard, or high-risk"
+            )
 
-    repo_docs = {
-        "docs.taskbook": Path(repo, str(docs_cfg.get("taskbook", "docs/tasks/taskbook.md"))),
-        "docs.closure_log": Path(repo, str(docs_cfg.get("closure_log", "docs/tasks/closure-log.md"))),
-    }
+    validation_cfg = _validation_cfg(cfg)
+    on_unmapped = _text(validation_cfg.get("on_unmapped")).lower() or "error"
+    if on_unmapped not in {"error", "fallback"}:
+        validation_errors.append("validation.on_unmapped must be error or fallback")
+    routes = validation_cfg.get("routes") or []
+    if not isinstance(routes, list):
+        validation_errors.append("validation.routes must be a list")
+        routes = []
+    for index, route in enumerate(routes):
+        if not isinstance(route, dict):
+            validation_errors.append(f"validation.routes[{index}] must be a mapping")
+            continue
+        if not _as_list(route.get("paths")):
+            validation_errors.append(f"validation.routes[{index}].paths must not be empty")
+        commands = [_command_name(item) for item in _as_list(route.get("commands"))]
+        if not commands:
+            validation_errors.append(f"validation.routes[{index}].commands must not be empty")
+        for command_name in commands:
+            if command_name and not _configured_command(cfg, command_name):
+                validation_errors.append(
+                    f"validation.routes[{index}] references missing commands.{command_name}"
+                )
+    fallback_name = _command_name(validation_cfg.get("fallback_command"))
+    if on_unmapped == "fallback" and not fallback_name:
+        validation_errors.append(
+            "validation.fallback_command is required when validation.on_unmapped=fallback"
+        )
+    if fallback_name and not _configured_command(cfg, fallback_name):
+        validation_errors.append(
+            f"validation.fallback_command references missing commands.{fallback_name}"
+        )
+    if not routes and not (_configured_command(cfg, "gate_changed") or fallback_name):
+        validation_errors.append(
+            "validation.routes is empty and no 3.x commands.gate_changed compatibility fallback exists"
+        )
+
+    repo_docs: dict[str, Path] = {}
     api_doc = Path(repo, str(docs_cfg.get("api_doc", "docs/interfaces/api.md")))
     api_change_log = Path(repo, str(docs_cfg.get("api_change_log", "docs/interfaces/api-change-log.md")))
     api_docs_enabled = (
@@ -5990,7 +6272,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     _require_workflow_policy_clean(repo, cfg)
-    _task_isolation(cfg)
+    configured_isolation = _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
         raise APError(
@@ -6010,8 +6292,6 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         if _read_json_object(_task_registry_path(repo, task_id)):
             raise APError(f"Task is already registered: {task_id}")
 
-        common_submodule_config = _common_submodule_config(repo)
-        _seed_control_submodule_config(repo)
         task_uuid = uuid.uuid4().hex
 
         if not getattr(args, "no_fetch", False) and base_ref.startswith(f"{remote}/"):
@@ -6041,6 +6321,86 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         if not owner:
             raise APError("task-start requires --owner or CODEX_THREAD_ID.")
         writer = _text(getattr(args, "writer", "")) or owner
+        writer_count = max(1, int(getattr(args, "writers", 1) or 1))
+        plan = _resolve_execution_plan(
+            cfg,
+            repo,
+            planned_paths=owned_paths,
+            parallel_writers=writer_count,
+        )
+        review_required = bool(getattr(args, "review_required", False) or plan["review_required"])
+        registry_dir = _task_state_root(repo) / "tasks"
+        other_active = any(
+            _text((payload or {}).get("state"))
+            not in {"", "integrated", "cleanup-pending"}
+            for payload in (
+                _read_json_object(path)
+                for path in sorted(registry_dir.glob("*.json"))
+            )
+        ) if registry_dir.exists() else False
+        current_branch = _current_branch(repo)
+        direct = bool(
+            configured_isolation == "adaptive"
+            and not bool(getattr(args, "isolated", False))
+            and writer_count == 1
+            and not other_active
+            and not _task_commit_paths(repo)
+            and current_branch
+            and current_branch == target_branch
+        )
+        if direct:
+            direct_base = _resolve_commit(repo, "HEAD")
+            manifest = {
+                "schema": 3,
+                "execution_mode": "direct",
+                "review_required": review_required,
+                "task_id": task_id,
+                "task_uuid": task_uuid,
+                "owner": owner,
+                "base_ref": "HEAD",
+                "base_sha": direct_base,
+                "remote": remote,
+                "target_branch": current_branch,
+                "task_branch": current_branch,
+                "worktree_path": str(repo.resolve()),
+                "control_worktree_path": str(repo.resolve()),
+                "cleanup_policy": _cleanup_policy(cfg),
+                "state": "active",
+                "created_at": _now_iso(),
+                "initial_untracked": [],
+                "owned_paths": owned_paths,
+                "depends_on": depends_on,
+                "prerequisite_shas": prerequisite_shas,
+                "writer_lease": {
+                    "holder": writer,
+                    "generation": 1,
+                    "state": "active",
+                    "acquired_at": _now_iso(),
+                },
+                "review": {
+                    "verdict": "pending",
+                    "diff_base": direct_base,
+                    "diff_head": "",
+                    "diff_fingerprint": "",
+                    "reviewer": "",
+                    "reviewed_at": "",
+                    "reason": "review required" if review_required else "review not required",
+                },
+                "claimed_paths": [],
+                "remote_task_tip": "",
+                "common_submodule_config": {},
+            }
+            _save_task_manifest(repo, manifest)
+            print(f"[task-start] task={task_id}")
+            print("[task-start] execution_mode=direct")
+            print(f"[task-start] branch={current_branch}")
+            print(f"[task-start] base=HEAD@{direct_base}")
+            print(f"[task-start] worktree={repo}")
+            print("[task-start] no temporary branch or worktree created")
+            return
+
+        common_submodule_config = _common_submodule_config(repo)
+        _seed_control_submodule_config(repo)
         prefix = _task_branch_prefix(cfg)
         task_branch = f"{prefix}{task_id}"
         check_ref = run(["git", "check-ref-format", "--branch", task_branch], cwd=repo, check=False)
@@ -6070,7 +6430,9 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             cwd=repo,
         )
         manifest = {
-            "schema": 2,
+            "schema": 3,
+            "execution_mode": "isolated",
+            "review_required": review_required,
             "task_id": task_id,
             "task_uuid": task_uuid,
             "owner": owner,
@@ -6142,9 +6504,9 @@ def cmd_task_start(args: argparse.Namespace) -> None:
                 f"branch={initial_branch or '(detached)'} head={initial_head}\n{initial_status}"
             )
         _save_task_manifest(repo, manifest)
-        _create_active_task_doc(worktree, cfg, manifest)
 
     print(f"[task-start] task={task_id}")
+    print("[task-start] execution_mode=isolated")
     print(f"[task-start] branch={task_branch}")
     print(f"[task-start] base={base_ref}@{base_sha}")
     print(f"[task-start] worktree={worktree}")
@@ -6530,6 +6892,14 @@ def cmd_task_finish(args: argparse.Namespace) -> None:
     cfg = _load_cfg(repo)
     task_id = _validate_task_id(args.task_id)
     manifest = _load_task_manifest(repo, task_id)
+    if _text(manifest.get("execution_mode")).lower() == "direct":
+        if repo.resolve() != Path(_text(manifest.get("worktree_path"))).resolve():
+            raise APError("Run task-finish for a direct task from its current checkout.")
+        if _task_commit_paths(repo) or _resolve_commit(repo, "HEAD") != _text(manifest.get("base_sha")):
+            raise APError("Direct task still has changes or commits; use commit-push instead of task-finish.")
+        _clear_direct_task(repo, manifest)
+        print(f"[task-finish] OK task={task_id} execution_mode=direct no temporary branch existed")
+        return
     _require_control_checkout(repo, manifest)
     timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
     with (
@@ -6555,6 +6925,8 @@ def cmd_task_integrate(args: argparse.Namespace) -> None:
     cfg = _load_cfg(repo)
     task_id = _validate_task_id(args.task_id)
     manifest = _load_task_manifest(repo, task_id)
+    if _text(manifest.get("execution_mode")).lower() == "direct":
+        raise APError("Direct tasks push their current target branch in commit-push and do not use task-integrate.")
     _require_control_checkout(repo, manifest)
     _require_current_writer(manifest, args)
     worktree = Path(_text(manifest.get("worktree_path")))
@@ -6914,12 +7286,119 @@ def _push_current_task(repo: Path, manifest: dict, expected_commit: str = "") ->
     return commit_sha
 
 
+def _clear_direct_task(repo: Path, manifest: dict) -> None:
+    active_path = _worktree_manifest_path(repo)
+    active = _read_json_object(active_path)
+    if active and _text(active.get("task_uuid")) == _text(manifest.get("task_uuid")):
+        active_path.unlink(missing_ok=True)
+    _delete_task_manifest(repo, manifest)
+
+
+def _cmd_direct_commit_push_locked(
+    args: argparse.Namespace,
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+) -> None:
+    _require_current_writer(manifest, args)
+    _require_dependencies(repo, manifest, _text(manifest.get("base_sha")))
+    _require_approved_review(repo, cfg, manifest)
+    branch = _current_branch(repo)
+    target = _text(manifest.get("target_branch"))
+    if branch != target:
+        raise APError(f"Direct task branch changed: current={branch or '(detached)'}, expected={target}.")
+    working_paths = _task_commit_paths(repo)
+    head = _resolve_commit(repo, "HEAD")
+    pending_commit = _text(manifest.get("last_commit"))
+    if not working_paths and not (pending_commit and pending_commit == head):
+        if head != _text(manifest.get("base_sha")):
+            raise APError(
+                "Direct task HEAD moved without a recorded commit-push result; refusing to guess ownership."
+            )
+        _clear_direct_task(repo, manifest)
+        print(f"[commit-push] NOOP task={manifest['task_id']} execution_mode=direct; no changes")
+        return
+
+    if pending_commit and pending_commit == head and not working_paths:
+        commit_sha = pending_commit
+        plan = _resolve_execution_plan(cfg, repo, base_ref=_text(manifest.get("base_sha")))
+    else:
+        cmd_doctor(
+            argparse.Namespace(
+                repo=str(repo),
+                profile=_text(getattr(args, "profile", "")).lower(),
+                mode=_text(getattr(args, "mode", "")).lower(),
+            )
+        )
+        plan = _resolve_execution_plan(
+            cfg,
+            repo,
+            requested_profile=_text(getattr(args, "profile", "")).lower(),
+            requested_mode=_text(getattr(args, "mode", "")).lower(),
+            base_ref=_text(manifest.get("base_sha")),
+        )
+        before_gate = _task_content_fingerprint(repo, cfg, manifest)
+        cmd_light_gate(
+            argparse.Namespace(
+                repo=str(repo),
+                scope="changed",
+                profile=plan["profile"],
+                mode="dev",
+                base=_text(manifest.get("base_sha")),
+                explain=False,
+            )
+        )
+        after_gate = _task_content_fingerprint(repo, cfg, manifest)
+        if after_gate != before_gate:
+            raise APError("The final gate changed direct-task files; inspect them and retry commit-push.")
+        manifest = _require_task_context(repo, cfg, args.task_id)
+        _require_current_writer(manifest, args)
+        _require_approved_review(repo, cfg, manifest)
+        task_paths = _task_commit_paths(repo)
+        staged = _stage_exact_paths(repo, task_paths)
+        if not staged:
+            _clear_direct_task(repo, manifest)
+            print(f"[commit-push] NOOP task={manifest['task_id']} execution_mode=direct; no changes")
+            return
+        unstaged = _unstaged_task_paths(repo)
+        if unstaged:
+            raise APError("Direct-task files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged))
+        commit_sha = _commit_exact_index(repo, args.msg)
+        manifest["state"] = "push-pending"
+        manifest["last_commit"] = commit_sha
+        _save_task_manifest(repo, manifest)
+    remote = _text(manifest.get("remote")) or "origin"
+    push = run(
+        ["git", "push", "--set-upstream", remote, f"{commit_sha}:refs/heads/{target}"],
+        cwd=repo,
+        check=False,
+    )
+    if push.returncode != 0:
+        raise APError(
+            f"Direct target push failed; the local commit is preserved on {branch}.\n"
+            f"{push.stdout}\n{push.stderr}"
+        )
+    remote_tip = _remote_branch_tip(repo, remote, target)
+    if remote_tip != commit_sha:
+        raise APError(
+            f"Direct target verification failed: expected {commit_sha}, got {remote_tip or '(missing)'}"
+        )
+    _clear_direct_task(repo, manifest)
+    print(
+        f"[commit-push] OK task={manifest['task_id']} execution_mode=direct "
+        f"profile={plan['profile']} scope=changed commit={commit_sha}"
+    )
+
+
 def _cmd_commit_push_locked(
     args: argparse.Namespace,
     repo: Path,
     cfg: dict,
     manifest: dict,
 ) -> None:
+    if _text(manifest.get("execution_mode")).lower() == "direct":
+        _cmd_direct_commit_push_locked(args, repo, cfg, manifest)
+        return
     control_repo = Path(_text(manifest.get("control_worktree_path"))).resolve()
     _sync_task_submodule_config(
         control_repo,
@@ -6954,8 +7433,6 @@ def _cmd_commit_push_locked(
         _validate_closure_result(mode, str(args.result))
 
     msg = args.msg
-    structure_check_status = "not part of the fast local gate"
-
     before_gate = _task_content_fingerprint(repo, cfg, manifest)
     cmd_light_gate(
         argparse.Namespace(
@@ -6983,22 +7460,6 @@ def _cmd_commit_push_locked(
             "Task-owned files changed after the gate. Review them and rerun commit-push; "
             "no files were staged or restored."
         )
-
-    dev_verification = args.verification or [
-        "fast changed-scope gate passed",
-        "project commit/push hooks remain enabled",
-    ]
-    _record_commit_push_closure(
-        repo,
-        args,
-        commit="generated by this commit-push run",
-        jenkins="owner-managed after push",
-        target_env="owner-managed acceptance",
-        verification=dev_verification,
-        result=args.result or "DEV-CLOSED",
-        follow_up=args.follow_up or "Complete the push stage with task-integrate; do not wait for Jenkins.",
-        structure_check=args.structure_check or structure_check_status,
-    )
 
     protected = set(manifest.get("initial_untracked") or [])
     _cleanup_generated_noise(repo, protected_paths=protected)
@@ -7099,8 +7560,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--planned-path", action="append")
     s.add_argument("--intent")
     s.add_argument("--intent-file")
+    s.add_argument("--writers", type=int, default=1)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
+
+    s = sp.add_parser("validation-map-check")
+    s.add_argument("--base")
+    s.add_argument("--path", action="append")
+    s.add_argument("--tracked", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_validation_map_check)
 
     s = sp.add_parser("structure-check")
     s.add_argument("--scope", choices=sorted(_GATE_SCOPES), default="")
@@ -7196,6 +7665,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--worktree-root")
     s.add_argument("--owner")
     s.add_argument("--writer")
+    s.add_argument("--writers", type=int, default=1)
+    s.add_argument("--isolated", action="store_true")
+    s.add_argument("--review-required", action="store_true")
     s.add_argument("--owned-path", action="append")
     s.add_argument("--depends-on", action="append", metavar="TASK_ID=SHA")
     s.add_argument("--no-fetch", action="store_true")

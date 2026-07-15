@@ -1,4 +1,6 @@
-Use `auto-coding-skill` for this repository.
+This repository is the source of `auto-coding-skill`. Do not apply the installed
+project workflow to development of the skill itself; maintain it directly on the
+current repository branch.
 
 Install the shared `.agents` target with:
 

@@ -79,6 +79,11 @@ def base_config(isolation: str | object = "adaptive") -> dict:
             "no_change_scope": "changed",
             "rules": [],
         },
+        "risk": {
+            "rules": [
+                {"name": "test-review", "paths": ["**"], "review": "required"},
+            ],
+        },
         "structure": {"enabled": False, "enforcement": "advisory"},
         "verification": {
             "target_env_required": False,
@@ -109,7 +114,9 @@ def base_config(isolation: str | object = "adaptive") -> dict:
 class AutoCodingConcurrencyTests(unittest.TestCase):
     def make_repo(
         self,
-        isolation: str | object = "adaptive",
+        isolation: str | object = "worktree",
+        *,
+        require_review: bool = True,
     ) -> tuple[Path, Path, Path]:
         temp = tempfile.TemporaryDirectory(prefix="autocoding-concurrency-")
         self.addCleanup(temp.cleanup)
@@ -125,6 +132,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         git(repo, "config", "user.name", "Auto Coding Test")
 
         config = base_config(isolation)
+        if not require_review:
+            config["risk"]["rules"] = []
         if "concurrency" in config:
             config["concurrency"]["worktree_root"] = str(worktrees)
         engineering = repo / "docs" / "ENGINEERING.md"
@@ -202,6 +211,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "origin/dev",
             "--owned-path",
             ".",
+            "--isolated",
+            "--review-required",
         )
         worktree = self.task_worktree(repo, task_id)
         self.assertIn(task_id, result.stdout + result.stderr)
@@ -358,19 +369,42 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             ),
             "task-start must persist a task manifest in the Git common directory",
         )
-        active_task = (worktree / "docs" / "tasks" / "active" / "START-1.md").read_text(
-            encoding="utf-8"
+        self.assertFalse(
+            (worktree / "docs" / "tasks" / "active" / "START-1.md").exists(),
+            "4.0 machine state must not create tracked active-task documents",
         )
-        for field in [
-            "Worktree:",
-            "Orchestrator:",
-            "Owning fixer:",
-            "Owned paths:",
-            "Depends on integrated tasks:",
-            "Reviewer / stable diff:",
-            "Review verdict:",
-        ]:
-            self.assertIn(field, active_task)
+
+    def test_clean_serial_task_uses_direct_branch_and_no_diff_is_noop(self) -> None:
+        _, repo, remote = self.make_repo("adaptive", require_review=False)
+        worktrees_before = git_output(repo, "worktree", "list", "--porcelain")
+        start = self.ap(
+            repo,
+            "task-start",
+            "DIRECT-1",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "shared.txt",
+        )
+        self.assertIn("execution_mode=direct", start.stdout)
+        self.assertEqual(worktrees_before, git_output(repo, "worktree", "list", "--porcelain"))
+        self.assert_local_branch(repo, "codex/DIRECT-1", False)
+        status = json.loads(self.ap(repo, "task-status", "DIRECT-1", "--json").stdout)["tasks"][0]
+        self.assertEqual("direct", status["execution_mode"])
+        self.assertFalse((repo / "docs" / "tasks" / "active" / "DIRECT-1.md").exists())
+
+        (repo / "shared.txt").write_text("direct\n", encoding="utf-8")
+        pushed = self.ap(repo, "commit-push", "DIRECT-1", "--msg", "DIRECT-1: update")
+        self.assertIn("execution_mode=direct", pushed.stdout)
+        self.assertEqual("direct", git_output(remote, "show", "refs/heads/dev:shared.txt"))
+        self.assertFalse(self.registry_manifest_path(repo, "DIRECT-1").exists())
+
+        before = git_output(repo, "rev-parse", "HEAD")
+        self.ap(repo, "task-start", "DIRECT-NOOP", "--owned-path", "shared.txt")
+        noop = self.ap(repo, "commit-push", "DIRECT-NOOP", "--msg", "DIRECT-NOOP: none")
+        self.assertIn("NOOP", noop.stdout)
+        self.assertEqual(before, git_output(repo, "rev-parse", "HEAD"))
+        self.assertFalse(self.registry_manifest_path(repo, "DIRECT-NOOP").exists())
 
     def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
         _, repo, _ = self.make_repo()
@@ -780,7 +814,6 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("worktree", (primary.stdout + primary.stderr).lower())
 
         second_status = git(second_worktree, "status", "--short").stdout
-        self.assertIn("?? docs/tasks/active/", second_status)
         self.assertIn("?? second-task-only.txt", second_status)
         self.approve_task(worktree, "ISOLATED-1")
         self.approve_task(second_worktree, "ISOLATED-2")

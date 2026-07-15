@@ -172,7 +172,7 @@ function compareDirs(src, dst, options = {}){
   return diffs;
 }
 
-const CORE_DOCS = ["tasks/taskbook.md", "tasks/closure-log.md"];
+const CORE_DOCS = [];
 
 function isEscapedAt(text, index){
   let slashes = 0;
@@ -380,7 +380,7 @@ function inferredGateCommands(project){
     const scripts = parsed?.scripts;
     if (!scripts || typeof scripts !== "object") return {};
     return typeof scripts["test:changed"] === "string" && scripts["test:changed"].trim()
-      ? { gate_changed: "npm run test:changed" }
+      ? { project_fast: "npm run test:changed" }
       : {};
   } catch {
     return {};
@@ -393,7 +393,7 @@ function renderEngineeringTemplate(templateText, project){
     `project:\n  name: ${JSON.stringify(path.basename(path.resolve(project)))}`,
   );
   for (const [key, gate] of Object.entries(inferredGateCommands(project))) {
-    rendered = rendered.replace(`  ${key}: "git diff --check"`, `  ${key}: ${JSON.stringify(gate)}`);
+    rendered = rendered.replace(`  ${key}: ""`, `  ${key}: ${JSON.stringify(gate)}`);
   }
   return rendered;
 }
@@ -829,7 +829,7 @@ function registeredLegacyTasks(project){
       continue;
     }
     const schema = Number(manifest?.schema ?? 0);
-    if (!Number.isFinite(schema) || schema < 2) {
+    if (!Number.isFinite(schema) || schema < 3) {
       legacy.push({ project: root, manifest: entry.name, schema: Number.isFinite(schema) ? schema : "invalid" });
     }
   }
@@ -841,9 +841,9 @@ function assertNoLegacyRegisteredTasks(projects){
   if (!legacy.length) return;
   const locations = legacy.map(item => `${item.project}:${item.manifest}(schema=${item.schema})`).join(", ");
   die(
-    "refusing the entire sync batch because registered auto-coding tasks use schema < 2: "
-    + `${locations}\nFinish, integrate, and clean these tasks with the currently installed 3.0.0 runtime before upgrading. `
-    + "sync will not infer or auto-claim owned paths for legacy tasks.",
+    "refusing the entire sync batch because registered auto-coding tasks use schema < 3: "
+    + `${locations}\nFinish, integrate, and clean these tasks with the currently installed 3.x runtime before upgrading. `
+    + "sync will not change the lifecycle semantics of an in-flight task.",
   );
 }
 
@@ -1017,6 +1017,7 @@ function projectStatus(project, assetSkill, assetAgents){
   const managedWorkflow = publicEngineeringPlan(engineeringPlan);
   const managedAgentsDocument = publicEngineeringPlan(agentsDocumentPlan);
   const requiredConfigPaths = [
+    { label: "workflow.skill_version", path: ["workflow", "skill_version"] },
     { label: "workflow.mode", path: ["workflow", "mode"] },
     { label: "workflow.profile", path: ["workflow", "profile"] },
     { label: "workflow.completion", path: ["workflow", "completion"] },
@@ -1028,6 +1029,10 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "concurrency.cleanup_merged", path: ["concurrency", "cleanup_merged"] },
     { label: "concurrency.delete_remote_branch", path: ["concurrency", "delete_remote_branch"] },
     { label: "concurrency.disposable_ignored", path: ["concurrency", "disposable_ignored"] },
+    { label: "commands.project_fast", path: ["commands", "project_fast"], filled: true },
+    { label: "validation.on_unmapped", path: ["validation", "on_unmapped"] },
+    { label: "validation.routes", path: ["validation", "routes"] },
+    { label: "risk.rules", path: ["risk", "rules"] },
     { label: "project.name", path: ["project", "name"], filled: true },
     { label: "access.project.frontend.url", path: ["access", "project", "frontend", "url"], filled: true },
     { label: "access.project.frontend.username", path: ["access", "project", "frontend", "username"], filled: true },
@@ -1047,11 +1052,6 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "access.nexus.frontend.url", path: ["access", "nexus", "frontend", "url"], filled: true },
     { label: "access.nexus.frontend.username", path: ["access", "nexus", "frontend", "username"], filled: true },
     { label: "access.nexus.frontend.password", path: ["access", "nexus", "frontend", "password"], filled: true },
-    { label: "docs.taskbook", path: ["docs", "taskbook"] },
-    { label: "docs.closure_log", path: ["docs", "closure_log"] },
-    { label: "docs.active_task_dir", path: ["docs", "active_task_dir"] },
-    { label: "docs.task_closure_dir", path: ["docs", "task_closure_dir"] },
-    { label: "docs.task_evidence_dir", path: ["docs", "task_evidence_dir"] },
   ];
   let missingConfigPaths = requiredConfigPaths.map(item => item.label);
   let unfilledConfigTokens = [];
@@ -1082,7 +1082,7 @@ function projectStatus(project, assetSkill, assetAgents){
   for (const rel of CORE_DOCS) {
     if (!exists(path.join(root, "docs", rel))) missingDocs.push(path.join("docs", rel));
   }
-  const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir, { includeExtra: false }) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
+  const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir, { includeExtra: true }) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
   const agentStatus = exists(agentsDir)
     ? compareManagedAgents(assetAgents, agentsDir)
     : { diffs: [{ path: ".agents/agents", status: "missing" }], bindings: [] };

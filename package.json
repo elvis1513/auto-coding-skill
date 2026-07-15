@@ -1,7 +1,7 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "3.0.4",
-  "description": "CLI installer for an isolated .agents engineering workflow with parallel Git worktrees, fast local gates, push-based completion, and safe cleanup.",
+  "version": "4.0.0",
+  "description": "CLI installer for a delivery-first .agents workflow with adaptive Git isolation, routed changed-scope validation, risk-based review, push completion, and safe cleanup.",
   "type": "module",
   "bin": {
     "autocoding": "cli/src/index.js"

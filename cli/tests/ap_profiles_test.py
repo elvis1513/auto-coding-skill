@@ -50,9 +50,9 @@ def base_config() -> dict:
         },
         "gate": {
             "default_scope": "auto",
-            "fallback_scope": "standard",
-            "full_on_unknown": True,
-            "no_change_scope": "standard",
+            "fallback_scope": "changed",
+            "full_on_unknown": False,
+            "no_change_scope": "changed",
             "rules": [],
         },
         "structure": {"enabled": False, "enforcement": "advisory"},
@@ -243,32 +243,63 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("standard", plan["profile"])
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
-        self.assertEqual(["explorer", "fixer", "reviewer"], plan["recommended_agents"])
+        self.assertEqual([], plan["recommended_agents"])
         agent_plan = plan["agent_plan"]
-        self.assertEqual("orchestrated-subagents", agent_plan["strategy"])
-        self.assertEqual(
-            ["decomposition", "discovery", "design", "delivery", "closure"],
-            [stage["id"] for stage in agent_plan["stages"]],
-        )
+        self.assertEqual("main-only", agent_plan["strategy"])
+        self.assertEqual(["delivery"], [stage["id"] for stage in agent_plan["stages"]])
         self.assertTrue(agent_plan["policies"]["one_writer_per_worktree"])
-        self.assertEqual("explicit-non-overlapping", agent_plan["policies"]["path_ownership"])
+        self.assertEqual("explicit-only-for-isolated-or-delegated-work", agent_plan["policies"]["path_ownership"])
         self.assertEqual(
             "integrate-before-dependent-start",
             agent_plan["policies"]["dependency_policy"],
         )
-        self.assertEqual("owning-fixer", agent_plan["policies"]["review_feedback_owner"])
-        self.assertEqual("diff-fingerprint", agent_plan["policies"]["review_binding"])
+        self.assertEqual("main", agent_plan["policies"]["review_feedback_owner"])
+        self.assertEqual("diff-fingerprint-when-required", agent_plan["policies"]["review_binding"])
         self.assertEqual("main", agent_plan["policies"]["lifecycle_owner"])
         self.assertIn("owned_paths", agent_plan["assignment_contract"]["writer"])
         self.assertIn("diff_fingerprint", agent_plan["assignment_contract"]["reviewer"])
         self.assertIn("diff_fingerprint", agent_plan["result_contract"])
         delivery = next(stage for stage in agent_plan["stages"] if stage["id"] == "delivery")
-        self.assertEqual("dependency-waves", delivery["mode"])
-        self.assertEqual(
-            ["implementation", "review", "gate-integrate"],
-            [phase["id"] for phase in delivery["wave_phases"]],
+        self.assertEqual("serial", delivery["mode"])
+        self.assertFalse(plan["review_required"])
+
+    def test_execution_mode_is_none_direct_isolated_or_parallel(self) -> None:
+        repo, cfg = self.make_repo()
+        self.assertEqual("none", self.plan(repo, cfg)["execution_mode"])
+        direct = self.plan(repo, cfg, planned_paths=["src/widget.py"])
+        self.assertEqual("direct", direct["execution_mode"])
+        dirty = repo / "existing.txt"
+        dirty.write_text("user change\n", encoding="utf-8")
+        isolated = self.plan(repo, cfg, planned_paths=["src/widget.py"])
+        self.assertEqual("isolated", isolated["execution_mode"])
+        dirty.unlink()
+        parallel = self.plan(
+            repo,
+            cfg,
+            planned_paths=["src/widget.py"],
+            parallel_writers=2,
         )
-        self.assertIn("integrated", delivery["next_wave"])
+        self.assertEqual("isolated", parallel["execution_mode"])
+        self.assertTrue(parallel["review_required"])
+        self.assertIn("fixer", parallel["recommended_agents"])
+
+    def test_validation_routes_collect_all_commands_and_reject_unmapped_code(self) -> None:
+        repo, cfg = self.make_repo()
+        cfg["commands"] = {"one": "true", "two": "true"}
+        cfg["validation"] = {
+            "on_unmapped": "error",
+            "routes": [
+                {"name": "all-src", "paths": ["src/**"], "commands": ["one", "two"]},
+                {"name": "python", "paths": ["**/*.py"], "commands": ["two"]},
+            ],
+        }
+        plan = ap._validation_plan(cfg, ["src/widget.py"])
+        self.assertEqual(["one", "two"], plan["commands"])
+        self.assertEqual(["all-src", "python"], plan["matched_routes"])
+        ap._validate_validation_plan(cfg, plan)
+        with self.assertRaises(APError) as context:
+            ap._validate_validation_plan(cfg, ap._validation_plan(cfg, ["contracts/api.yaml"]))
+        self.assertIn("no validation route", str(context.exception))
 
     def test_test_only_change_resolves_micro(self) -> None:
         repo, cfg = self.make_repo("tests/widget_test.py")
@@ -292,7 +323,8 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("high-risk", plan["profile"])
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
-        self.assertTrue(plan["needs_dd"])
+        self.assertFalse(plan["needs_dd"])
+        self.assertTrue(plan["review_required"])
         self.assertIn("reviewer", plan["recommended_agents"])
         self.assertFalse(plan["needs_jenkins"])
         self.assertFalse(plan["needs_target"])
@@ -303,7 +335,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         discovery = next(stage for stage in plan["agent_plan"]["stages"] if stage["id"] == "discovery")
         self.assertEqual("parallel", discovery["mode"])
         self.assertEqual(
-            ["explorer", "docs_researcher", "browser_debugger"],
+            ["docs_researcher", "browser_debugger"],
             discovery["roles"],
         )
         flattened = [
@@ -511,8 +543,9 @@ class AutoCodingProfileTests(unittest.TestCase):
 
         migrated, body = ap._read_frontmatter_markdown(engineering)
         self.assertNotIn("full_on", migrated["gate"])
-        self.assertNotIn("scope", migrated["gate"]["rules"][0])
-        self.assertNotIn("commands", migrated["gate"]["rules"][0])
+        self.assertEqual([], migrated["gate"]["rules"])
+        self.assertEqual("high-risk", migrated["risk"]["rules"][0]["profile"])
+        self.assertEqual(["gate_full"], migrated["validation"]["routes"][-1]["commands"])
         self.assertEqual("true", migrated["commands"]["gate_full"])
         self.assertNotIn("must run the full gate", body)
 
@@ -568,7 +601,7 @@ class AutoCodingProfileTests(unittest.TestCase):
                 repo, _ = self.make_repo(config=cfg)
                 with self.assertRaises(APError) as context:
                     ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
-                self.assertIn("fast gate command", str(context.exception))
+                self.assertIn("validation.routes", str(context.exception))
 
     def test_doctor_requires_direct_access_password_even_with_env_reference(self) -> None:
         cfg = base_config()

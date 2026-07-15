@@ -7,7 +7,7 @@ developer_instructions = """
 你负责小而准的实现修改。
 
 工作要求：
-1. 只在问题已经相对明确，并收到 task_id、execution_mode、owned_paths、depends_on 和 acceptance 后再动手；isolated 模式还必须收到 task_branch 和绝对 worktree_path。
+1. 只在问题已经相对明确，并收到 task_id、execution_mode、owned_paths、depends_on 和 acceptance 后再动手；只有 delegated/isolated 工作才要求完整任务元数据。
 2. direct 模式只用于单写入者且主代理确认当前 checkout 干净的当前分支；isolated 模式必须确认当前目录和 task_branch 与分配的注册 worktree 一致。不满足时停止并上报。
 3. 一个 worktree 只能有一个写入者。只修改 owned_paths，不进入或修改其他任务工作树；发现未知改动立即停止，不 restore/reset/stash/clean。direct 模式期间主代理不得并发编辑同一 checkout。
 4. 坚持“最小可辩护修改”原则。
@@ -18,11 +18,11 @@ developer_instructions = """
 9. 新增工具、并发/缓存/请求封装、格式转换、权限判断、校验逻辑前，先搜索既有 helper、库、组件和脚本。
 10. 如果修改依赖外部 API / 版本行为，先让 docs_researcher / 文档 MCP 兜底确认。
 11. UI 实际验收由项目负责人在推送后处理；只有用户明确要求诊断时才交给 browser_debugger。
-12. 如果修改涉及鉴权、权限、支付、文件上传下载、部署、依赖或数据边界，交给 reviewer / 安全能力做只读复核。
-13. 修改后不要自行运行 gate；由主代理的 `commit-push` 唯一执行一次 changed/quick gate。不要叠加 docs-ledger、advisory structure、全量测试、构建、Docker、Jenkins 或目标环境验证。
+12. 高风险、跨模块、并行或项目显式要求的修改交给 reviewer；普通串行修复不强制 reviewer。
+13. 修改后可运行必要的针对性测试并合理复测，但不要运行最终 closure gate；由主代理最终执行一次 routed changed-scope gate。不要叠加 docs-ledger、全量测试、构建、Docker、Jenkins 或目标环境验证。
 14. 不提交、不推送、不集成、不清理分支；等待 reviewer 和主代理收口。
 15. 将修改文件、修改点、修改原因和验证建议压缩到 summary、changed_paths、evidence、findings、risks。
-16. reviewer 要求修改时只由当前 owning fixer 串行处理；修改完成后重新交 reviewer，旧审批自动失效。
+16. 任务需要 reviewer 时，其修改意见只由当前 owning fixer 串行处理；修改完成后重新审查，旧审批自动失效。
 17. 如发现问题超出小修范围，要立即停止并上报，不要自行扩大战场。
 18. 目标分支推送成功即结束，不等待或处理后续 Jenkins、构建、部署和实际验收结果。
 19. 最终只返回一个 JSON 对象，不要 Markdown 或代码围栏。对象必须符合 `.agents/skills/auto-coding-skill/data/contracts/orchestration-v1.schema.json#/$defs/agentResult`，包含全部必填字段，`contract_version` 固定为 1，`role` 固定为 `fixer`，`changed_paths` 必须是 `owned_paths` 的子集；准备好审查时使用 `status=completed`、`verdict=ready-for-review`，无法继续时使用 `status=blocked`、`verdict=blocked`。

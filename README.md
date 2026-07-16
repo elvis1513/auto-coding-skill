@@ -9,6 +9,7 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
+Version 4.2.5 keeps JSX self-closing and closing-tag slashes out of regex state.
 Version 4.2.4 fixes TypeScript function-body detection after an explicit return
 type. Version 4.2.3 restores an explicit opt-in strict size-warning policy without
 changing the default, makes semicolon-terminated Java/Kotlin imports visible to
@@ -289,6 +290,12 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.5
+
+- Prevented standalone JSX `/>` and closing-tag `</...>` slashes from starting a
+  JavaScript regex token during function-range scans. GeeStack now matches its
+  TypeScript AST size baseline, and XJMate strict full structure passes cleanly.
 
 ## What changed in 4.2.4
 

@@ -1911,6 +1911,72 @@ class AutoCodingProfileTests(unittest.TestCase):
                 1,
                 5,
             ),
+            (
+                "self-closing-jsx.tsx",
+                [
+                    "function CompactView({ value }: { value: string }) {",
+                    "  return (",
+                    "    <section>",
+                    "      <Widget",
+                    "        value={value}",
+                    "      />",
+                    '      <span title="login/payment">{value}</span>',
+                    "    </section>",
+                    "  );",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                10,
+            ),
+            (
+                "self-closing-expression-jsx.tsx",
+                [
+                    "const CompactIcon = () => (",
+                    "  <svg>",
+                    "    <path",
+                    "      d=\"M0 0\"",
+                    "    />",
+                    '    <text aria-label="login/payment">ok</text>',
+                    "  </svg>",
+                    ");",
+                    "const after = 1;",
+                ],
+                1,
+                8,
+            ),
+            (
+                "conditional-self-closing-jsx.tsx",
+                [
+                    "function ConditionalView({ show }: { show: boolean }) {",
+                    "  return (",
+                    "    <section>",
+                    "      {show && <Widget",
+                    '        value="ready"',
+                    "      />}",
+                    "    </section>",
+                    "  );",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                9,
+            ),
+            (
+                "conditional-self-closing-expression.tsx",
+                [
+                    "const ConditionalView = ({ show }: { show: boolean }) => (",
+                    "  <section>",
+                    "    {show && <Widget",
+                    '      value="ready"',
+                    "    />}",
+                    "  </section>",
+                    ");",
+                    "const after = 1;",
+                ],
+                1,
+                7,
+            ),
         ]
         trailing_top_level_lines = [f"top_level_{index} = {index}" for index in range(20)]
         for path, lines, start_line, expected_size in fixtures:
@@ -1970,6 +2036,207 @@ class AutoCodingProfileTests(unittest.TestCase):
             "};",
         ]
         self.assertEqual(1, len(ap._function_size_warnings("regex.js", js_lines, 120)))
+
+        regex_gt_lines = [
+            "function block() {",
+            "  const matcher = />}/;",
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "}",
+        ]
+        self.assertEqual(1, len(ap._function_size_warnings("regex-gt.js", regex_gt_lines, 120)))
+        closing_tag_regex_lines = [
+            "function block() {",
+            "  const matcher = /section>}/;",
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "}",
+        ]
+        self.assertEqual(
+            1,
+            len(ap._function_size_warnings("closing-tag-regex.js", closing_tag_regex_lines, 120)),
+        )
+        comparison_regex_lines = [
+            "function block() {",
+            '  const matched = value</section>}/.test("section>}");',
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "}",
+        ]
+        self.assertEqual(
+            1,
+            len(ap._function_size_warnings("comparison-regex.js", comparison_regex_lines, 120)),
+        )
+        semicolon_regex_lines = [
+            "function block() {",
+            r'  const matched = value</section>;\}/.test("section>;} ");',
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "}",
+        ]
+        self.assertEqual(
+            1,
+            len(ap._function_size_warnings("semicolon-regex.js", semicolon_regex_lines, 120)),
+        )
+        for suffix_expression in ["/}/ as RegExp", "/}/ satisfies RegExp"]:
+            ts_regex_lines = [
+                "function block() {",
+                f"  const matcher = {suffix_expression};",
+                *[f"  const value_{index} = {index};" for index in range(130)],
+                "}",
+            ]
+            with self.subTest(suffix_expression=suffix_expression):
+                self.assertEqual(
+                    1,
+                    len(ap._function_size_warnings("regex-suffix.ts", ts_regex_lines, 120)),
+                )
+        for prefix_expression in [
+            'const html = "<Tag>";',
+            "const pattern = /<Tag>/;",
+            "foo<Tag>();",
+            "const typed: Box<Tag> | null = null;",
+            "const cast = box as Box<Tag>;",
+            "const first = <A></A>; const second = <B></B>;",
+        ]:
+            prefixed_regex_lines = [
+                "function block() {",
+                f"  {prefix_expression} const matched = value</section>}}/.test(text);",
+                *[f"  const value_{index} = {index};" for index in range(130)],
+                "}",
+            ]
+            with self.subTest(prefix_expression=prefix_expression):
+                self.assertEqual(
+                    1,
+                    len(ap._function_size_warnings("prefixed-regex.ts", prefixed_regex_lines, 120)),
+                )
+        for generic_comparison in [
+            "  const matched = (box as Box<Tag>).value</section>}/.test(text);",
+            "  const matched: boolean | Box<Tag> = value</section>}/.test(text);",
+            "  const matched = (<Outer>{foo<Tag>()}</Outer>) && value</section>}/.test(text);",
+            "  const matched = (<Outer>{(box as Box<Tag>).value}</Outer>) && value</section>}/.test(text);",
+            "  const matched = (<Outer>{show && <Tag>hello</Tag>}</Outer>) && value</section>}/.test(text);",
+            "  const matched = (<Outer>hello<Tag>world</Tag></Outer>) && value</section>}/.test(text);",
+        ]:
+            generic_regex_lines = [
+                "function block() {",
+                generic_comparison,
+                *[f"  const value_{index} = {index};" for index in range(130)],
+                "}",
+            ]
+            with self.subTest(generic_comparison=generic_comparison):
+                self.assertEqual(
+                    1,
+                    len(ap._function_size_warnings("generic-regex.ts", generic_regex_lines, 120)),
+                )
+        comparison = "const matched = value</>}/.test(text);"
+        self.assertTrue(ap._looks_like_regex_start(comparison, comparison.index("/")))
+        named_comparison = "const matched = value</section>}/.test(text);"
+        self.assertTrue(ap._looks_like_regex_start(named_comparison, named_comparison.index("/")))
+        assigned = "const matcher = /section>}/;"
+        self.assertTrue(ap._looks_like_regex_start(assigned, assigned.index("/")))
+        returned = "return /foo>/;"
+        self.assertTrue(ap._looks_like_regex_start(returned, returned.index("/")))
+        self.assertFalse(ap._looks_like_regex_start("    />", 4))
+        self.assertFalse(ap._looks_like_regex_start("    </section>", 5))
+        self.assertFalse(ap._looks_like_regex_start("    </_Private>", 5))
+        self.assertFalse(ap._looks_like_regex_start("    </$Component>", 5))
+        self.assertFalse(ap._looks_like_regex_start("    />}", 4))
+        self.assertFalse(ap._looks_like_regex_start("    /> : null}", 4))
+        jsx_close_same_line = "    />}</section>;"
+        self.assertFalse(ap._looks_like_regex_start(jsx_close_same_line, 4))
+
+        jsx_block = [
+            "function F() {",
+            "  return <section>",
+            "    {show && <Widget",
+            "      x={1}",
+            "    />}</section>;",
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "}",
+        ]
+        self.assertEqual(1, len(ap._function_size_warnings("jsx-block.tsx", jsx_block, 120)))
+
+        jsx_expression = [
+            "const F = () => (",
+            "  <section>",
+            "    {show && <Widget",
+            "      x={1}",
+            "    />}</section>",
+            ");",
+            "const after = 1;",
+        ]
+        arrow_location = ap._find_arrow_locations(jsx_expression, 0, None)[0]
+        self.assertEqual(
+            (6, False),
+            ap._expression_arrow_end(jsx_expression, 0, arrow_location, 6, None, ".tsx"),
+        )
+        self.assertEqual([], ap._function_size_warnings("jsx-expression.tsx", jsx_expression, 6))
+
+        trailing_jsx_expressions = [
+            ["const F = () => <Tag></Tag>; // comment", "const after = 1;"],
+            ["const F = () => <Tag></Tag>; /* comment */", "const after = 1;"],
+            ["const F = () => <Tag></Tag> / divisor;", "const after = 1;"],
+            ["const F = () => <Tag>hello</Tag>/(divisor);", "const after = 1;"],
+            ["const F = () => <></>; // comment", "const after = 1;"],
+            [
+                "const F = () => (",
+                "  <Widget",
+                "    value={1}",
+                "  />); // comment",
+                "const after = 1;",
+            ],
+        ]
+        for expression in trailing_jsx_expressions:
+            with self.subTest(expression=expression):
+                arrow_location = ap._find_arrow_locations(expression, 0, None)[0]
+                expected_end = len(expression) - 1
+                self.assertEqual(
+                    (expected_end, False),
+                    ap._expression_arrow_end(
+                        expression, 0, arrow_location, expected_end, None, ".tsx"
+                    ),
+                )
+                self.assertEqual(
+                    [],
+                    ap._function_size_warnings("trailing-jsx.tsx", expression, expected_end),
+                )
+
+        multiline_jsx_text = [
+            "const F = () => (",
+            "  <Tag>",
+            "    hello</Tag>/(divisor)",
+            ");",
+            "const after = 1;",
+        ]
+        arrow_location = ap._find_arrow_locations(multiline_jsx_text, 0, None)[0]
+        self.assertEqual(
+            (4, False),
+            ap._expression_arrow_end(multiline_jsx_text, 0, arrow_location, 4, None, ".tsx"),
+        )
+        self.assertEqual([], ap._function_size_warnings("multiline-jsx.tsx", multiline_jsx_text, 4))
+
+        for jsx_expression_body in [
+            '  {value</section>}/.test(text) ? "yes" : "no"}',
+            '  {/>}/.test(text) ? "yes" : "no"}',
+        ]:
+            jsx_regex_expression = [
+                "const F = () => <Tag>",
+                jsx_expression_body,
+                "</Tag>;",
+                "const after = 1;",
+            ]
+            with self.subTest(jsx_expression_body=jsx_expression_body):
+                arrow_location = ap._find_arrow_locations(jsx_regex_expression, 0, None)[0]
+                self.assertEqual(
+                    (3, False),
+                    ap._expression_arrow_end(
+                        jsx_regex_expression, 0, arrow_location, 3, None, ".tsx"
+                    ),
+                )
+                self.assertEqual(
+                    1,
+                    len(
+                        ap._function_size_warnings(
+                            "jsx-regex-expression.tsx", jsx_regex_expression, 2
+                        )
+                    ),
+                )
 
         separate_declarations = [
             'const label = "ready"',

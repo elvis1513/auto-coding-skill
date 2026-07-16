@@ -85,7 +85,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.4", "engineering": "4.2.4"},
+    "managed_versions": {"agents": "4.2.5", "engineering": "4.2.5"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -1148,8 +1148,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.4":
-        workflow_cfg["skill_version"] = "4.2.4"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.5":
+        workflow_cfg["skill_version"] = "4.2.5"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1462,16 +1462,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.4\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.5\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.4.md"
+            archive = archive_dir / "AGENTS.pre-4.2.5.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.4-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.5-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -4370,13 +4370,138 @@ def _ensure_structure_deadline(deadline: Optional[float]) -> None:
         raise APError("Final changed-scope gate timed out during structure check.")
 
 
+_JSX_TAG_RE = re.compile(r"</?>|</?[A-Za-z_$][A-Za-z0-9_.$:-]*(?:\s[^<>]*?)?/?>")
+_JSX_NONCODE_RE = re.compile(
+    r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|//.*|/\*.*?\*/'''
+)
+
+
+def _mask_jsx_noncode(text: str) -> str:
+    masked = list(_JSX_NONCODE_RE.sub(lambda match: " " * len(match.group(0)), text))
+    for index, char in enumerate(masked):
+        if char != "/":
+            continue
+        prefix = "".join(masked[:index]).rstrip()
+        regex_context = prefix.endswith(("=", "(", "[", "{", ",", ":", ";", "!", "?")) or bool(
+            re.search(r"\b(?:return|case|throw|yield)\s*$", prefix)
+        )
+        if not regex_context:
+            continue
+        terminator = _regex_line_terminator(text, index)
+        if terminator is None:
+            continue
+        suffix = terminator + 1
+        while suffix < len(text) and text[suffix] in "dgimsuvy":
+            suffix += 1
+        masked[index:suffix] = " " * (suffix - index)
+    return "".join(masked)
+
+
+def _jsx_prefix_has_open_tag(text: str) -> bool:
+    masked = _mask_jsx_noncode(text)
+    depth = 0
+    expression_depth = 0
+    cursor = 0
+    for match in _JSX_TAG_RE.finditer(masked):
+        for char in masked[cursor:match.start()]:
+            if depth <= 0:
+                continue
+            if char == "{":
+                expression_depth += 1
+            elif char == "}" and expression_depth > 0:
+                expression_depth -= 1
+        token = match.group(0)
+        if token.startswith("</"):
+            depth = max(0, depth - 1)
+        elif token != "</>" and not token.endswith("/>"):
+            previous = masked[:match.start()].rstrip()
+            following = masked[match.end():].lstrip()
+            if (
+                previous
+                and (previous[-1].isalnum() or previous[-1] in {"_", "$"})
+                and (
+                    depth == 0
+                    or expression_depth > 0
+                    or following.startswith(("(", ".", "?."))
+                )
+            ):
+                cursor = match.end()
+                continue
+            depth += 1
+        if depth == 0:
+            expression_depth = 0
+        cursor = match.end()
+    return depth > 0
+
+
+def _regex_line_terminator(line: str, index: int) -> Optional[int]:
+    escaped = False
+    char_class = False
+    for char_index in range(index + 1, len(line)):
+        char = line[char_index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "[":
+            char_class = True
+        elif char == "]":
+            char_class = False
+        elif char == "/" and not char_class:
+            suffix_index = char_index + 1
+            while suffix_index < len(line) and line[suffix_index] in "dgimsuvy":
+                suffix_index += 1
+            if suffix_index < len(line) and (
+                line[suffix_index].isalnum() or line[suffix_index] in {"_", "$"}
+            ):
+                return None
+            token_index = suffix_index
+            while token_index < len(line) and line[token_index].isspace():
+                token_index += 1
+            if token_index < len(line) and (
+                line[token_index].isalnum() or line[token_index] in {"_", "$"}
+            ):
+                token = re.match(r"[A-Za-z_$][A-Za-z0-9_$]*", line[token_index:])
+                if token is None or token.group(0) not in {"as", "in", "instanceof", "satisfies"}:
+                    return None
+            return char_index
+    return None
+
+
 def _looks_like_regex_start(line: str, index: int) -> bool:
     prefix = line[:index].rstrip()
-    if not prefix:
+    next_char = line[index + 1] if index + 1 < len(line) else ""
+    terminator = _regex_line_terminator(line, index)
+    if terminator is None:
+        return False
+    closing_tag = re.match(r"/[A-Za-z_$][A-Za-z0-9_.$:-]*\s*>", line[index:])
+    keyword_context = bool(re.search(r"\b(?:return|case|throw|yield)\s*$", prefix))
+    operator_context = prefix.endswith(("=", "(", "[", "{", ",", ":", ";", "!", "?", "<", ">", "=>"))
+    if prefix.endswith("<") and closing_tag:
+        before_less_than = prefix[:-1].rstrip()
+        operand_context = bool(re.search(r"(?:[A-Za-z0-9_$\]\)}'\"`]|\+\+|--)$", before_less_than))
+        tag_end = index + closing_tag.end()
+        between = line[tag_end:terminator]
+        terminator_next = line[terminator + 1] if terminator + 1 < len(line) else ""
+        if (
+            _jsx_prefix_has_open_tag(before_less_than)
+            or not operand_context
+            or (between and not between.strip())
+            or terminator_next in {"/", "*"}
+        ):
+            return False
+    if next_char == ">":
+        if not prefix:
+            return False
+        if prefix.endswith("<"):
+            before_less_than = prefix[:-1].rstrip()
+            if not re.search(r"(?:[A-Za-z0-9_$\]\)}'\"`]|\+\+|--)$", before_less_than):
+                return False
+        elif not (operator_context or keyword_context):
+            return False
+    if not prefix or operator_context:
         return True
-    if prefix.endswith(("=", "(", "[", "{", ",", ":", ";", "!", "?", "=>")):
-        return True
-    return bool(re.search(r"\b(?:return|case|throw|yield)\s*$", prefix))
+    return keyword_context
 
 
 def _python_function_end(
@@ -4812,9 +4937,6 @@ _EXPRESSION_CONTINUATION_SUFFIXES = (
 _EXPRESSION_CONTINUATION_PREFIXES = (
     ".", "?.", "+", "-", "*", "/", "%", "&&", "||", "??", "?", ":", ",",
 )
-_JSX_TAG_RE = re.compile(r"</?>|</?[A-Za-z][A-Za-z0-9_.:-]*(?:\s[^<>]*?)?/?>")
-
-
 def _expression_arrow_end(
     lines: list[str],
     start: int,
@@ -4880,7 +5002,16 @@ def _expression_arrow_end(
                 state = "block_comment"
                 char_index += 2
                 continue
-            if char == "/" and _looks_like_regex_start(line, char_index):
+            jsx_token_slash = (
+                suffix in {".jsx", ".tsx"}
+                and jsx_mode
+                and brace_depth == 0
+                and (
+                    next_char == ">"
+                    or (char_index > 0 and line[char_index - 1] == "<")
+                )
+            )
+            if char == "/" and not jsx_token_slash and _looks_like_regex_start(line, char_index):
                 state = "regex"
                 regex_char_class = False
                 escaped = False

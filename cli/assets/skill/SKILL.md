@@ -27,11 +27,11 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto \
   [--task-kind read_only|change|terminal_maintenance] [--claim-direct]
 ```
 
-Run `mechanism_plan.required`. The model may select
-`optional_when_beneficial` only when expected value exceeds coordination cost.
-Do not run `forbidden` mechanisms unless the user explicitly overrides the plan.
-Reclassify before changing writer count. For uncertain direct work, create
-`--claim-direct` while clean; continuation requires its ID and exact paths.
+Run `mechanism_plan.required`; select `optional_when_beneficial` only when its
+value exceeds coordination cost, and keep `forbidden` off absent user override.
+`classify` is a fail-closed snapshot: inspect `repo`, `workspace_dirty`,
+`dirty_paths`, and `active_writer`, and reclassify if state changes before writing.
+Same-owner claims conflict unless continuing the exact ID; `change_nature` never bypasses a rule or review.
 
 Use the registered lifecycle only when classification requires isolation or
 fingerprinted review, or when the user explicitly requests it:
@@ -52,7 +52,14 @@ python3 docs/tools/autopipeline/ap.py task-integrate T0001
 
 Each parallel writer uses a task ID, worktree, lease, dependency SHAs, and distinct
 `owned_paths`. Main integrates, gates, pushes, and cleans. Validate delegated JSON
-with `agent-contract-check`; parallel fixers require reclassification with `--writers >1`.
+with `agent-contract-check`; parallel fixers require reclassification with
+`--writers >1`.
+
+Use the existing `reviewer` Agent at `xhigh` and follow the plan: focused means one
+90-second analysis; deep gets 300 seconds for parallel/cross-module or sensitive
+boundaries. Timeout is `blocked` and is not sent to `task-review`. Generate all 16
+fields with `agent-result-template`; contract checking aggregates errors, and shape
+repair must reuse the same analysis.
 
 ## Close with the bounded routed gate
 
@@ -71,7 +78,8 @@ Every changed code/config path must map to a real project command. The runtime
 de-duplicates commands and enforces route, command, and total budgets. Defaults
 are 120 seconds per command and 180 total; projects may raise them for a measured
 affected-scope check. Timeouts should narrow the route, never trigger a full build.
-Focused test/fix/retest loops remain allowed before the final gate.
+Focused test/fix/retest loops remain allowed before the final gate. Commands inherit
+the caller's PATH in non-login Bash; declare activation in the configured command.
 
 Run full regression, Docker, Jenkins, deployment, browser/device writes, or target
 acceptance only as an explicit diagnostic. A requested just-pushed failure
@@ -88,11 +96,8 @@ autocoding init
 python3 docs/tools/autopipeline/ap.py doctor
 ```
 
-Finish registered tasks before changing versions. `autocoding init` is idempotent
-and performs the complete install/upgrade: it replaces every managed constraint,
-preserves only schema-supported project values, installs the canonical docs
-directory framework and managed templates, and archives obsolete content outside
-active `docs/` while preserving valid architecture, ADR, interface, DD, review,
-and deploy-record artifacts in their designated directories. It then verifies the
-packaged managed-install manifest; `doctor` cheaply rechecks the same declared
-paths without treating project-owned files or archives as a release mirror.
+Finish registered tasks before changing versions. `autocoding init` idempotently
+replaces managed constraints, preserves schema-supported values, installs canonical
+docs/templates, archives obsolete content outside active `docs/`, and preserves
+designated artifacts. It verifies the managed-install manifest; `doctor` cheaply
+rechecks declared paths without treating project-owned files or archives as a mirror.

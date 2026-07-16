@@ -127,9 +127,9 @@ def find_config(repo: Path) -> Path:
 
 
 def run_shell(command: str, cwd: Optional[Path] = None, timeout_s: Optional[float] = None) -> None:
-    """Run a shell command and terminate its process group on timeout."""
+    """Run in the caller's environment and terminate the process group on timeout."""
     p = subprocess.Popen(
-        ["bash", "-lc", command],
+        ["bash", "-c", command],
         cwd=str(cwd) if cwd else None,
         text=True,
         start_new_session=True,

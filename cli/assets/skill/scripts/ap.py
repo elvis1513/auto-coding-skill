@@ -42,6 +42,17 @@ _GENERATED_NOISE_PATTERNS = [
 ]
 _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
+_FOCUSED_REVIEW_TIMEOUT_SECONDS = 90
+_DEEP_REVIEW_TIMEOUT_SECONDS = 300
+_DEEP_REVIEW_CATEGORIES = {
+    "api",
+    "auth",
+    "db",
+    "file_transfer",
+    "gateway",
+    "payment",
+    "prod_config",
+}
 _RECOMMENDED_FINAL_COMMAND_SECONDS = 120.0
 _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _FINAL_GATE_CACHE_SCHEMA = 1
@@ -49,7 +60,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.0", "engineering": "4.2.0"},
+    "managed_versions": {"agents": "4.2.1", "engineering": "4.2.1"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -962,8 +973,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.0":
-        workflow_cfg["skill_version"] = "4.2.0"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.1":
+        workflow_cfg["skill_version"] = "4.2.1"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1276,16 +1287,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.0\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.1\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.0.md"
+            archive = archive_dir / "AGENTS.pre-4.2.1.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.0-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.1-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2066,9 +2077,38 @@ def _active_direct_claims(repo: Path) -> list[dict]:
         return []
     active: list[dict] = []
     for path in sorted(root.glob("*.json")):
-        payload = _read_json_object(path) or {}
-        worktree = Path(_text(payload.get("worktree_path"))).resolve()
-        valid_checkout = worktree.exists() and _text(payload.get("worktree_path"))
+        payload = _read_json_object(path)
+        if payload is None:
+            raise APError(
+                f"Direct claim registry is unreadable or invalid JSON: {path}. "
+                "Refusing to assume the checkout has no active writer."
+            )
+        try:
+            schema = int(payload.get("schema") or 0)
+        except (TypeError, ValueError) as exc:
+            raise APError(f"Direct claim registry has an invalid schema: {path}") from exc
+        claim_id = _text(payload.get("claim_id"))
+        worktree_value = _text(payload.get("worktree_path"))
+        owned_paths = payload.get("owned_paths")
+        if (
+            schema != 1
+            or _text(payload.get("state")) != "active"
+            or claim_id != path.stem
+            or not _DIRECT_CLAIM_ID_RE.fullmatch(claim_id)
+            or not _text(payload.get("owner"))
+            or not _text(payload.get("base_sha"))
+            or not _text(payload.get("branch"))
+            or not worktree_value
+            or not isinstance(owned_paths, list)
+            or not owned_paths
+            or not all(isinstance(item, str) and _text(item) for item in owned_paths)
+        ):
+            raise APError(
+                f"Direct claim registry is malformed: {path}. "
+                "Refusing to assume the checkout has no active writer."
+            )
+        worktree = Path(worktree_value).resolve()
+        valid_checkout = worktree.exists()
         if valid_checkout:
             try:
                 valid_checkout = bool(
@@ -2077,11 +2117,7 @@ def _active_direct_claims(repo: Path) -> list[dict]:
                 )
             except APError:
                 valid_checkout = False
-        if (
-            int(payload.get("schema") or 0) != 1
-            or _text(payload.get("state")) != "active"
-            or not valid_checkout
-        ):
+        if not valid_checkout:
             path.unlink(missing_ok=True)
             continue
         active.append(payload)
@@ -2114,23 +2150,25 @@ def _create_direct_claim(repo: Path, cfg: dict, owned_paths: list[str], owner: s
         if _has_registered_active_task(repo):
             raise APError("A registered active task acquired repository writes.")
         existing = _active_direct_claims(repo)
-        other = [item for item in existing if _text(item.get("owner")) != _text(owner)]
-        if other:
+        base_sha = _resolve_commit(repo, "HEAD")
+        worktree_path = str(repo.resolve())
+        if existing:
             raise APError(
                 "Another direct writer already owns this checkout: "
-                + ", ".join(_text(item.get("owner")) for item in other)
+                + ", ".join(
+                    f"{_text(item.get('owner'))}:{_text(item.get('claim_id'))}"
+                    for item in existing
+                )
             )
-        for item in existing:
-            _direct_claim_path(repo, _text(item.get("claim_id"))).unlink(missing_ok=True)
         claim_id = uuid.uuid4().hex
         payload = {
             "schema": 1,
             "claim_id": claim_id,
             "state": "active",
             "owner": _text(owner),
-            "base_sha": _resolve_commit(repo, "HEAD"),
+            "base_sha": base_sha,
             "branch": branch,
-            "worktree_path": str(repo.resolve()),
+            "worktree_path": worktree_path,
             "owned_paths": normalized,
             "created_at": _now_iso(),
         }
@@ -2175,8 +2213,19 @@ def _has_registered_active_task(repo: Path) -> bool:
     if not registry.exists():
         return False
     for path in sorted(registry.glob("*.json")):
-        payload = _read_json_object(path) or {}
-        if _text(payload.get("state")) not in {"", "integrated", "cleanup-pending"}:
+        payload = _read_json_object(path)
+        if payload is None:
+            raise APError(
+                f"Task registry is unreadable or invalid JSON: {path}. "
+                "Refusing to assume the checkout has no active writer."
+            )
+        state = _text(payload.get("state"))
+        if not state:
+            raise APError(
+                f"Task registry has no state: {path}. "
+                "Refusing to assume the checkout has no active writer."
+            )
+        if state not in {"integrated", "cleanup-pending"}:
             return True
     return False
 
@@ -2388,22 +2437,57 @@ def _checked_git_z_paths(repo: Path, command: list[str], context: str) -> list[s
 
 
 def _working_tree_paths(repo: Path) -> list[str]:
+    """Return one fail-closed Git status snapshot, including both rename endpoints."""
+    result = run(
+        [
+            "git",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--no-renames",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise APError(
+            "Cannot inspect working tree status; refusing a direct execution plan: "
+            + (result.stderr.strip() or result.stdout.strip() or "git status failed")
+        )
     paths: set[str] = set()
-    paths.update(
-        _git_z_paths(
-            repo,
-            ["git", "diff", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
-        )
-    )
-    paths.update(
-        _git_z_paths(
-            repo,
-            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
-        )
-    )
-    paths.update(
-        _git_z_paths(repo, ["git", "ls-files", "--others", "--exclude-standard", "-z"])
-    )
+    entries = result.stdout.split("\0")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        record_type = entry[:1]
+        if record_type == "1":
+            fields = entry.split(" ", 8)
+            path = fields[8] if len(fields) == 9 else ""
+        elif record_type == "2":
+            fields = entry.split(" ", 9)
+            path = fields[9] if len(fields) == 10 else ""
+            if index >= len(entries) or not entries[index]:
+                raise APError(
+                    "Cannot parse renamed Git path; refusing a direct execution plan."
+                )
+            paths.add(entries[index])
+            index += 1
+        elif record_type == "u":
+            fields = entry.split(" ", 10)
+            path = fields[10] if len(fields) == 11 else ""
+        elif entry.startswith("? "):
+            path = entry[2:]
+        else:
+            path = ""
+        if not path:
+            raise APError(
+                "Cannot parse Git working tree status; refusing a direct execution plan."
+            )
+        paths.add(path)
     return sorted(path.replace("\\", "/") for path in paths if path)
 
 
@@ -3358,10 +3442,14 @@ def _default_base_ref(repo: Path) -> str:
     return upstream[0] if upstream else ""
 
 
+def _effective_change_base(repo: Path, base_ref: str = "") -> str:
+    manifest = _active_task_manifest(repo)
+    return base_ref or (_text(manifest.get("base_sha")) if manifest else "") or _default_base_ref(repo)
+
+
 def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
     paths: list[str] = []
-    manifest = _active_task_manifest(repo)
-    effective_base = base_ref or (_text(manifest.get("base_sha")) if manifest else "") or _default_base_ref(repo)
+    effective_base = _effective_change_base(repo, base_ref)
     if effective_base:
         paths.extend(_git_lines(repo, ["git", "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB", f"{effective_base}...HEAD"]))
     paths.extend(_git_lines(repo, ["git", "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB"]))
@@ -3756,6 +3844,9 @@ def _run_git_diff_check(repo: Path, cfg: dict) -> None:
 
 _DEFAULT_STRUCTURE_ALLOW_PATTERNS = [
     ".git/**",
+    ".agents/archive/**",
+    ".agents/agents/**",
+    ".agents/managed-install.json",
     ".agents/skills/**",
     ".next/**",
     ".nuxt/**",
@@ -5132,7 +5223,7 @@ def _classify_paths(paths: list[str]) -> dict:
             categories.add("gateway")
         if "production" in words or "prod" in words and "config" in words or ".env.prod" in lower:
             categories.add("prod_config")
-        if any(token in lower for token in ["page", "component", "view", "frontend", "miniapp", ".tsx", ".jsx", ".vue", ".scss", ".css"]):
+        if _is_ui_path(path):
             categories.add("ui")
         if any(token in lower for token in ["test", "spec", "__tests__"]):
             categories.add("test")
@@ -5141,6 +5232,17 @@ def _classify_paths(paths: list[str]) -> dict:
         if any(token in lower for token in ["domain", "service", "usecase", "repository", "infrastructure", "adapter", "shared", "utils"]):
             categories.add("structure")
     return _classification_for_categories(categories, len(paths))
+
+
+_UI_PATH_SEGMENTS = {"frontend", "miniapp", "page", "pages", "component", "components", "view", "views"}
+_UI_FILE_SUFFIXES = {".css", ".jsx", ".scss", ".tsx", ".vue"}
+
+
+def _is_ui_path(path: str) -> bool:
+    """Classify UI paths by exact directory semantics or UI-only extensions."""
+    normalized = path.replace("\\", "/").strip("/").lower()
+    directories = [part for part in normalized.split("/")[:-1] if part]
+    return Path(normalized).suffix.lower() in _UI_FILE_SUFFIXES or any(part in _UI_PATH_SEGMENTS for part in directories)
 
 
 def _classification_for_categories(categories: set[str], file_count: int) -> dict:
@@ -5221,6 +5323,79 @@ def _high_confidence_intent_categories(intent: str) -> set[str]:
         for category, keywords in signals.items()
         if any(keyword in value for keyword in keywords)
     }
+
+
+_MECHANICAL_CHANGE_SIGNALS = (
+    "mechanical", "rename only", "move only", "pure rename", "pure move", "no behavior change",
+    "without behavior change", "behavior unchanged", "source of truth unchanged", "contract unchanged",
+    "仅改名", "只改名", "仅移动", "只移动", "不改变行为", "行为不变", "机械同步", "机械变更", "契约不变", "事实源不变",
+)
+_SEMANTIC_CHANGE_SIGNALS = (
+    "semantic change", "change behavior", "behavior change", "new behavior", "architecture change", "contract change", "schema change",
+    "语义变更", "行为变更", "改变行为", "新增行为", "架构变更", "契约变更", "模式变更",
+)
+
+
+def _intent_change_nature(intent: str) -> str:
+    value = _text(intent).lower()
+    if not value:
+        return "unknown"
+    semantic_value = re.sub(r"\b(?:not\s+(?:a\s+)?|non[- ]?|isn't\s+)mechanical\b|(?:不是|并非|非)机械(?:变更|同步)?", " ", value)
+    mechanical = [] if semantic_value != value else [signal for signal in _MECHANICAL_CHANGE_SIGNALS if signal in value]
+    for signal in mechanical:
+        semantic_value = semantic_value.replace(signal, " ")
+    for pattern in [r"\bno\s+.{0,16}\bbehavior\s+change\b", r"不改变.{0,16}行为"]:
+        if re.search(pattern, semantic_value):
+            mechanical.append(pattern)
+            semantic_value = re.sub(pattern, " ", semantic_value)
+    if any(signal in semantic_value for signal in _SEMANTIC_CHANGE_SIGNALS) or re.search(
+        r"\b(?:change|changes|changed|changing|modify|modifies|modified|modifying|alter|alters|altered|altering|update|updates|updated|updating)\b.{0,40}\b(?:behaviors?|semantics?|architecture|contracts?|schemas?)\b"
+        r"|\b(?:behaviors?|semantics?|architecture|contracts?|schemas?)\b.{0,24}\b(?:change|changes|changed|changing)\b|(?:修改|调整|改变|新增|更新).{0,32}(?:行为|语义|架构|契约|模式)|(?:行为|语义|架构|契约|模式).{0,16}(?:变化|变更|调整)", semantic_value
+    ):
+        return "semantic"
+    if mechanical:
+        return "mechanical"
+    return "unknown"
+
+
+def _pure_exact_git_rename(repo: Path, base_ref: str, changed_paths: list[str]) -> bool:
+    common = ["--name-status", "-z", "-M100%", "--diff-filter=ACDMRTUXB"]
+    commands = [["git", "diff", *common], ["git", "diff", "--cached", *common]]
+    effective_base = _effective_change_base(repo, base_ref)
+    if effective_base:
+        commands.insert(0, ["git", "diff", *common, f"{effective_base}...HEAD"])
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    for command in commands:
+        result = run(command, cwd=repo, check=False)
+        if result.returncode != 0:
+            return False
+        tokens = [token for token in result.stdout.split("\0") if token]
+        index = 0
+        while index < len(tokens):
+            status = tokens[index]
+            width = 2 if status[:1] in {"R", "C"} else 1
+            paths = tokens[index + 1 : index + 1 + width]
+            if len(paths) != width:
+                return False
+            entries.append((status, tuple(path.replace("\\", "/") for path in paths)))
+            index += width + 1
+    renamed = {path for status, paths in entries if status == "R100" for path in paths}
+    changed = {path.replace("\\", "/") for path in changed_paths if _text(path)}
+    return bool(entries) and all(status == "R100" for status, _ in entries) and renamed == changed
+
+
+def _classify_change_nature(
+    repo: Path,
+    *,
+    base_ref: str,
+    changed_paths: list[str],
+    intent: str,
+    inspect_git: bool,
+) -> str:
+    intent_nature = _intent_change_nature(intent)
+    if intent_nature != "semantic" and inspect_git and changed_paths and _pure_exact_git_rename(repo, base_ref, changed_paths):
+        return "mechanical"
+    return intent_nature
 
 
 def _resolve_task_kind(
@@ -5323,6 +5498,7 @@ def _recommended_agents(
     *,
     parallel_writers: int = 1,
     review_required: bool = False,
+    review_policy: Optional[dict] = None,
 ) -> list[str]:
     roles: list[str] = []
     for stage in _agent_execution_plan(
@@ -5331,6 +5507,7 @@ def _recommended_agents(
         classification,
         parallel_writers=parallel_writers,
         review_required=review_required,
+        review_policy=review_policy,
     )["stages"]:
         for role in stage["roles"]:
             if role != "main" and role not in roles:
@@ -5430,9 +5607,19 @@ def _contract_equal(left: object, right: object) -> bool:
     return left == right
 
 
-def _validate_contract_fragment(fragment: dict, value: object, root: dict, path: str) -> None:
+def _contract_validation_errors(
+    fragment: dict,
+    value: object,
+    root: dict,
+    path: str,
+) -> list[str]:
+    errors: list[str] = []
     if "$ref" in fragment:
-        _validate_contract_fragment(_contract_ref(root, _text(fragment["$ref"])), value, root, path)
+        errors.extend(
+            _contract_validation_errors(
+                _contract_ref(root, _text(fragment["$ref"])), value, root, path
+            )
+        )
 
     expected_types = fragment.get("type")
     if expected_types is not None:
@@ -5440,60 +5627,61 @@ def _validate_contract_fragment(fragment: dict, value: object, root: dict, path:
         if not all(isinstance(item, str) for item in choices) or not any(
             _contract_type_matches(value, item) for item in choices
         ):
-            raise APError(f"Contract validation failed at {path}: expected type {choices}.")
+            errors.append(f"{path}: expected type {choices}")
+            return errors
 
     if "const" in fragment and not _contract_equal(value, fragment["const"]):
-        raise APError(f"Contract validation failed at {path}: expected constant {fragment['const']!r}.")
-    if "enum" in fragment and not any(_contract_equal(value, item) for item in fragment["enum"]):
-        raise APError(f"Contract validation failed at {path}: value is outside the allowed enum.")
+        errors.append(f"{path}: expected constant {fragment['const']!r}")
+    if "enum" in fragment and not any(
+        _contract_equal(value, item) for item in fragment["enum"]
+    ):
+        errors.append(f"{path}: value is outside the allowed enum")
 
     if isinstance(value, str):
         if len(value) < int(fragment.get("minLength") or 0):
-            raise APError(f"Contract validation failed at {path}: string is too short.")
+            errors.append(f"{path}: string is too short")
         pattern = fragment.get("pattern")
         if pattern and not re.search(str(pattern), value):
-            raise APError(f"Contract validation failed at {path}: string does not match {pattern!r}.")
+            errors.append(f"{path}: string does not match {pattern!r}")
 
     if isinstance(value, list):
         if "maxItems" in fragment and len(value) > int(fragment["maxItems"]):
-            raise APError(f"Contract validation failed at {path}: too many array items.")
+            errors.append(f"{path}: too many array items")
         item_schema = fragment.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                _validate_contract_fragment(item_schema, item, root, f"{path}[{index}]")
+                errors.extend(
+                    _contract_validation_errors(item_schema, item, root, f"{path}[{index}]")
+                )
 
     if isinstance(value, dict):
         required = fragment.get("required") or []
-        missing = [item for item in required if item not in value]
+        missing = sorted(item for item in required if item not in value)
         if missing:
-            raise APError(
-                f"Contract validation failed at {path}: missing " + ", ".join(sorted(missing)) + "."
-            )
+            errors.append(f"{path}: missing " + ", ".join(missing))
         properties = fragment.get("properties") or {}
         if fragment.get("additionalProperties") is False:
             unexpected = sorted(set(value) - set(properties))
             if unexpected:
-                raise APError(
-                    f"Contract validation failed at {path}: unexpected " + ", ".join(unexpected) + "."
-                )
+                errors.append(f"{path}: unexpected " + ", ".join(unexpected))
         for key, child in properties.items():
             if key in value and isinstance(child, dict):
-                _validate_contract_fragment(child, value[key], root, f"{path}.{key}")
+                errors.extend(
+                    _contract_validation_errors(child, value[key], root, f"{path}.{key}")
+                )
 
     condition = fragment.get("if")
-    if isinstance(condition, dict):
-        try:
-            _validate_contract_fragment(condition, value, root, path)
-        except APError:
-            pass
-        else:
-            then = fragment.get("then")
-            if isinstance(then, dict):
-                _validate_contract_fragment(then, value, root, path)
+    if isinstance(condition, dict) and not _contract_validation_errors(
+        condition, value, root, path
+    ):
+        then = fragment.get("then")
+        if isinstance(then, dict):
+            errors.extend(_contract_validation_errors(then, value, root, path))
 
     for child in fragment.get("allOf") or []:
         if isinstance(child, dict):
-            _validate_contract_fragment(child, value, root, path)
+            errors.extend(_contract_validation_errors(child, value, root, path))
+    return errors
 
 
 def _validate_orchestration_contract(kind: str, payload: dict) -> dict:
@@ -5507,26 +5695,83 @@ def _validate_orchestration_contract(kind: str, payload: dict) -> dict:
     if not definition:
         raise APError(f"Unknown orchestration contract kind: {kind}")
     root = _orchestration_schema()
-    _validate_contract_fragment(root["$defs"][definition], payload, root, "$")
+    errors = _contract_validation_errors(root["$defs"][definition], payload, root, "$")
 
     role = _text(payload.get("role"))
     if kind == "assignment" and role == "reviewer":
         if _text(payload.get("node_id")) == _text(payload.get("owning_fixer")):
-            raise APError("Reviewer assignment node_id must differ from owning_fixer.")
+            errors.append("$.node_id: reviewer must differ from owning_fixer")
     if kind == "result":
-        if role == "fixer":
+        owned_paths = payload.get("owned_paths")
+        changed_paths = payload.get("changed_paths")
+        if role == "fixer" and isinstance(owned_paths, list) and isinstance(changed_paths, list):
             owned = [_normalize_owned_path(item) for item in payload.get("owned_paths") or []]
             outside = [
                 path
                 for path in payload.get("changed_paths") or []
+                if isinstance(path, str)
                 if not _path_is_owned(path, owned)
             ]
             if outside:
-                raise APError("Fixer result changed_paths exceed owned_paths: " + ", ".join(outside))
+                errors.append(
+                    "$.changed_paths: fixer paths exceed owned_paths: " + ", ".join(outside)
+                )
         if role == "reviewer" and _text(payload.get("verdict")) in {"approved", "changes-requested"}:
             if not re.fullmatch(r"[0-9a-f]{64}", _text(payload.get("diff_fingerprint"))):
-                raise APError("Reviewer result must bind its verdict to a non-empty diff fingerprint.")
+                errors.append(
+                    "$.diff_fingerprint: reviewer verdict must bind to a 64-character fingerprint"
+                )
+    errors = list(dict.fromkeys(errors))
+    if errors:
+        raise APError("Contract validation failed:\n- " + "\n- ".join(errors))
     return payload
+
+
+def _reviewer_result_template(assignment: dict, verdict: str) -> dict:
+    """Build a complete Reviewer result without guessing review evidence or findings."""
+    _validate_orchestration_contract("assignment", assignment)
+    if _text(assignment.get("role")) != "reviewer":
+        raise APError("Reviewer result templates require a reviewer assignment.")
+    normalized_verdict = _text(verdict).lower()
+    if normalized_verdict not in {"approved", "changes-requested", "blocked"}:
+        raise APError(
+            "Reviewer result verdict must be approved, changes-requested, or blocked."
+        )
+    fingerprint = _text(assignment.get("diff_fingerprint"))
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise APError(
+            "Reviewer result templates require a non-empty 64-character diff fingerprint."
+        )
+    status = "blocked" if normalized_verdict == "blocked" else "completed"
+    next_owner = (
+        _text(assignment.get("owning_fixer"))
+        if normalized_verdict == "changes-requested"
+        else "main"
+    )
+    summaries = {
+        "approved": "Review completed with no blocking findings.",
+        "changes-requested": "Review completed with changes requested.",
+        "blocked": "Review could not be completed.",
+    }
+    result = {
+        "contract_version": _AGENT_CONTRACT_VERSION,
+        "node_id": _text(assignment.get("node_id")),
+        "role": "reviewer",
+        "task_id": _text(assignment.get("task_id")),
+        "base_sha": _text(assignment.get("base_sha")),
+        "status": status,
+        "summary": summaries[normalized_verdict],
+        "depends_on": list(assignment.get("depends_on") or []),
+        "owned_paths": [],
+        "changed_paths": [],
+        "diff_fingerprint": fingerprint,
+        "evidence": [],
+        "findings": [],
+        "verdict": normalized_verdict,
+        "risks": [],
+        "next_owner": next_owner,
+    }
+    return _validate_orchestration_contract("result", result)
 
 
 def _validate_agent_plan(plan: dict) -> dict:
@@ -5548,6 +5793,35 @@ def _validate_agent_plan(plan: dict) -> dict:
     return plan
 
 
+def _review_execution_policy(
+    *,
+    review_required: bool,
+    categories: set[str],
+    cross_module: bool,
+    parallel_writers: int,
+) -> dict:
+    if not review_required:
+        return {
+            "depth": "none",
+            "agent": "",
+            "timeout_seconds": 0,
+            "analysis_attempt_limit": 0,
+        }
+    deep = bool(
+        cross_module
+        or parallel_writers > 1
+        or categories & _DEEP_REVIEW_CATEGORIES
+    )
+    return {
+        "depth": "deep" if deep else "focused",
+        "agent": "reviewer",
+        "timeout_seconds": (
+            _DEEP_REVIEW_TIMEOUT_SECONDS if deep else _FOCUSED_REVIEW_TIMEOUT_SECONDS
+        ),
+        "analysis_attempt_limit": 1,
+    }
+
+
 def _agent_execution_plan(
     profile: str,
     categories: set[str],
@@ -5555,10 +5829,12 @@ def _agent_execution_plan(
     *,
     parallel_writers: int = 1,
     review_required: bool = False,
+    review_policy: Optional[dict] = None,
     optional_roles: Optional[list[str]] = None,
 ) -> dict:
     assignment_contract, result_contract = _agent_contract_shape()
     optional_roles = list(dict.fromkeys(optional_roles or []))
+    review_policy = dict(review_policy or {})
     # Optional roles are candidates, never automatic stages. The model selects
     # them only when expected benefit exceeds coordination cost.
     discovery_roles: list[str] = []
@@ -5570,6 +5846,12 @@ def _agent_execution_plan(
         "dependency_policy": "integrate-before-dependent-start",
         "review_feedback_owner": "owning-fixer" if review_required else "main",
         "review_binding": "diff-fingerprint-when-required",
+        "review_depth": _text(review_policy.get("depth")) or "none",
+        "review_agent": _text(review_policy.get("agent")),
+        "review_timeout_seconds": int(review_policy.get("timeout_seconds") or 0),
+        "review_analysis_attempt_limit": int(
+            review_policy.get("analysis_attempt_limit") or 0
+        ),
         "lifecycle_owner": "main",
         "gate_owner": "main",
     }
@@ -5579,6 +5861,11 @@ def _agent_execution_plan(
         "Never run two writers in one worktree.",
         "The main agent runs one final changed-scope gate, pushes, and cleans only temporary branches actually created.",
     ]
+    if review_required:
+        constraints.append(
+            "Run one bounded review analysis over the supplied diff and relevant evidence; "
+            "a timeout is blocked, never approved, and JSON formatting repair must reuse the same analysis."
+        )
 
     if parallel_writers <= 1 and not discovery_roles and not review_required:
         stages = [{"id": "delivery", "mode": "serial", "roles": ["main"], "depends_on": []}]
@@ -5604,7 +5891,7 @@ def _agent_execution_plan(
             delivery_roles = ["fixer", "main"]
             delivery_mode = "parallel-isolated"
         if review_required:
-            delivery_roles.append("reviewer")
+            delivery_roles.append(_text(review_policy.get("agent")) or "reviewer")
         stages.append(
             {
                 "id": "delivery",
@@ -5687,7 +5974,8 @@ def _mechanism_plan(
         "rule": (
             "run required mechanisms; select optional mechanisms only when expected value exceeds "
             "coordination cost; reclassify before changing writer count; do not run forbidden "
-            "mechanisms unless the user explicitly overrides"
+            "mechanisms unless the user explicitly overrides; direct/worktree decisions apply only "
+            "to the reported workspace snapshot and require reclassification if it changes"
         ),
     }
 
@@ -5721,6 +6009,13 @@ def _resolve_execution_plan(
     )
     classification_inputs = [*paths, *normalized_planned_paths]
     task_kind = _resolve_task_kind(requested_task_kind, classification_inputs, intent)
+    change_nature = _classify_change_nature(
+        repo,
+        base_ref=base_ref,
+        changed_paths=paths,
+        intent=intent,
+        inspect_git=changed_paths is None,
+    )
     path_classification = _classify_paths(classification_inputs)
     path_categories = set(path_classification["categories"])
     intent_categories = _classify_intent(intent)
@@ -5861,7 +6156,14 @@ def _resolve_execution_plan(
     )
     design_required = bool(
         task_kind == "change"
-        and (rule_design or (effective_profile == "high-risk" and cross_module))
+        and (
+            rule_design
+            or (
+                effective_profile == "high-risk"
+                and cross_module
+                and change_nature != "mechanical"
+            )
+        )
     )
     dirty_paths = _working_tree_paths(repo)
     workspace_dirty = bool(dirty_paths)
@@ -5879,12 +6181,10 @@ def _resolve_execution_plan(
         if continue_direct
         else {}
     )
-    runtime_actor = _text(os.environ.get("CODEX_THREAD_ID"))
     other_direct_claims = [
         item
         for item in _active_direct_claims(repo)
         if _text(item.get("claim_id")) != _text(direct_claim_id)
-        and (not runtime_actor or _text(item.get("owner")) != runtime_actor)
     ]
     active_writer = bool(registered_active_writer or other_direct_claims)
     continued_direct = bool(
@@ -5922,12 +6222,19 @@ def _resolve_execution_plan(
         cross_module=cross_module,
         profile=effective_profile,
     )
+    review_policy = _review_execution_policy(
+        review_required=review_required,
+        categories=categories,
+        cross_module=cross_module,
+        parallel_writers=writer_count,
+    )
     agent_plan = _agent_execution_plan(
         effective_profile,
         categories,
         classification,
         parallel_writers=writer_count,
         review_required=review_required,
+        review_policy=review_policy,
         optional_roles=optional_agents,
     )
     mechanism_plan = _mechanism_plan(
@@ -5944,6 +6251,7 @@ def _resolve_execution_plan(
         "planned_files": normalized_planned_paths,
         "classification_files": classification_inputs,
         "intent_provided": bool(_text(intent)),
+        "change_nature": change_nature,
         "task_kind": task_kind,
         "intent_categories": intent_categories,
         "intent_risk_candidates": intent_risk_candidates,
@@ -5958,6 +6266,7 @@ def _resolve_execution_plan(
         "effective_mode": effective_mode,
         "execution_mode": execution_mode,
         "terminal_maintenance": terminal_maintenance,
+        "repo": str(repo),
         "workspace_dirty": workspace_dirty,
         "dirty_paths": dirty_paths,
         "dirty_outside_plan": dirty_outside_plan,
@@ -5966,6 +6275,10 @@ def _resolve_execution_plan(
         "parallel_writers": writer_count,
         "cross_module": cross_module,
         "review_required": review_required,
+        "review_depth": review_policy["depth"],
+        "review_agent": review_policy["agent"],
+        "review_timeout_seconds": review_policy["timeout_seconds"],
+        "review_analysis_attempt_limit": review_policy["analysis_attempt_limit"],
         "design_required": design_required,
         "selected_scope": selected_scope,
         "categories": sorted(categories),
@@ -5980,6 +6293,7 @@ def _resolve_execution_plan(
             classification,
             parallel_writers=writer_count,
             review_required=review_required,
+            review_policy=review_policy,
         ),
         "optional_agents": optional_agents,
         "agent_plan": agent_plan,
@@ -6056,9 +6370,24 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"[classify] task_kind={result['task_kind']}")
         print(f"[classify] profile={result['profile']}")
         print(f"[classify] effective_mode={result['effective_mode']}")
+        print(f"[classify] repo={result['repo']}")
+        print(f"[classify] workspace_dirty={str(result['workspace_dirty']).lower()}")
+        print(
+            "[classify] dirty_paths="
+            + json.dumps(result["dirty_paths"], ensure_ascii=False, separators=(",", ":"))
+        )
+        print(f"[classify] active_writer={str(result['active_writer']).lower()}")
         print(f"[classify] execution_mode={result['execution_mode']}")
         print(f"[classify] review_required={str(result['review_required']).lower()}")
+        print(f"[classify] review_depth={result['review_depth']}")
+        print(f"[classify] review_agent={result['review_agent'] or '(none)'}")
+        print(f"[classify] review_timeout_seconds={result['review_timeout_seconds']}")
+        print(
+            "[classify] review_analysis_attempt_limit="
+            f"{result['review_analysis_attempt_limit']}"
+        )
         print(f"[classify] design_required={str(result['design_required']).lower()}")
+        print(f"[classify] change_nature={result['change_nature']}")
         print(f"[classify] selected_scope={result['selected_scope']}")
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
         print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
@@ -6094,8 +6423,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
     _record_evidence(repo, cfg, "classify", "pass", result)
 
 
-def cmd_agent_contract_check(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).resolve()
+def _agent_contract_payload(repo: Path, args: argparse.Namespace) -> dict:
     raw = _text(getattr(args, "payload", ""))
     source = _text(getattr(args, "file", ""))
     if source:
@@ -6119,12 +6447,25 @@ def cmd_agent_contract_check(args: argparse.Namespace) -> None:
         raise APError(f"Agent contract payload is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise APError("Agent contract payload must be a JSON object.")
+    return payload
+
+
+def cmd_agent_contract_check(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    payload = _agent_contract_payload(repo, args)
     _validate_orchestration_contract(args.kind, payload)
     result = {"valid": True, "kind": args.kind}
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"[agent-contract-check] OK kind={args.kind}")
+
+
+def cmd_agent_result_template(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    assignment = _agent_contract_payload(repo, args)
+    result = _reviewer_result_template(assignment, args.verdict)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -9457,6 +9798,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     source.add_argument("--payload")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_agent_contract_check)
+
+    s = sp.add_parser(
+        "agent-result-template",
+        help="Generate a complete reviewer result from a validated assignment",
+    )
+    source = s.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file")
+    source.add_argument("--payload")
+    s.add_argument(
+        "--verdict",
+        choices=["approved", "changes-requested", "blocked"],
+        required=True,
+    )
+    s.set_defaults(func=cmd_agent_result_template)
 
     s = sp.add_parser("validation-map-check")
     s.add_argument("--base")

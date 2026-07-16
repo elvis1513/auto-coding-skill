@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.0 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.1 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -34,17 +34,15 @@ The default budget is:
 | High-risk or contract-crossing change | necessary design and independent review |
 | Multiple independent writers | one task/worktree/lease per writer, ordered integration |
 
-Do not add classify, task lifecycle, durable design, subagents, reviewer, or a
-worktree merely because the tool exists. If task kind or impact is unclear, run
-`classify`: run `mechanism_plan.required`, let the model select
-`optional_when_beneficial` only when expected value exceeds coordination cost,
-and keep `forbidden` mechanisms off unless the user explicitly overrides the
-plan. Reclassify only after a material task-kind, scope, risk, or writer change.
+Do not add classify, lifecycle, design, subagents, review, or a worktree merely
+because it exists. If task kind or impact is unclear, run `classify`, obey required
+and forbidden mechanisms, and select optional ones by expected value. Classification
+uses one fail-closed `git status --porcelain=v2 -z --untracked-files=all --no-renames`
+snapshot; inspect `repo`, `workspace_dirty`, `dirty_paths`, and `active_writer`.
+Git errors/malformed status block, and state changes before writing require reclassification.
 
-Normal delivery is:
-
-`analysis → decomposition → necessary design → development → one bounded final
-changed-scope gate → commit/push`.
+Normal delivery is `analysis → decomposition → necessary design → development →
+one bounded final changed-scope gate → commit/push`.
 
 Push to the target branch ends normal coding. Do not poll Jenkins, deploy, or run
 owner acceptance automatically. A user-requested diagnosis of the just-pushed
@@ -52,8 +50,8 @@ failure may continue in the same conversation/task without a second lifecycle.
 
 ## Git and parallel work
 
-- One writer in a clean checkout works directly. If review may be needed, create a
-  claim before the first write; continuation requires that claim and exact paths.
+- One writer in a clean checkout works directly. Claim uncertain direct work before
+  writing; any other claim, including the same owner, conflicts unless continuing its exact ID.
 - Existing unrelated changes, another writer, or configured mandatory isolation
   requires a registered task branch/worktree.
 - Every delegated fixer or parallel writer owns a task ID/worktree, writer lease,
@@ -81,6 +79,11 @@ failure may continue in the same conversation/task without a second lifecycle.
 - Validate delegated assignment/result JSON with `agent-contract-check` before use.
 - Require fingerprinted review only for path/rule-confirmed high-risk,
   contract-crossing, parallel, or configured work; intent words are candidates only.
+- Keep `reviewer` at `xhigh`: focused is one 90-second analysis; deep gets 300
+  seconds for parallel/cross-module or sensitive boundaries. Timeout is `blocked`
+  and is not sent to `task-review`.
+- Generate all 16 fields with `agent-result-template`; contract checking aggregates
+  errors, and JSON shape repair reuses the same analysis.
 - Review blocks only defects introduced or worsened in the promised scope.
   Adjacent existing issues are non-blocking follow-ups.
 - Semantic changes invalidate approval. Mechanical documentation-only corrections

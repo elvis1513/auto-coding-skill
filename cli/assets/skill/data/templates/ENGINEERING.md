@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.2.0"
+  skill_version: "4.2.1"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -82,7 +82,7 @@ docs:
   api_change_log: "docs/interfaces/api-change-log.md"
 ---
 # Engineering Configuration and Project Facts
-<!-- auto-coding-skill:managed-workflow:start version=4.2.0 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.2.1 -->
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the exact-schema source for
 project workflow configuration and access values that neither file can infer.
@@ -93,7 +93,7 @@ The frontmatter contract is:
 - `commands`: project-native executable commands.
 - `validation`: explicit path-to-command routes plus the bounded final-gate time
   budget. Code/config paths must be mapped; route-level `timeout_seconds` can
-  bound a slower command without changing the project defaults.
+  bound a slower command; commands inherit PATH and declare intentional activation.
 - `risk`: project-specific signals that increase design/review depth but never
   expand the automatic local gate.
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.

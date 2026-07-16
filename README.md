@@ -9,9 +9,14 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.2.0 makes registered closure resilient to normal Git staging, reuses
-an exact successful final gate, and lets an active task expand scope safely
-before its first commit. Version 4.1.9 makes `autocoding init` verify the bounded managed installation after every install or upgrade:
+Version 4.2.1 makes dirty/concurrent classification fail closed, bounds focused
+review latency, provides a complete Reviewer result template, preserves the
+caller's runtime environment for routed commands, keeps non-authoritative Agent
+history out of structure findings, and distinguishes UI paths and mechanical
+renames from semantic changes. Version 4.2.0 makes registered closure resilient
+to normal Git staging, reuses an exact successful final gate, and lets an active
+task expand scope safely before its first commit.
+Version 4.1.9 makes `autocoding init` verify the bounded managed installation after every install or upgrade:
 it replaces every managed constraint, migrates only schema-approved project
 configuration, and converges `docs/` to one canonical directory framework. Version 4.1.7 made
 the Python runtime check, release verification, and tag publication environment
@@ -76,7 +81,12 @@ The result includes:
 - `execution_mode=direct`: clean checkout and one writer; stay on the current branch.
 - `execution_mode=isolated`: dirty checkout, explicit isolation, or multiple writers.
 - `execution_mode=none`: no task signal or change; create no branch/worktree.
+- `repo`, `workspace_dirty`, `dirty_paths`, and `active_writer`: the repository
+  and concurrency evidence used for the execution decision.
 - `review_required` and `design_required`: risk-based escalation decisions.
+- `change_nature`: `mechanical`, `semantic`, or conservative `unknown`; a
+  mechanical rename may skip a generic durable-design requirement but never a
+  project rule or required high-risk review.
 - `task_kind`: `read_only`, `change`, `terminal_maintenance`, or internal `none`.
 - `mechanism_plan.required`: the complete minimum mechanism set for the task.
 - `mechanism_plan.optional_when_beneficial`: model-selectable mechanisms whose
@@ -85,6 +95,13 @@ The result includes:
 - `optional_agents`: model-selectable explorer/docs/browser candidates; they are
   never automatic stages.
 - an adaptive agent plan that does not force fan-out for ordinary work.
+
+Classification reads the working tree with one fail-closed `git status
+--porcelain=v2 -z --untracked-files=all --no-renames` snapshot. A Git error or
+malformed result blocks classification instead of being treated as clean. Both
+`direct` and dirty/isolated decisions are point-in-time verdicts: reclassify if
+the checkout or writer state changes before the first write. Any other active
+direct claim is a writer, including another claim with the same owner identity.
 
 Clean serial work proceeds directly on the current branch with normal Git; it does
 not create machine lifecycle state. Use `task-start` only when classification
@@ -167,6 +184,10 @@ commands fail before staging. Documentation-only changes may use the built-in
 diff check. `git diff --check` remains an additional hygiene check and is never
 treated as business validation.
 
+Route commands run in a non-login Bash that inherits the invoking process PATH
+and selected runtime. Projects that intentionally require profile activation
+declare it inside the configured command.
+
 Check coverage without running project commands:
 
 ```bash
@@ -196,9 +217,28 @@ never triggers a broader fallback.
 - Parallel fixers require separate worktrees and non-overlapping paths.
 - Reviewer fingerprint approval is required for high-risk, cross-module,
   explicitly configured, or parallel integration work.
+- The `reviewer` Agent remains `xhigh`. A focused review gets one 90-second pass
+  over the supplied stable diff and relevant evidence. Timeout produces
+  `blocked`; do not call `task-review` for that result.
+- Cross-module or parallel work and API, auth, database, payment, file-transfer,
+  gateway, or production-configuration boundaries use 300-second deep review.
+  Fixing Reviewer JSON formatting reuses the same analysis and never starts
+  another substantive review.
 - DD/ADR is created only for lasting cross-module, API, data, security,
   deployment, or key user-flow decisions.
 - Historical debt does not block product work unless the current change worsens it.
+
+Before returning a Reviewer result, generate the complete 16-field skeleton from
+the validated assignment, then fill its summary, evidence, findings, and risks:
+
+```bash
+python3 docs/tools/autopipeline/ap.py agent-result-template \
+  --file <assignment.json> --verdict <approved|changes-requested|blocked>
+```
+
+The generated object prevents field-by-field contract retries; contract checking
+also reports all known field errors together. If only its JSON shape needs repair,
+correct that object without rerunning review analysis.
 
 The main agent owns architecture, final validation, Git closure, ordered
 integration, push, and cleanup. Push ends the coding task; later CI/acceptance is
@@ -221,6 +261,31 @@ Init replaces the managed Skill, root `AGENTS.md`, managed agents, ENGINEERING
 schema/body, runtime launcher, and documentation framework. It preserves explicit
 model overrides and current values at supported project/access/concurrency/route
 fields. Removed content is archived outside active docs.
+
+## What changed in 4.2.1
+
+- Made classification take one fail-closed Git porcelain-v2 snapshot and expose
+  `repo`, `workspace_dirty`, `dirty_paths`, and `active_writer` in normal output.
+  Direct/dirty decisions are explicit snapshots, and another same-owner direct
+  claim still counts as a concurrent writer.
+- Kept the `reviewer` Agent at `xhigh` while adding one-pass, 90-second focused
+  review and 300-second deep routing for cross-module, parallel, API, auth,
+  database, payment, file-transfer, gateway, and production-configuration changes.
+  Focused timeout is `blocked`, never an approval or a reason to call `task-review`.
+- Added `agent-result-template` to generate all 16 Reviewer result fields from a
+  validated assignment and made contract validation return all known field errors
+  together. JSON-only repair reuses the completed analysis instead of launching
+  another substantive review.
+- Replaced the login Shell used for routed commands with an inherited-environment
+  non-login Shell, preserving the caller's PATH and selected Python/Node runtime.
+- Excluded `.agents/archive/**`, managed Agent definitions, and the install
+  manifest from structure scans while continuing to scan project-owned `.agents` code.
+- Replaced substring UI classification with exact directory segments and UI-only
+  extensions, removing false browser signals from files such as `.env.components`.
+- Added conservative mechanical/semantic/unknown change classification. Exact
+  renames and explicitly behavior-stable syncs can avoid generic cross-module
+  design ceremony; semantic/unknown changes and explicit project design rules
+  remain protected, and high-risk review is unchanged.
 
 ## What changed in 4.2.0
 

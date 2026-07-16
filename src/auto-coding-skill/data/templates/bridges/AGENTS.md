@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.2 -->
+<!-- auto-coding-skill:managed-agents:start version=4.1.3 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -51,11 +51,11 @@ failure may continue in the same conversation/task without a second lifecycle.
 
 ## Git and parallel work
 
-- One writer in a clean checkout works directly on the current branch without a
-  task lifecycle.
+- One writer in a clean checkout works directly without a lifecycle. On
+  reclassification, `--continue-direct` requires every dirty path to be declared.
 - Existing unrelated changes, another writer, or configured mandatory isolation
   requires a registered task branch/worktree.
-- Every writing agent owns a distinct task ID, worktree, writer lease,
+- Every delegated fixer or parallel writer owns a task ID/worktree, writer lease,
   non-overlapping `owned_paths`, and prerequisite commit SHAs.
 - Never let multiple writing agents share a checkout. Never restore, reset, stash,
   clean, overwrite, or commit unknown changes.
@@ -73,8 +73,8 @@ failure may continue in the same conversation/task without a second lifecycle.
   or key user-flow decisions.
 - Use read-only explorer/docs/browser agents only for independent questions.
 - Use parallel fixers only for bounded, dependency-free, non-overlapping units.
-- Require fingerprinted review only for high-risk, contract-crossing, parallel,
-  or explicitly configured work.
+- Require fingerprinted review only for path/rule-confirmed high-risk,
+  contract-crossing, parallel, or configured work; intent words are candidates only.
 - Review blocks only defects introduced or worsened in the promised scope.
   Adjacent existing issues are non-blocking follow-ups.
 - Semantic changes invalidate approval. Mechanical documentation-only corrections

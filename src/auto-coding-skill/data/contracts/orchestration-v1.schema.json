@@ -384,6 +384,7 @@
         "policies",
         "assignment_contract",
         "result_contract",
+        "optional_roles",
         "stages",
         "constraints"
       ],
@@ -407,6 +408,9 @@
           "$ref": "#/$defs/assignmentContractDescriptor"
         },
         "result_contract": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "optional_roles": {
           "$ref": "#/$defs/stringArray"
         },
         "stages": {
@@ -454,10 +458,12 @@
         "classification_files",
         "intent_provided",
         "intent_categories",
+        "intent_risk_candidates",
         "task_kind",
         "profile",
         "categories",
         "recommended_agents",
+        "optional_agents",
         "agent_plan",
         "mechanism_plan"
       ],
@@ -483,6 +489,9 @@
         "intent_categories": {
           "$ref": "#/$defs/stringArray"
         },
+        "intent_risk_candidates": {
+          "$ref": "#/$defs/stringArray"
+        },
         "task_kind": {
           "enum": ["none", "read_only", "change", "terminal_maintenance"]
         },
@@ -497,6 +506,9 @@
           "$ref": "#/$defs/stringArray"
         },
         "recommended_agents": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "optional_agents": {
           "$ref": "#/$defs/stringArray"
         },
         "agent_plan": {

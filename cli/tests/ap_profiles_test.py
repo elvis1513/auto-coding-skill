@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import tempfile
@@ -217,6 +218,7 @@ class AutoCodingProfileTests(unittest.TestCase):
             "result_contract",
             "stages",
             "constraints",
+            "optional_roles",
         ]:
             self.assertIn(field, plan["agent_plan"])
 
@@ -233,8 +235,12 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual(["src/frontend/LoginPage.tsx"], plan["classification_files"])
         self.assertTrue(plan["intent_provided"])
         self.assertEqual(["auth", "release_or_tooling", "ui"], plan["intent_categories"])
+        self.assertEqual(["auth", "release_or_tooling"], plan["intent_risk_candidates"])
         self.assertTrue(plan["needs_browser"])
-        self.assertEqual(["reviewer"], plan["recommended_agents"])
+        self.assertEqual("standard", plan["profile"])
+        self.assertFalse(plan["review_required"])
+        self.assertEqual([], plan["recommended_agents"])
+        self.assertEqual([], plan["optional_agents"])
         self.assertNotIn("browser_debugger", plan["recommended_agents"])
         self.assertNotIn("docs_researcher", plan["recommended_agents"])
         self.assertNotIn("新增登录鉴权页面并发布", str(plan))
@@ -313,6 +319,21 @@ class AutoCodingProfileTests(unittest.TestCase):
         )
         self.assertIn("task_lifecycle", terminal["mechanism_plan"]["forbidden"])
 
+        with self.assertRaises(APError):
+            self.plan(
+                repo,
+                cfg,
+                planned_paths=["src/payment/service.py"],
+                requested_task_kind="terminal_maintenance",
+            )
+        with self.assertRaises(APError):
+            self.plan(
+                repo,
+                cfg,
+                planned_paths=["src/widget.py"],
+                requested_task_kind="none",
+            )
+
     def test_execution_mode_is_none_direct_isolated_or_parallel(self) -> None:
         repo, cfg = self.make_repo()
         self.assertEqual("none", self.plan(repo, cfg)["execution_mode"])
@@ -335,6 +356,84 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertTrue(parallel["review_required"])
         self.assertIn("fixer", parallel["recommended_agents"])
         self.assertIn("parallel_fixers", parallel["mechanism_plan"]["required"])
+        self.assertEqual("orchestrated-subagents", parallel["agent_plan"]["strategy"])
+
+    def test_continue_direct_accepts_only_declared_current_task_dirt(self) -> None:
+        repo, cfg = self.make_repo()
+        target = repo / "src" / "widget.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("task change\n", encoding="utf-8")
+
+        default = self.plan(repo, cfg, planned_paths=["src/widget.py"])
+        self.assertEqual("isolated", default["execution_mode"])
+        continued = self.plan(
+            repo,
+            cfg,
+            planned_paths=["src/widget.py"],
+            continue_direct=True,
+        )
+        self.assertEqual("direct", continued["execution_mode"])
+        self.assertTrue(continued["continued_direct"])
+        self.assertEqual([], continued["dirty_outside_plan"])
+
+        (repo / "unrelated.txt").write_text("other writer\n", encoding="utf-8")
+        blocked = self.plan(
+            repo,
+            cfg,
+            planned_paths=["src/widget.py"],
+            continue_direct=True,
+        )
+        self.assertEqual("isolated", blocked["execution_mode"])
+        self.assertEqual(["unrelated.txt"], blocked["dirty_outside_plan"])
+
+    def test_risk_intent_is_candidate_while_paths_and_rules_control_escalation(self) -> None:
+        repo, cfg = self.make_repo()
+        ui = self.plan(
+            repo,
+            cfg,
+            planned_paths=["frontend/src/LoginPage.tsx"],
+            intent="修复登录跳转问题",
+        )
+        self.assertEqual("standard", ui["profile"])
+        self.assertFalse(ui["review_required"])
+        self.assertEqual(["auth"], ui["intent_risk_candidates"])
+        self.assertEqual(["browser_debugger"], ui["optional_agents"])
+
+        backend = self.plan(repo, cfg, planned_paths=["backend/auth/service.py"])
+        self.assertEqual("high-risk", backend["profile"])
+        self.assertTrue(backend["review_required"])
+        self.assertEqual(["explorer"], backend["optional_agents"])
+
+        cfg["risk"] = {
+            "rules": [
+                {
+                    "name": "sensitive-login-ui",
+                    "paths": ["frontend/src/LoginPage.tsx"],
+                    "profile": "high-risk",
+                }
+            ]
+        }
+        configured = self.plan(repo, cfg, planned_paths=["frontend/src/LoginPage.tsx"])
+        self.assertEqual("high-risk", configured["profile"])
+
+        order = self.plan(repo, cfg, planned_paths=["backend/orders/sort_order.py"])
+        self.assertNotIn("payment", order["categories"])
+
+    def test_generated_agent_strategies_match_contract_schema(self) -> None:
+        schema = json.loads(
+            (REPO_ROOT / "src" / "auto-coding-skill" / "data" / "contracts" / "orchestration-v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        allowed = set(schema["$defs"]["agentPlan"]["properties"]["strategy"]["enum"])
+        repo, cfg = self.make_repo()
+        for kwargs in [
+            {"planned_paths": ["src/widget.py"]},
+            {"planned_paths": ["backend/auth/service.py"]},
+            {"planned_paths": ["src/widget.py"], "parallel_writers": 2},
+        ]:
+            with self.subTest(kwargs=kwargs):
+                plan = self.plan(repo, cfg, **kwargs)
+                self.assertIn(plan["agent_plan"]["strategy"], allowed)
 
     def test_validation_routes_collect_all_commands_and_reject_unmapped_code(self) -> None:
         repo, cfg = self.make_repo()

@@ -9,7 +9,8 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.2 makes the workflow decision explicit: mechanisms are required,
+Version 4.1.3 closes classification bypasses and keeps current-task changes direct
+without weakening dirty-workspace isolation. Version 4.1.2 made mechanisms required,
 model-selectable when beneficial, or forbidden for the current task. Version
 4.1.1 consolidated the 4.x delivery-first workflow into one canonical
 repository contract. Version 4.0 replaced the 3.x governance-first defaults with progressive
@@ -67,16 +68,23 @@ The result includes:
 - `execution_mode=isolated`: dirty checkout, explicit isolation, or multiple writers.
 - `execution_mode=none`: no task signal or change; create no branch/worktree.
 - `review_required` and `design_required`: risk-based escalation decisions.
-- `task_kind`: `read_only`, `change`, `terminal_maintenance`, or `none`.
+- `task_kind`: `read_only`, `change`, `terminal_maintenance`, or internal `none`.
 - `mechanism_plan.required`: the complete minimum mechanism set for the task.
 - `mechanism_plan.optional_when_beneficial`: model-selectable mechanisms whose
   expected benefit must exceed coordination cost.
 - `mechanism_plan.forbidden`: mechanisms that stay off unless the user overrides.
+- `optional_agents`: model-selectable explorer/docs/browser candidates; they are
+  never automatic stages.
 - an adaptive agent plan that does not force fan-out for ordinary work.
 
 Clean serial work proceeds directly on the current branch with normal Git; it does
 not create machine lifecycle state. Use `task-start` only when classification
 requires isolation/review or the user explicitly requests lifecycle tracking:
+
+When a direct task materially changes scope after writing, reclassify with
+`--continue-direct` and repeat every current task `--planned-path`. Undeclared
+dirty paths, another writer, or mandatory isolation still selects a worktree. If
+the new plan requires review lifecycle, reuse `--continue-direct` on `task-start`.
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
@@ -97,7 +105,8 @@ python3 docs/tools/autopipeline/ap.py task-start T0002 \
 # implement in the printed worktree
 python3 docs/tools/autopipeline/ap.py task-status T0002 --json
 python3 docs/tools/autopipeline/ap.py task-review T0002 \
-  --verdict approved --diff-fingerprint "$CURRENT_DIFF_FINGERPRINT"
+  --verdict approved --diff-fingerprint "$CURRENT_DIFF_FINGERPRINT" \
+  --reviewer "$REVIEWER_ID"
 python3 docs/tools/autopipeline/ap.py commit-push T0002 \
   --msg "T0002: bounded change"
 python3 docs/tools/autopipeline/ap.py task-integrate T0002
@@ -199,6 +208,19 @@ values, custom role agents, explicit model overrides, optional documents, and
 project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
+
+## What changed in 4.1.3
+
+- Made explicit task kinds fail closed: `none` is internal-only and terminal
+  maintenance cannot be applied to code or unrelated documentation paths.
+- Added guarded `--continue-direct` reclassification for already-owned changes;
+  unknown dirty paths still require isolation.
+- Separated intent risk hints from path/rule-confirmed high risk so ordinary login
+  or payment UI work no longer automatically receives a heavy lifecycle.
+- Aligned generated Agent plans with their JSON Schema and exposed optional
+  read-only Agent candidates without auto-dispatching them.
+- Clarified delegated-fixer worktree ownership, reviewer identity, and explorer
+  source authority.
 
 ## What changed in 4.1.2
 

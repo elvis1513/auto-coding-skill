@@ -444,6 +444,55 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("does not need a machine task lifecycle", output)
         self.assertNotIn("initialization is incomplete", output)
 
+    def test_continue_direct_can_adopt_owned_changes_for_new_review_lifecycle(self) -> None:
+        _, repo, remote = self.make_repo("adaptive", require_review=False)
+        (repo / "shared.txt").write_text("continued direct\n", encoding="utf-8")
+        started = self.ap(
+            repo,
+            "task-start",
+            "DIRECT-CONTINUE",
+            "--owned-path",
+            "shared.txt",
+            "--continue-direct",
+            "--review-required",
+        )
+        self.assertIn("execution_mode=direct", started.stdout)
+        status = json.loads(
+            self.ap(repo, "task-status", "DIRECT-CONTINUE", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("direct", status["execution_mode"])
+        missing_reviewer = self.ap(
+            repo,
+            "task-review",
+            "DIRECT-CONTINUE",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            check=False,
+        )
+        self.assertNotEqual(0, missing_reviewer.returncode)
+        self.assertIn("explicit --reviewer", missing_reviewer.stdout + missing_reviewer.stderr)
+        pushed = self.commit_push(repo, "DIRECT-CONTINUE", "DIRECT-CONTINUE: update")
+        self.assertIn("execution_mode=direct", pushed.stdout)
+        self.assertEqual("continued direct", git_output(remote, "show", "refs/heads/dev:shared.txt"))
+
+        (repo / "shared.txt").write_text("owned again\n", encoding="utf-8")
+        (repo / "unrelated.txt").write_text("unknown\n", encoding="utf-8")
+        rejected = self.ap(
+            repo,
+            "task-start",
+            "DIRECT-CONTINUE-BLOCKED",
+            "--owned-path",
+            "shared.txt",
+            "--continue-direct",
+            "--review-required",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("unrelated.txt", rejected.stdout + rejected.stderr)
+        self.assertFalse(self.registry_manifest_path(repo, "DIRECT-CONTINUE-BLOCKED").exists())
+
     def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
         _, repo, _ = self.make_repo()
         self.start_task(repo, "LEGACY-SCHEMA")

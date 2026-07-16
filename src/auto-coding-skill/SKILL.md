@@ -31,19 +31,19 @@ python3 docs/tools/autopipeline/ap.py classify --scope auto \
 Run `mechanism_plan.required`. The model may select
 `optional_when_beneficial` only when expected value exceeds coordination cost.
 Do not run `forbidden` mechanisms unless the user explicitly overrides the plan.
-Reclassify only when task kind, scope, risk, or writer count materially changes.
-Ordinary direct work does not create a task lifecycle.
+Reclassify only after material change. For already-direct work, add `--continue-direct`
+with every task path and reuse it on `task-start` if needed; unknown dirt isolates.
 
 Use the registered lifecycle only when classification requires isolation or
 fingerprinted review, or when the user explicitly requests it:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
-  --owned-path src [--isolated] [--review-required] [--force-lifecycle]
+  --owned-path src [--isolated] [--review-required] [--continue-direct] [--force-lifecycle]
 # For review-required work, obtain the current fingerprint and approve it:
 python3 docs/tools/autopipeline/ap.py task-status T0001 --json
 python3 docs/tools/autopipeline/ap.py task-review T0001 \
-  --verdict approved --diff-fingerprint <CURRENT_DIFF_FINGERPRINT>
+  --verdict approved --diff-fingerprint <CURRENT_DIFF_FINGERPRINT> --reviewer <REVIEWER_ID>
 python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
 # Isolated tasks only:
 python3 docs/tools/autopipeline/ap.py task-integrate T0001

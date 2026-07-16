@@ -51,7 +51,7 @@ _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.2", "engineering": "4.1.2"},
+    "managed_versions": {"agents": "4.1.3", "engineering": "4.1.3"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -638,8 +638,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.2":
-        workflow_cfg["skill_version"] = "4.1.2"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.3":
+        workflow_cfg["skill_version"] = "4.1.3"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -952,16 +952,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.2\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.3\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.2.md"
+            archive = archive_dir / "AGENTS.pre-4.1.3.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.2-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.3-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2477,7 +2477,8 @@ def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
 
 _GATE_SCOPES = {"auto", "changed", "standard", "full"}
 _WORKFLOW_PROFILES = {"auto", "micro", "standard", "high-risk"}
-_TASK_KINDS = {"auto", "none", "read_only", "change", "terminal_maintenance"}
+_TASK_KINDS = {"none", "read_only", "change", "terminal_maintenance"}
+_REQUESTED_TASK_KINDS = (_TASK_KINDS - {"none"}) | {"auto"}
 _PROFILE_GATE_SCOPE = {"micro": "changed", "standard": "changed", "high-risk": "changed"}
 _PROFILE_RANK = {"micro": 0, "standard": 1, "high-risk": 2}
 _SCOPE_RANK = {"changed": 0, "standard": 1, "full": 2}
@@ -4426,7 +4427,7 @@ def _classify_paths(paths: list[str]) -> dict:
             categories.add("api")
         if words & {"auth", "authentication", "authorization", "permission", "permissions", "role", "roles", "tenant", "security"}:
             categories.add("auth")
-        if words & {"payment", "payments", "billing", "invoice", "invoices", "checkout", "order", "orders"}:
+        if words & {"payment", "payments", "billing", "invoice", "invoices", "checkout"}:
             categories.add("payment")
         if words & {"upload", "uploads", "download", "downloads", "attachment", "attachments"}:
             categories.add("file_transfer")
@@ -4494,17 +4495,13 @@ def _resolve_task_kind(
     intent: str,
 ) -> str:
     value = _text(requested).lower().replace("-", "_") or "auto"
-    if value not in _TASK_KINDS:
-        raise APError("task kind must be one of: " + ", ".join(sorted(_TASK_KINDS)))
-    if value != "auto":
-        return value
+    if value not in _REQUESTED_TASK_KINDS:
+        raise APError("task kind must be one of: " + ", ".join(sorted(_REQUESTED_TASK_KINDS)))
     if _is_terminal_ledger_maintenance(paths):
+        if value in {"change", "read_only"}:
+            return value
         return "terminal_maintenance"
-    if paths:
-        return "change"
     normalized_intent = _text(intent).lower()
-    if not normalized_intent:
-        return "none"
     terminal_action = bool(
         re.search(r"\b(archive|close|reconcile)\b", normalized_intent)
         or any(keyword in normalized_intent for keyword in ["归档", "对账", "收口"])
@@ -4514,7 +4511,22 @@ def _resolve_task_kind(
         or any(keyword in normalized_intent for keyword in ["台账", "任务记录", "关闭记录"])
     )
     if terminal_action and terminal_subject:
-        return "terminal_maintenance"
+        detected = "terminal_maintenance"
+    elif paths:
+        detected = "change"
+    elif not normalized_intent:
+        detected = "none"
+    else:
+        detected = ""
+    if value == "terminal_maintenance" and detected != "terminal_maintenance":
+        raise APError(
+            "terminal_maintenance is valid only for task ledger/closure/archive reconciliation; "
+            "code or unrelated documentation paths require task-kind=change"
+        )
+    if value != "auto":
+        return value
+    if detected:
+        return detected
     english_change = re.search(
         r"\b(add|build|change|create|delete|deploy|develop|fix|implement|migrate|optimize|publish|refactor|release|remove|rename|resolve|update|upgrade)\b",
         normalized_intent,
@@ -4527,6 +4539,36 @@ def _resolve_task_kind(
         ]
     )
     return "change" if english_change or chinese_change else "read_only"
+
+
+def _optional_agent_candidates(
+    *,
+    task_kind: str,
+    intent: str,
+    categories: set[str],
+    cross_module: bool,
+    profile: str,
+) -> list[str]:
+    if task_kind not in {"read_only", "change"}:
+        return []
+    value = _text(intent).lower()
+    roles: list[str] = []
+    if task_kind == "read_only" or cross_module or profile == "high-risk":
+        roles.append("explorer")
+    if any(
+        keyword in value
+        for keyword in [
+            "documentation", "docs", "framework", "library", "official", "sdk", "version",
+            "依赖", "官方", "文档", "框架", "版本",
+        ]
+    ):
+        roles.append("docs_researcher")
+    if "ui" in categories and any(
+        keyword in value
+        for keyword in ["broken", "bug", "error", "fail", "fix", "reproduce", "报错", "复现", "失败", "异常", "修复"]
+    ):
+        roles.append("browser_debugger")
+    return roles
 
 
 def _normalize_workflow_profile(value: object, default: str = "auto") -> str:
@@ -4615,12 +4657,15 @@ def _validate_agent_plan(plan: dict) -> dict:
         "result_contract",
         "stages",
         "constraints",
+        "optional_roles",
     }
     missing = sorted(required - set(plan))
     if missing or plan.get("contract_version") != _AGENT_CONTRACT_VERSION:
         raise APError("Invalid agent plan contract: " + (", ".join(missing) or "version"))
     if plan.get("contract_schema") != _AGENT_CONTRACT_SCHEMA:
         raise APError("Invalid agent plan schema path.")
+    if plan.get("strategy") not in {"main-only", "orchestrated-subagents"}:
+        raise APError("Invalid agent plan strategy.")
     if not all(
         isinstance(stage, dict)
         and {"id", "mode", "roles", "depends_on"} <= set(stage)
@@ -4637,11 +4682,12 @@ def _agent_execution_plan(
     *,
     parallel_writers: int = 1,
     review_required: bool = False,
+    optional_roles: Optional[list[str]] = None,
 ) -> dict:
     assignment_contract, result_contract = _agent_contract_shape()
-    # Classification reports useful capabilities but never auto-dispatches
-    # discovery roles. The model chooses delegation only when expected benefit
-    # exceeds coordination cost.
+    optional_roles = list(dict.fromkeys(optional_roles or []))
+    # Optional roles are candidates, never automatic stages. The model selects
+    # them only when expected benefit exceeds coordination cost.
     discovery_roles: list[str] = []
 
     policies = {
@@ -4694,7 +4740,7 @@ def _agent_execution_plan(
                 "depends_on": [previous],
             }
         )
-        strategy = "parallel-writers" if parallel_writers > 1 else "risk-assisted"
+        strategy = "orchestrated-subagents"
 
     return _validate_agent_plan({
         "contract_version": _AGENT_CONTRACT_VERSION,
@@ -4703,6 +4749,7 @@ def _agent_execution_plan(
         "policies": policies,
         "assignment_contract": assignment_contract,
         "result_contract": result_contract,
+        "optional_roles": optional_roles,
         "stages": stages,
         "constraints": constraints,
     })
@@ -4786,6 +4833,7 @@ def _resolve_execution_plan(
     intent: str = "",
     parallel_writers: int = 1,
     requested_task_kind: str = "",
+    continue_direct: bool = False,
 ) -> dict:
     impact = _impact_summary(
         cfg,
@@ -4800,9 +4848,10 @@ def _resolve_execution_plan(
     )
     classification_inputs = [*paths, *normalized_planned_paths]
     task_kind = _resolve_task_kind(requested_task_kind, classification_inputs, intent)
-    classification = _classify_paths(classification_inputs)
+    path_classification = _classify_paths(classification_inputs)
+    path_categories = set(path_classification["categories"])
     intent_categories = _classify_intent(intent)
-    merged_categories = set(classification["categories"]) | set(intent_categories)
+    merged_categories = path_categories | set(intent_categories)
     classification = _classification_for_categories(merged_categories, len(classification_inputs))
     categories = set(classification["categories"])
     matching_rules = _matching_risk_rules(classification_inputs, cfg)
@@ -4851,9 +4900,22 @@ def _resolve_execution_plan(
         "prod_config",
         "release_or_tooling",
     }
+    default_high_path_categories: set[str] = set()
+    for path in classification_inputs:
+        per_path = set(_classify_paths([path])["categories"])
+        default_high_path_categories.update(
+            per_path & {"db", "gateway", "prod_config", "release_or_tooling"}
+        )
+        if "ui" not in per_path:
+            default_high_path_categories.update(
+                per_path & {"auth", "payment", "file_transfer"}
+            )
+    intent_risk_candidates = sorted(set(intent_categories) & high_categories)
     high_signals: list[str] = []
-    if task_kind == "change" and categories & high_categories and not docs_or_tests_only:
-        high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
+    if task_kind == "change" and default_high_path_categories and not docs_or_tests_only:
+        high_signals.append(
+            "high-risk path category: " + ", ".join(sorted(default_high_path_categories))
+        )
     if task_kind == "change" and "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
     if high_signals:
@@ -4914,11 +4976,28 @@ def _resolve_execution_plan(
         task_kind == "change"
         and (rule_design or (effective_profile == "high-risk" and cross_module))
     )
-    workspace_dirty = bool(_working_tree_paths(repo))
+    dirty_paths = _working_tree_paths(repo)
+    workspace_dirty = bool(dirty_paths)
+    dirty_outside_plan = [
+        path for path in dirty_paths if not _path_is_owned(path, normalized_planned_paths)
+    ] if normalized_planned_paths else list(dirty_paths)
     active_writer = _has_registered_active_task(repo)
     configured_isolation = _task_isolation(cfg)
+    if continue_direct and task_kind != "change":
+        raise APError("--continue-direct is valid only for task-kind=change")
+    if continue_direct and not normalized_planned_paths:
+        raise APError("--continue-direct requires every current task path via --planned-path")
+    continued_direct = bool(
+        continue_direct
+        and configured_isolation == "adaptive"
+        and writer_count == 1
+        and not active_writer
+        and not dirty_outside_plan
+    )
     if task_kind != "change":
         execution_mode = "none"
+    elif continued_direct:
+        execution_mode = "direct"
     elif configured_isolation == "worktree" or writer_count > 1 or workspace_dirty or active_writer:
         execution_mode = "isolated"
     else:
@@ -4926,17 +5005,29 @@ def _resolve_execution_plan(
     execution_reasons.append(
         "execution mode is adaptive: clean single-writer work is direct; dirty or parallel work is isolated"
     )
+    if continued_direct:
+        execution_reasons.append(
+            "continued direct mode: all current dirty paths are covered by declared planned paths"
+        )
 
     needs_jenkins = False
     needs_target = False
     needs_dd = design_required
 
+    optional_agents = _optional_agent_candidates(
+        task_kind=task_kind,
+        intent=intent,
+        categories=categories,
+        cross_module=cross_module,
+        profile=effective_profile,
+    )
     agent_plan = _agent_execution_plan(
         effective_profile,
         categories,
         classification,
         parallel_writers=writer_count,
         review_required=review_required,
+        optional_roles=optional_agents,
     )
     mechanism_plan = _mechanism_plan(
         task_kind=task_kind,
@@ -4954,6 +5045,7 @@ def _resolve_execution_plan(
         "intent_provided": bool(_text(intent)),
         "task_kind": task_kind,
         "intent_categories": intent_categories,
+        "intent_risk_candidates": intent_risk_candidates,
         "reasons": execution_reasons,
         "configured_profile": configured_profile,
         "requested_profile": requested_profile_value or None,
@@ -4965,6 +5057,9 @@ def _resolve_execution_plan(
         "execution_mode": execution_mode,
         "terminal_maintenance": terminal_maintenance,
         "workspace_dirty": workspace_dirty,
+        "dirty_paths": dirty_paths,
+        "dirty_outside_plan": dirty_outside_plan,
+        "continued_direct": continued_direct,
         "active_writer": active_writer,
         "parallel_writers": writer_count,
         "cross_module": cross_module,
@@ -4984,6 +5079,7 @@ def _resolve_execution_plan(
             parallel_writers=writer_count,
             review_required=review_required,
         ),
+        "optional_agents": optional_agents,
         "agent_plan": agent_plan,
         "mechanism_plan": mechanism_plan,
     }
@@ -5015,6 +5111,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
         intent="\n".join(part for part in intent_parts if part),
         parallel_writers=int(getattr(args, "writers", 1) or 1),
         requested_task_kind=_text(getattr(args, "task_kind", "")),
+        continue_direct=bool(getattr(args, "continue_direct", False)),
     )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands: list[str] = []
@@ -5038,6 +5135,10 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(f"[classify] selected_scope={result['selected_scope']}")
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
         print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
+        print(
+            "[classify] optional_agents="
+            + (", ".join(result["optional_agents"]) or "(none)")
+        )
         print(f"[classify] agent_strategy={result['agent_plan']['strategy']}")
         print(
             "[classify] required_mechanisms="
@@ -6744,10 +6845,12 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "task-start creates exactly one writer lease and one worktree. Start each parallel "
             "writer as its own task ID; use --writers only with classify for planning."
         )
+    continue_direct = bool(getattr(args, "continue_direct", False))
     explicit_lifecycle = bool(
         getattr(args, "isolated", False)
         or getattr(args, "review_required", False)
         or getattr(args, "force_lifecycle", False)
+        or continue_direct
     )
     preflight_plan = _resolve_execution_plan(
         cfg,
@@ -6755,7 +6858,14 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         planned_paths=owned_paths,
         parallel_writers=writer_count,
         requested_task_kind="change",
+        continue_direct=continue_direct,
     )
+    if continue_direct and preflight_plan["execution_mode"] != "direct":
+        detail = ", ".join(preflight_plan["dirty_outside_plan"]) or "policy or active-writer conflict"
+        raise APError(
+            "Cannot continue the existing direct task because isolation is still required: "
+            + detail
+        )
     if not preflight_plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
         raise APError(
             "This clean serial task does not need a machine task lifecycle. Work directly on "
@@ -6827,6 +6937,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             planned_paths=owned_paths,
             parallel_writers=writer_count,
             requested_task_kind="change",
+            continue_direct=continue_direct,
         )
         if not plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
             raise APError(
@@ -6845,15 +6956,25 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             )
         ) if registry_dir.exists() else False
         current_branch = _current_branch(repo)
+        task_paths = _task_commit_paths(repo)
+        direct_changes_owned = bool(
+            continue_direct
+            and all(_path_is_owned(path, owned_paths) for path in task_paths)
+        )
         direct = bool(
             configured_isolation == "adaptive"
             and not bool(getattr(args, "isolated", False))
             and writer_count == 1
             and not other_active
-            and not _task_commit_paths(repo)
+            and (not task_paths or direct_changes_owned)
             and current_branch
             and current_branch == target_branch
         )
+        if continue_direct and not direct:
+            raise APError(
+                "Cannot register continued direct work on this checkout; verify target branch, "
+                "owned paths, active writers, and concurrency.isolation"
+            )
         if direct:
             direct_base = _resolve_commit(repo, "HEAD")
             manifest = {
@@ -7114,6 +7235,11 @@ def cmd_task_review(args: argparse.Namespace) -> None:
         reviewer = _text(getattr(args, "reviewer", "")) or _text(os.environ.get("CODEX_THREAD_ID"))
         if not reviewer:
             raise APError("task-review requires --reviewer or CODEX_THREAD_ID.")
+        if bool(manifest.get("review_required")):
+            if not _text(getattr(args, "reviewer", "")):
+                raise APError("Independent review requires an explicit --reviewer identity.")
+            if reviewer == _text(manifest.get("owner")):
+                raise APError("Independent reviewer identity must differ from the task lifecycle owner.")
         manifest["review"] = {
             "verdict": args.verdict,
             "diff_base": _text(manifest.get("base_sha")),
@@ -8068,7 +8194,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--planned-path", action="append")
     s.add_argument("--intent")
     s.add_argument("--intent-file")
-    s.add_argument("--task-kind", choices=sorted(_TASK_KINDS), default="auto")
+    s.add_argument("--task-kind", choices=sorted(_REQUESTED_TASK_KINDS), default="auto")
+    s.add_argument("--continue-direct", action="store_true")
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
@@ -8177,6 +8304,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--isolated", action="store_true")
     s.add_argument("--review-required", action="store_true")
+    s.add_argument("--continue-direct", action="store_true")
     s.add_argument(
         "--force-lifecycle",
         action="store_true",

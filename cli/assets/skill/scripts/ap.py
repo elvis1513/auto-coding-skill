@@ -24,12 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional, List
 
-try:
-    import yaml  # type: ignore
-except Exception:
-    yaml = None
-
-from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status
+from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status, require_yaml
 from scaffold_templates import scaffold_groups, templates_for
 
 
@@ -51,7 +46,7 @@ _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.4", "engineering": "4.1.4"},
+    "managed_versions": {"agents": "4.1.5", "engineering": "4.1.5"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -638,8 +633,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.4":
-        workflow_cfg["skill_version"] = "4.1.4"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.5":
+        workflow_cfg["skill_version"] = "4.1.5"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -952,16 +947,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.4\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.5\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.4.md"
+            archive = archive_dir / "AGENTS.pre-4.1.5.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.4-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.5-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -1606,9 +1601,7 @@ def _parse_frontmatter_markdown_text(text: str, path: Path) -> tuple[dict, str]:
     m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)(.*)$", text, flags=re.DOTALL)
     if not m:
         raise APError(f"Markdown frontmatter not found: {path}")
-    if yaml is None:
-        raise APError("PyYAML not installed. Install dependencies with: pip install pyyaml requests")
-    data = yaml.safe_load(m.group(1)) or {}
+    data = require_yaml().safe_load(m.group(1)) or {}
     return data, m.group(3)
 
 
@@ -1619,9 +1612,7 @@ def _read_frontmatter_markdown(path: Path) -> tuple[dict, str]:
 
 
 def _write_frontmatter_markdown(path: Path, data: dict, body: str) -> None:
-    if yaml is None:
-        raise APError("PyYAML not installed. Install dependencies with: pip install pyyaml requests")
-    dumped = yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
+    dumped = require_yaml().safe_dump(data, allow_unicode=True, sort_keys=False).strip()
     path.write_text(f"---\n{dumped}\n---\n{body}", encoding="utf-8")
 
 

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 function die(msg){
@@ -118,6 +118,26 @@ function validateCommandArgs(args){
 
 function exists(p){ try { fs.accessSync(p); return true; } catch { return false; } }
 function rmrf(p){ fs.rmSync(p, { recursive: true, force: true }); }
+function quoted(value){ return JSON.stringify(String(value)); }
+
+function requireRuntimeDependencies(assetSkill){
+  const defaultPython = process.platform === "win32" ? "python" : "python3";
+  const python = String(process.env.AUTOCODING_PYTHON || defaultPython).trim() || defaultPython;
+  const requirements = path.join(assetSkill, "requirements.txt");
+  if (!exists(requirements)) die(`missing runtime dependency definition: ${requirements}`);
+  const check = spawnSync(
+    python,
+    ["-c", "import yaml"],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  if (check.status === 0) return;
+  const detail = String(check.stderr || check.error?.message || "PyYAML import failed").trim().split(/\r?\n/).slice(-1)[0];
+  const install = `${quoted(python)} -m pip install --requirement ${quoted(requirements)}`;
+  die(
+    `Python runtime dependency check failed${detail ? `: ${detail}` : ""}\n`
+    + `Run: ${install}\nThen rerun autocoding init.`,
+  );
+}
 function shouldSkip(name){
   return name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
 }
@@ -1469,6 +1489,8 @@ Compatibility:
   if (args.cmd !== "init") die(`unknown command: ${args.cmd}`);
 
   if (args.ai) console.warn("[autocoding] --ai is deprecated and ignored; installing generic .agents.");
+
+  requireRuntimeDependencies(assetSkill);
 
   const { skillDir, agentsDir } = resolveInstallDirs(args.mode, args.dest);
   const existingTargets = [skillDir, agentsDir].filter(target => exists(target));

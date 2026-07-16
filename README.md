@@ -9,8 +9,10 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.4 makes direct continuation provably pre-write, closes self-review and
-risk-classification gaps, validates Agent contracts, and makes tag publication
+Version 4.1.5 makes the Python runtime check and tag publication environment
+reproducible while removing the unnecessary `requests` dependency. Version 4.1.4
+made direct continuation provably pre-write, closed self-review and
+risk-classification gaps, validated Agent contracts, and made tag publication
 idempotent. Version 4.1.3 closed classification bypasses. Version 4.1.2 made mechanisms required,
 model-selectable when beneficial, or forbidden for the current task. Version
 4.1.1 consolidated the 4.x delivery-first workflow into one canonical
@@ -23,9 +25,9 @@ affected-scope checks are enabled only when concurrency or risk justifies them.
 
 ```bash
 npm install -g @elvis1513/auto-coding-skill
+python3 -m pip install PyYAML==6.0.3
 autocoding init
 autocoding sync --projects .
-pip install pyyaml requests
 ```
 
 The project install contains:
@@ -209,6 +211,14 @@ values, custom role agents, explicit model overrides, optional documents, and
 project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
+
+## What changed in 4.1.5
+
+- Made tag publication reproducible with explicit Node 24, Python 3.12, and pinned
+  PyYAML setup before package verification.
+- Made `autocoding init` fail before writes with one interpreter-specific recovery
+  command when its Python runtime cannot import PyYAML.
+- Removed the `requests` runtime dependency by using Python's standard HTTP library.
 
 ## What changed in 4.1.4
 

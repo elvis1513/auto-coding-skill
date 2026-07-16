@@ -7,8 +7,12 @@ from __future__ import annotations
 import os
 import re
 import signal
+import shlex
 import shutil
 import subprocess
+import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Iterable, Optional, Dict, Any
 
@@ -17,14 +21,30 @@ try:
 except Exception:
     yaml = None
 
-try:
-    import requests  # type: ignore
-except Exception:
-    requests = None
-
-
 class APError(RuntimeError):
     pass
+
+
+def runtime_requirements_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "requirements.txt"
+
+
+def require_yaml() -> Any:
+    if yaml is None:
+        install = shlex.join(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--requirement",
+                str(runtime_requirements_path()),
+            ]
+        )
+        raise APError(
+            f"PyYAML is missing from {sys.executable}. Run: {install}"
+        )
+    return yaml
 
 
 def run(cmd: Iterable[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -46,10 +66,7 @@ def ensure_git_repo(repo: Path) -> None:
 def load_yaml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise APError(f"YAML not found: {path}")
-    if yaml is None:
-        raise APError(
-            "PyYAML not installed. Install dependencies with: pip install pyyaml requests"
-        )
+    yaml_module = require_yaml()
     if path.suffix.lower() in {".md", ".markdown"}:
         text = path.read_text(encoding="utf-8")
         m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)", text, flags=re.DOTALL)
@@ -58,10 +75,10 @@ def load_yaml(path: Path) -> Dict[str, Any]:
                 f"Config markdown frontmatter not found: {path}\n"
                 "Expected YAML frontmatter wrapped by '---' at top of file."
             )
-        data = yaml.safe_load(m.group(1))
+        data = yaml_module.safe_load(m.group(1))
     else:
         with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yaml_module.safe_load(f)
     return data or {}
 
 
@@ -87,12 +104,12 @@ def copy_tree(src: Path, dst: Path) -> None:
 
 
 def http_get_status(url: str, timeout_s: int = 5) -> int:
-    if requests is None:
-        raise APError(
-            "requests not installed. Install dependencies with: pip install pyyaml requests"
-        )
-    r = requests.get(url, timeout=timeout_s)
-    return r.status_code
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
 
 
 def find_config(repo: Path) -> Path:

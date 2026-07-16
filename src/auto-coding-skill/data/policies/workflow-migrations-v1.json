@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "managed_versions": {
-    "agents": "4.1.4",
-    "engineering": "4.1.4"
+    "agents": "4.1.5",
+    "engineering": "4.1.5"
   },
   "known_official_agents_sha256": [
     "ebaaadab60327b3a4852948443d7191a4d48cb00bf4910038ab78c9149089373"

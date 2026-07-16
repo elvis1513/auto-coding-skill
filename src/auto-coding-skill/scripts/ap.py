@@ -46,10 +46,12 @@ _GENERATED_NOISE_PATTERNS = [
 ]
 _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
+_MAX_FINAL_COMMAND_SECONDS = 120.0
+_MAX_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.0", "engineering": "4.1.0"},
+    "managed_versions": {"agents": "4.1.1", "engineering": "4.1.1"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -223,7 +225,13 @@ def _record_gate_profile(
         print(f"[gate-profile] WARN: failed to write profile log: {exc}", file=sys.stderr)
 
 
-def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
+def _run_configured_command(
+    repo: Path,
+    cfg: dict,
+    name: str,
+    *,
+    timeout_s: Optional[float] = None,
+) -> bool:
     commands = (cfg.get("commands") or {})
     command = str(commands.get(name) or "").strip()
     if not command:
@@ -231,7 +239,7 @@ def _run_configured_command(repo: Path, cfg: dict, name: str) -> bool:
     print(f"[run] {name}: {command}")
     start = time.time()
     try:
-        run_shell(command, cwd=repo)
+        run_shell(command, cwd=repo, timeout_s=timeout_s)
     except APError as exc:
         duration_s = time.time() - start
         _record_gate_profile(repo, cfg, name, "fail", duration_s, detail=str(exc))
@@ -630,8 +638,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.0":
-        workflow_cfg["skill_version"] = "4.1.0"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.1":
+        workflow_cfg["skill_version"] = "4.1.1"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -680,6 +688,13 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(validation_cfg.get("on_unmapped")).lower() != "error":
         validation_cfg["on_unmapped"] = "error"
         changed.append("validation.on_unmapped")
+    for key, default_value in [
+        ("max_command_seconds", int(_MAX_FINAL_COMMAND_SECONDS)),
+        ("max_total_seconds", int(_MAX_FINAL_TOTAL_SECONDS)),
+    ]:
+        if key not in validation_cfg:
+            validation_cfg[key] = default_value
+            changed.append(f"validation.{key}")
     validation_routes = validation_cfg.setdefault("routes", [])
     if not isinstance(validation_routes, list):
         validation_routes = []
@@ -937,16 +952,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.0\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.1\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.0.md"
+            archive = archive_dir / "AGENTS.pre-4.1.1.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.0-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.1-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2498,6 +2513,45 @@ def _validation_cfg(cfg: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _positive_seconds(value: object, default: float, label: str) -> float:
+    if value in {None, ""}:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise APError(f"{label} must be a positive number") from exc
+    if parsed <= 0:
+        raise APError(f"{label} must be a positive number")
+    return parsed
+
+
+def _final_gate_budget(cfg: dict) -> dict[str, float]:
+    validation_cfg = _validation_cfg(cfg)
+    command_seconds = _positive_seconds(
+        validation_cfg.get("max_command_seconds"),
+        _MAX_FINAL_COMMAND_SECONDS,
+        "validation.max_command_seconds",
+    )
+    total_seconds = _positive_seconds(
+        validation_cfg.get("max_total_seconds"),
+        _MAX_FINAL_TOTAL_SECONDS,
+        "validation.max_total_seconds",
+    )
+    if command_seconds > _MAX_FINAL_COMMAND_SECONDS:
+        raise APError(
+            f"validation.max_command_seconds cannot exceed {_MAX_FINAL_COMMAND_SECONDS:.0f}; "
+            "move slower checks to an explicit diagnostic command"
+        )
+    if total_seconds > _MAX_FINAL_TOTAL_SECONDS:
+        raise APError(
+            f"validation.max_total_seconds cannot exceed {_MAX_FINAL_TOTAL_SECONDS:.0f}; "
+            "move slower checks to an explicit diagnostic command"
+        )
+    if command_seconds > total_seconds:
+        raise APError("validation.max_command_seconds cannot exceed validation.max_total_seconds")
+    return {"command_seconds": command_seconds, "total_seconds": total_seconds}
+
+
 def _as_list(value: object) -> list:
     if value is None:
         return []
@@ -2527,7 +2581,14 @@ def _run_first_configured_command(repo: Path, cfg: dict, names: list[str]) -> st
     return ""
 
 
-def _run_configured_command_list(repo: Path, cfg: dict, names: list) -> list[str]:
+def _run_configured_command_list(
+    repo: Path,
+    cfg: dict,
+    names: list,
+    *,
+    deadline: Optional[float] = None,
+    command_timeout_s: Optional[float] = None,
+) -> list[str]:
     executed: list[str] = []
     missing: list[str] = []
     for name_ref in names:
@@ -2535,7 +2596,16 @@ def _run_configured_command_list(repo: Path, cfg: dict, names: list) -> list[str
         if not name:
             continue
         if _configured_command(cfg, name):
-            _run_configured_command(repo, cfg, name)
+            timeout_s = command_timeout_s
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise APError(
+                        "Final changed-scope gate exceeded its total time budget before "
+                        f"commands.{name}; narrow validation.routes"
+                    )
+                timeout_s = min(timeout_s, remaining) if timeout_s is not None else remaining
+            _run_configured_command(repo, cfg, name, timeout_s=timeout_s)
             executed.append(name)
         else:
             missing.append(name)
@@ -2868,7 +2938,14 @@ def _print_impact(summary: dict, as_json: bool = False) -> None:
         print("[impact] changed: (none)")
 
 
-def _run_changed_gate(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
+def _run_changed_gate(
+    repo: Path,
+    cfg: dict,
+    paths: list[str],
+    *,
+    deadline: Optional[float] = None,
+    command_timeout_s: Optional[float] = None,
+) -> list[str]:
     plan = _validation_plan(cfg, paths)
     _validate_validation_plan(cfg, plan)
     if not paths:
@@ -2882,7 +2959,13 @@ def _run_changed_gate(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
             "[validation] WARN: using 3.x compatibility fallback; migrate to validation.routes",
             file=sys.stderr,
         )
-    executed = _run_configured_command_list(repo, cfg, plan["commands"])
+    executed = _run_configured_command_list(
+        repo,
+        cfg,
+        plan["commands"],
+        deadline=deadline,
+        command_timeout_s=command_timeout_s,
+    )
     print(
         "[validation] routes="
         + (", ".join(plan["matched_routes"]) or "(none)")
@@ -4560,6 +4643,51 @@ def _agent_execution_plan(
     })
 
 
+def _mechanism_plan(
+    *,
+    has_task_signal: bool,
+    terminal_maintenance: bool,
+    execution_mode: str,
+    review_required: bool,
+    design_required: bool,
+    parallel_writers: int,
+) -> dict:
+    code_delivery = has_task_signal and not terminal_maintenance
+    required = ["analysis"] if has_task_signal else []
+    if design_required:
+        required.append("durable_design")
+    if execution_mode == "isolated":
+        required.extend(["task_lifecycle", "worktree"])
+    elif review_required:
+        required.append("task_lifecycle")
+    if parallel_writers > 1:
+        required.append("parallel_fixers")
+    if review_required:
+        required.append("independent_review")
+    if code_delivery:
+        required.extend(["final_changed_scope_gate", "commit_push"])
+    ordered = list(dict.fromkeys(required))
+    optional = [
+        mechanism
+        for mechanism in [
+            "classify",
+            "durable_design",
+            "task_lifecycle",
+            "worktree",
+            "read_only_subagents",
+            "parallel_fixers",
+            "independent_review",
+        ]
+        if mechanism not in ordered
+    ]
+    return {
+        "required": ordered,
+        "not_required": optional,
+        "lifecycle_required": "task_lifecycle" in ordered,
+        "rule": "do not add a mechanism that is not required unless the user explicitly requests it",
+    }
+
+
 def _resolve_execution_plan(
     cfg: dict,
     repo: Path,
@@ -4720,6 +4848,14 @@ def _resolve_execution_plan(
         parallel_writers=writer_count,
         review_required=review_required,
     )
+    mechanism_plan = _mechanism_plan(
+        has_task_signal=has_task_signal,
+        terminal_maintenance=terminal_maintenance,
+        execution_mode=execution_mode,
+        review_required=review_required,
+        design_required=design_required,
+        parallel_writers=writer_count,
+    )
     return {
         **impact,
         "contract_version": _AGENT_CONTRACT_VERSION,
@@ -4758,6 +4894,7 @@ def _resolve_execution_plan(
             review_required=review_required,
         ),
         "agent_plan": agent_plan,
+        "mechanism_plan": mechanism_plan,
     }
 
 
@@ -4809,6 +4946,14 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print("[classify] categories=" + (", ".join(result["categories"]) or "(none)"))
         print("[classify] agents=" + (", ".join(result["recommended_agents"]) or "(main agent only)"))
         print(f"[classify] agent_strategy={result['agent_plan']['strategy']}")
+        print(
+            "[classify] required_mechanisms="
+            + (", ".join(result["mechanism_plan"]["required"]) or "(none)")
+        )
+        print(
+            "[classify] not_required="
+            + (", ".join(result["mechanism_plan"]["not_required"]) or "(none)")
+        )
         for stage in result["agent_plan"]["stages"]:
             print(
                 "[classify] agent_stage="
@@ -4848,7 +4993,10 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_light_gate(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     light_gate_start = time.time()
+    monotonic_start = time.monotonic()
     cfg = _load_cfg(repo)
+    budget = _final_gate_budget(cfg)
+    deadline = monotonic_start + budget["total_seconds"]
     requested_scope = _text(getattr(args, "scope", "")).lower()
     if requested_scope not in {"", "auto", "changed"}:
         raise APError(
@@ -4870,9 +5018,20 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
 
     selected_scope = "changed"
     paths = list(plan.get("changed_files") or [])
-    executed = _run_changed_gate(repo, cfg, paths)
+    executed = _run_changed_gate(
+        repo,
+        cfg,
+        paths,
+        deadline=deadline,
+        command_timeout_s=budget["command_seconds"],
+    )
 
     _run_git_diff_check(repo, cfg)
+    if time.monotonic() > deadline:
+        raise APError(
+            f"Final changed-scope gate exceeded {budget['total_seconds']:.0f}s; "
+            "narrow validation.routes and keep slower checks explicit"
+        )
     executed.append("diff_check")
     duration_s = time.time() - light_gate_start
     _record_gate_profile(repo, cfg, "light_gate", "pass", duration_s, scope=selected_scope, detail=", ".join(executed))
@@ -5143,6 +5302,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     on_unmapped = _text(validation_cfg.get("on_unmapped")).lower() or "error"
     if on_unmapped not in {"error", "fallback"}:
         validation_errors.append("validation.on_unmapped must be error or fallback")
+    try:
+        _final_gate_budget(cfg)
+    except APError as exc:
+        validation_errors.append(str(exc))
     routes = validation_cfg.get("routes") or []
     if not isinstance(routes, list):
         validation_errors.append("validation.routes must be a list")
@@ -6517,6 +6680,17 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             planned_paths=owned_paths,
             parallel_writers=writer_count,
         )
+        explicit_lifecycle = bool(
+            getattr(args, "isolated", False)
+            or getattr(args, "review_required", False)
+            or getattr(args, "force_lifecycle", False)
+        )
+        if not plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
+            raise APError(
+                "This clean serial task does not need a machine task lifecycle. Work directly on "
+                "the current branch, run the routed final gate, commit, and push. Use task-start "
+                "only when classify requires isolation/review or the user explicitly requests it."
+            )
         review_required = bool(getattr(args, "review_required", False) or plan["review_required"])
         registry_dir = _task_state_root(repo) / "tasks"
         other_active = any(
@@ -7859,6 +8033,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--isolated", action="store_true")
     s.add_argument("--review-required", action="store_true")
+    s.add_argument(
+        "--force-lifecycle",
+        action="store_true",
+        help="Use only when the user explicitly requests lifecycle tracking for clean serial work",
+    )
     s.add_argument("--owned-path", action="append")
     s.add_argument("--depends-on", action="append", metavar="TASK_ID=SHA")
     s.add_argument("--no-fetch", action="store_true")

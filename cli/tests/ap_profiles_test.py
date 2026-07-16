@@ -240,9 +240,8 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertNotIn("新增登录鉴权页面并发布", str(plan))
 
     def test_ordinary_code_resolves_standard(self) -> None:
-        repo, cfg = self.make_repo("src/widget.py")
-        (repo / "docs" / "tasks" / "evidence.jsonl").write_text("{}\n", encoding="utf-8")
-        plan = self.plan(repo, cfg)
+        repo, cfg = self.make_repo()
+        plan = self.plan(repo, cfg, planned_paths=["src/widget.py"])
         self.assertEqual("standard", plan["profile"])
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
@@ -265,6 +264,12 @@ class AutoCodingProfileTests(unittest.TestCase):
         delivery = next(stage for stage in agent_plan["stages"] if stage["id"] == "delivery")
         self.assertEqual("serial", delivery["mode"])
         self.assertFalse(plan["review_required"])
+        self.assertEqual(
+            ["analysis", "final_changed_scope_gate", "commit_push"],
+            plan["mechanism_plan"]["required"],
+        )
+        self.assertFalse(plan["mechanism_plan"]["lifecycle_required"])
+        self.assertIn("task_lifecycle", plan["mechanism_plan"]["not_required"])
 
     def test_execution_mode_is_none_direct_isolated_or_parallel(self) -> None:
         repo, cfg = self.make_repo()
@@ -275,6 +280,8 @@ class AutoCodingProfileTests(unittest.TestCase):
         dirty.write_text("user change\n", encoding="utf-8")
         isolated = self.plan(repo, cfg, planned_paths=["src/widget.py"])
         self.assertEqual("isolated", isolated["execution_mode"])
+        self.assertTrue(isolated["mechanism_plan"]["lifecycle_required"])
+        self.assertIn("worktree", isolated["mechanism_plan"]["required"])
         dirty.unlink()
         parallel = self.plan(
             repo,
@@ -285,6 +292,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("isolated", parallel["execution_mode"])
         self.assertTrue(parallel["review_required"])
         self.assertIn("fixer", parallel["recommended_agents"])
+        self.assertIn("parallel_fixers", parallel["mechanism_plan"]["required"])
 
     def test_validation_routes_collect_all_commands_and_reject_unmapped_code(self) -> None:
         repo, cfg = self.make_repo()
@@ -303,6 +311,34 @@ class AutoCodingProfileTests(unittest.TestCase):
         with self.assertRaises(APError) as context:
             ap._validate_validation_plan(cfg, ap._validation_plan(cfg, ["contracts/api.yaml"]))
         self.assertIn("no validation route", str(context.exception))
+
+    def test_final_gate_budget_is_hard_bounded_and_times_out(self) -> None:
+        cfg = base_config()
+        cfg["validation"] = {
+            "on_unmapped": "error",
+            "max_command_seconds": 0.05,
+            "max_total_seconds": 0.1,
+            "routes": [{"name": "slow", "paths": ["src/**"], "commands": ["slow"]}],
+        }
+        cfg["commands"]["slow"] = f'{sys.executable} -c "import time; time.sleep(1)"'
+        repo, cfg = self.make_repo("src/widget.py", cfg)
+        with self.assertRaises(APError) as context:
+            ap.cmd_light_gate(
+                argparse.Namespace(
+                    repo=str(repo),
+                    scope="changed",
+                    profile="",
+                    mode="dev",
+                    base="",
+                    explain=False,
+                )
+            )
+        self.assertIn("timed out", str(context.exception))
+
+        cfg["validation"]["max_command_seconds"] = 121
+        with self.assertRaises(APError) as context:
+            ap._final_gate_budget(cfg)
+        self.assertIn("cannot exceed 120", str(context.exception))
 
     def test_test_only_change_resolves_micro(self) -> None:
         repo, cfg = self.make_repo("tests/widget_test.py")

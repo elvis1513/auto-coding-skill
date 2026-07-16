@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 from pathlib import Path
@@ -108,8 +109,23 @@ def find_config(repo: Path) -> Path:
     )
 
 
-def run_shell(command: str, cwd: Optional[Path] = None) -> None:
-    """Run shell command via bash -lc for cross-tool compatibility."""
-    p = subprocess.run(["bash", "-lc", command], cwd=str(cwd) if cwd else None, text=True)
-    if p.returncode != 0:
-        raise APError(f"Command failed ({p.returncode}): {command}")
+def run_shell(command: str, cwd: Optional[Path] = None, timeout_s: Optional[float] = None) -> None:
+    """Run a shell command and terminate its process group on timeout."""
+    p = subprocess.Popen(
+        ["bash", "-lc", command],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        returncode = p.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(p.pid, signal.SIGTERM)
+        try:
+            p.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+        raise APError(f"Command timed out after {timeout_s:.1f}s: {command}") from exc
+    if returncode != 0:
+        raise APError(f"Command failed ({returncode}): {command}")

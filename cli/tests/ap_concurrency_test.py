@@ -377,6 +377,19 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
     def test_clean_serial_task_uses_direct_branch_and_no_diff_is_noop(self) -> None:
         _, repo, remote = self.make_repo("adaptive", require_review=False)
         worktrees_before = git_output(repo, "worktree", "list", "--porcelain")
+        unnecessary = self.ap(
+            repo,
+            "task-start",
+            "DIRECT-SKIP",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "shared.txt",
+            check=False,
+        )
+        self.assertNotEqual(0, unnecessary.returncode)
+        self.assertIn("does not need a machine task lifecycle", unnecessary.stdout + unnecessary.stderr)
+        self.assertFalse(self.registry_manifest_path(repo, "DIRECT-SKIP").exists())
         start = self.ap(
             repo,
             "task-start",
@@ -385,6 +398,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "origin/dev",
             "--owned-path",
             "shared.txt",
+            "--force-lifecycle",
         )
         self.assertIn("execution_mode=direct", start.stdout)
         self.assertEqual(worktrees_before, git_output(repo, "worktree", "list", "--porcelain"))
@@ -400,7 +414,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertFalse(self.registry_manifest_path(repo, "DIRECT-1").exists())
 
         before = git_output(repo, "rev-parse", "HEAD")
-        self.ap(repo, "task-start", "DIRECT-NOOP", "--owned-path", "shared.txt")
+        self.ap(repo, "task-start", "DIRECT-NOOP", "--owned-path", "shared.txt", "--force-lifecycle")
         noop = self.ap(repo, "commit-push", "DIRECT-NOOP", "--msg", "DIRECT-NOOP: none")
         self.assertIn("NOOP", noop.stdout)
         self.assertEqual(before, git_output(repo, "rev-parse", "HEAD"))

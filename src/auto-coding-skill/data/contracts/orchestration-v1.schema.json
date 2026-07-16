@@ -11,6 +11,17 @@
         "type": "string"
       }
     },
+    "mechanismPlan": {
+      "type": "object",
+      "required": ["required", "not_required", "lifecycle_required", "rule"],
+      "properties": {
+        "required": { "$ref": "#/$defs/stringArray" },
+        "not_required": { "$ref": "#/$defs/stringArray" },
+        "lifecycle_required": { "type": "boolean" },
+        "rule": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "fingerprint": {
       "type": "string",
       "pattern": "^$|^[0-9a-f]{64}$"
@@ -444,7 +455,8 @@
         "profile",
         "categories",
         "recommended_agents",
-        "agent_plan"
+        "agent_plan",
+        "mechanism_plan"
       ],
       "properties": {
         "contract_version": {
@@ -483,6 +495,9 @@
         },
         "agent_plan": {
           "$ref": "#/$defs/agentPlan"
+        },
+        "mechanism_plan": {
+          "$ref": "#/$defs/mechanismPlan"
         }
       },
       "additionalProperties": true

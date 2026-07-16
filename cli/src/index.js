@@ -1083,6 +1083,8 @@ function projectStatus(project, assetSkill, assetAgents){
     { label: "concurrency.delete_remote_branch", path: ["concurrency", "delete_remote_branch"] },
     { label: "concurrency.disposable_ignored", path: ["concurrency", "disposable_ignored"] },
     { label: "validation.on_unmapped", path: ["validation", "on_unmapped"] },
+    { label: "validation.max_command_seconds", path: ["validation", "max_command_seconds"] },
+    { label: "validation.max_total_seconds", path: ["validation", "max_total_seconds"] },
     { label: "validation.routes", path: ["validation", "routes"], sequence: true },
     { label: "risk.rules", path: ["risk", "rules"] },
     { label: "docs.framework", path: ["docs", "framework"], filled: true },
@@ -1122,6 +1124,24 @@ function projectStatus(project, assetSkill, assetAgents){
     const isolationState = frontmatterPathState(text, ["concurrency", "isolation"]);
     if (isolationState.present && !["adaptive", "worktree"].includes(frontmatterScalarValue(isolationState.value).toLowerCase())) {
       invalidConfigTokens.push("concurrency.isolation (must be adaptive or worktree)");
+    }
+    for (const [pathParts, maximum] of [
+      [["validation", "max_command_seconds"], 120],
+      [["validation", "max_total_seconds"], 180],
+    ]) {
+      const state = frontmatterPathState(text, pathParts);
+      if (!state.present) continue;
+      const value = Number(frontmatterScalarValue(state.value));
+      if (!Number.isFinite(value) || value <= 0 || value > maximum) {
+        invalidConfigTokens.push(`${pathParts.join(".")} (must be > 0 and <= ${maximum})`);
+      }
+    }
+    const commandState = frontmatterPathState(text, ["validation", "max_command_seconds"]);
+    const totalState = frontmatterPathState(text, ["validation", "max_total_seconds"]);
+    const commandBudget = Number(frontmatterScalarValue(commandState.value));
+    const totalBudget = Number(frontmatterScalarValue(totalState.value));
+    if (commandState.present && totalState.present && Number.isFinite(commandBudget) && Number.isFinite(totalBudget) && commandBudget > totalBudget) {
+      invalidConfigTokens.push("validation.max_command_seconds (cannot exceed max_total_seconds)");
     }
     invalidConfigTokens.push(...legacyGateEscalationTokens(text));
   }

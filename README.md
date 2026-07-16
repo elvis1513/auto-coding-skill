@@ -9,7 +9,7 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1 consolidates the 4.x delivery-first workflow into one canonical
+Version 4.1.1 consolidates the 4.x delivery-first workflow into one canonical
 repository contract. Version 4.0 replaced the 3.x governance-first defaults with progressive
 guardrails. Clean single-writer work stays on the current branch. Worktrees,
 parallel fixers, fingerprint review, durable design records, and stronger
@@ -65,9 +65,13 @@ The result includes:
 - `execution_mode=isolated`: dirty checkout, explicit isolation, or multiple writers.
 - `execution_mode=none`: no task signal or change; create no branch/worktree.
 - `review_required` and `design_required`: risk-based escalation decisions.
+- `mechanism_plan.required`: the complete minimum mechanism set for the task.
+- `mechanism_plan.not_required`: mechanisms that stay off unless the user asks.
 - an adaptive agent plan that does not force fan-out for ordinary work.
 
-Use a machine-enforced task lifecycle when useful:
+Clean serial work proceeds directly on the current branch with normal Git; it does
+not create machine lifecycle state. Use `task-start` only when classification
+requires isolation/review or the user explicitly requests lifecycle tracking:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
@@ -76,10 +80,9 @@ python3 docs/tools/autopipeline/ap.py commit-push T0001 \
   --msg "T0001: fix order retry"
 ```
 
-On a clean single-writer checkout, `task-start` records a lightweight direct
-manifest in the Git common directory and creates no branch or worktree.
-`commit-push` runs the final gate, commits, and pushes the current target branch.
-If no diff was produced, it clears the manifest without commit or push.
+When a required review still uses the current clean checkout, `task-start` records
+a direct manifest without creating a branch/worktree. If no diff is produced,
+closure clears the manifest without commit or push.
 
 Dirty or parallel work receives an isolated task branch/worktree:
 
@@ -113,6 +116,8 @@ commands:
 
 validation:
   on_unmapped: error
+  max_command_seconds: 120
+  max_total_seconds: 180
   routes:
     - name: backend
       paths: ["backend/**", "contracts/**"]
@@ -146,6 +151,10 @@ Focused tests may be run and rerun during implementation. Only the final routed
 closure gate is limited to one stable-diff run. Full regression, Docker, builds,
 Jenkins, deployment, API verification, and target checks remain explicit
 diagnostics outside normal closure.
+
+The final closure gate is hard-bounded to at most 120 seconds per command and 180
+seconds total; projects may lower those values. A timeout requires a narrower
+route and never triggers a broader fallback.
 
 ## Risk and subagent policy
 
@@ -182,6 +191,15 @@ values, custom role agents, explicit model overrides, optional documents, and
 project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
+
+## What changed in 4.1.1
+
+- Added a machine-readable minimum mechanism plan and rejected unnecessary clean
+  serial task lifecycles unless explicitly requested.
+- Added hard per-command and total time ceilings for the final changed-scope gate.
+- Made root `AGENTS.md` the sole behavioral protocol, reduced `SKILL.md` to
+  invocation guidance, and reduced `ENGINEERING.md` to project configuration and
+  facts.
 
 ## What changed in 4.1.0
 

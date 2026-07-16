@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.1.5"
+  skill_version: "4.1.6"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -94,7 +94,7 @@ docs:
 
 # Engineering Configuration and Project Facts
 
-<!-- auto-coding-skill:managed-workflow:start version=4.1.5 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.1.6 -->
 
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the single source for the

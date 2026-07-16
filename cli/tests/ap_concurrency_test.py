@@ -16,6 +16,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AP_SCRIPT = REPO_ROOT / "src" / "auto-coding-skill" / "scripts" / "ap.py"
 _MISSING = object()
+_TEST_OWNER = os.environ.get("CODEX_THREAD_ID") or "concurrency-test-owner"
 
 
 def command(
@@ -25,7 +26,7 @@ def command(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    env.setdefault("CODEX_THREAD_ID", "concurrency-test-owner")
+    env.setdefault("CODEX_THREAD_ID", _TEST_OWNER)
     result = subprocess.run(
         list(args),
         cwd=cwd,
@@ -655,7 +656,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_writer_lease_requires_match_and_owner_handoff_uses_generation_cas(self) -> None:
         _, repo, _ = self.make_repo()
-        owner = os.environ["CODEX_THREAD_ID"]
+        owner = _TEST_OWNER
         self.ap(
             repo,
             "task-start",
@@ -1337,6 +1338,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         git(task_module, "update-ref", "-d", "refs/heads/extra-check", extra_tip)
 
         git(task_module, "checkout", "-qb", "hidden")
+        git(task_module, "config", "user.email", "test@example.com")
+        git(task_module, "config", "user.name", "Auto Coding Test")
         (task_module / "hidden.txt").write_text("local-only history\n", encoding="utf-8")
         git(task_module, "add", "hidden.txt")
         git(task_module, "commit", "-qm", "hidden local commit")
@@ -1683,6 +1686,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
         module_b = worktree / "vendor" / "b"
         baseline = git_output(module_b, "rev-parse", "HEAD")
+        git(module_b, "config", "user.email", "test@example.com")
+        git(module_b, "config", "user.name", "Auto Coding Test")
         git(module_b, "checkout", "-qb", "hidden")
         (module_b / "hidden.txt").write_text("local-only residual history\n", encoding="utf-8")
         git(module_b, "add", "hidden.txt")

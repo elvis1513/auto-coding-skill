@@ -752,7 +752,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.5 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.6 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -771,7 +771,7 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "4.1.5", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "4.1.6", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
@@ -781,14 +781,14 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
   const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
   assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
   assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
-  assert(updated.includes("version=4.1.5"), "sync should install the current managed workflow version");
+  assert(updated.includes("version=4.1.6"), "sync should install the current managed workflow version");
   assert(updated.includes("The frontmatter contract is:"), "sync should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "4.1.5", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "4.1.6", "status should expose the installed managed workflow version");
 
   const beforeSecondSync = fs.readFileSync(engineering, "utf8");
   const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
@@ -816,7 +816,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=4.1.5"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=4.1.6"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
   const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
   const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
@@ -920,7 +920,7 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=4.1.5"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=4.1.6"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -939,12 +939,12 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=4.1.5"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("managed-agents:start version=4.1.6"), "AGENTS migration should install the current managed block");
   assert(!migrated.includes("Preserve this repository-specific rule exactly."), "root AGENTS must contain no project-specific tail");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
   const canonical = fs.readFileSync(path.join(repoRoot, "cli", "assets", "skill", "data", "templates", "bridges", "AGENTS.md"), "utf8");
   assert(migrated === canonical, "root AGENTS must be byte-identical to the packaged canonical file");
-  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.5.md");
+  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.6.md");
   assert(fs.readFileSync(archive, "utf8").includes("Preserve this repository-specific rule exactly."), "previous AGENTS content must be archived once");
   const stable = fs.readFileSync(agents);
   run("node", [cli, "sync", "--projects", repo]);
@@ -1003,7 +1003,7 @@ function testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow()
   const migrationResult = JSON.parse(migration.stdout).results[0];
   assert(migrationResult.managedWorkflow.state === "stale", "known duplicate sections should use controlled migration");
   assert(migrationResult.managedWorkflow.migrations.includes("engineering-section-delivery-flow"), "known section migration should be explicit");
-  assert(migrationResult.actions.some(item => item.action === "would-archive" && item.path.includes("ENGINEERING.pre-4.1.5")), "controlled section cleanup should archive the previous ENGINEERING file");
+  assert(migrationResult.actions.some(item => item.action === "would-archive" && item.path.includes("ENGINEERING.pre-4.1.6")), "controlled section cleanup should archive the previous ENGINEERING file");
   run("node", [cli, "sync", "--projects", repo]);
   assert(!fs.readFileSync(engineering, "utf8").includes("Known obsolete workflow"), "known duplicate workflow section should be removed");
 
@@ -1015,14 +1015,14 @@ function testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow()
 }
 
 function testReleaseVersionMarkersStayInSync() {
-  const expected = "4.1.5";
+  const expected = "4.1.6";
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
   const policy = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "workflow-migrations-v1.json"),
     "utf8",
   ));
-  assert(pkg.version === expected, "package version must match the 4.1.5 release");
+  assert(pkg.version === expected, "package version must match the 4.1.6 release");
   assert(lock.version === expected && lock.packages[""].version === expected, "package-lock versions must match");
   assert(policy.managed_versions.engineering === expected && policy.managed_versions.agents === expected, "managed workflow versions must match");
   const publishWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "npm-publish.yml"), "utf8");

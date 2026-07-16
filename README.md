@@ -9,8 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.5 makes the Python runtime check and tag publication environment
-reproducible while removing the unnecessary `requests` dependency. Version 4.1.4
+Version 4.1.6 makes the Python runtime check, release verification, and tag
+publication environment reproducible while removing the unnecessary `requests`
+dependency. Version 4.1.4
 made direct continuation provably pre-write, closed self-review and
 risk-classification gaps, validated Agent contracts, and made tag publication
 idempotent. Version 4.1.3 closed classification bypasses. Version 4.1.2 made mechanisms required,
@@ -212,13 +213,15 @@ project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` i
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
 
-## What changed in 4.1.5
+## What changed in 4.1.6
 
 - Made tag publication reproducible with explicit Node 24, Python 3.12, and pinned
   PyYAML setup before package verification.
 - Made `autocoding init` fail before writes with one interpreter-specific recovery
   command when its Python runtime cannot import PyYAML.
 - Removed the `requests` runtime dependency by using Python's standard HTTP library.
+- Made concurrency tests self-contained instead of borrowing local thread and Git
+  identity configuration.
 
 ## What changed in 4.1.4
 

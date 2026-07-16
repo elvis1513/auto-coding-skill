@@ -186,7 +186,9 @@ function testInitFullyConvergesExistingProject() {
     .replace("concurrency:\n", "legacy_extra:\n  forbidden: true\n\nconcurrency:\n")
     .replace("# Project Facts", "# Obsolete workflow rules\n\nRun a full build every time.\n\n# Project Facts"));
   writeFile(path.join(repo, "docs", "legacy", "old-taskbook.md"), "historical\n");
-  writeFile(path.join(repo, "docs", "architecture", "adr", "ADR-0042-project-choice.md"), "# ADR-0042\n\nKeep me.\n");
+  writeFile(path.join(repo, "docs", "architecture", "system-context.md"), "# System context\n\nKeep me.\n");
+  writeFile(path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md"), "# ADR-0042\n\nKeep me.\n");
+  writeFile(path.join(repo, "docs", "interfaces", "event-contracts.md"), "# Events\n\nKeep me.\n");
   writeFile(path.join(repo, "docs", "architecture", "structure-standard.md"), "# stale managed template\n");
   writeFile(path.join(repo, ".agents", "agents", "custom.toml"), 'name = "custom"\n');
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt"), "obsolete\n");
@@ -195,7 +197,12 @@ function testInitFullyConvergesExistingProject() {
   const installedDocs = listProjectFiles(path.join(repo, "docs"))
     .map(file => path.relative(repo, file).split(path.sep).join("/"))
     .sort();
-  const expectedInstalledDocs = [...exactDocs, "docs/architecture/adr/ADR-0042-project-choice.md"].sort();
+  const expectedInstalledDocs = [
+    ...exactDocs,
+    "docs/architecture/adr/0042-project-choice.md",
+    "docs/architecture/system-context.md",
+    "docs/interfaces/event-contracts.md",
+  ].sort();
   assert(JSON.stringify(installedDocs) === JSON.stringify(expectedInstalledDocs), `docs framework must converge while preserving valid artifacts: ${installedDocs.join(", ")}`);
   const converged = fs.readFileSync(engineering, "utf8");
   assert(converged.includes("preserved-project-secret"), "supported access values must survive init");
@@ -204,7 +211,9 @@ function testInitFullyConvergesExistingProject() {
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt")), "extra Skill files must be removed");
   assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "structure-standard.md"), "utf8").startsWith("# Project Structure Standard"), "managed templates must be replaced");
-  assert(fs.readFileSync(path.join(repo, "docs", "architecture", "adr", "ADR-0042-project-choice.md"), "utf8").includes("Keep me"), "valid ADR artifacts must survive init");
+  assert(fs.readFileSync(path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md"), "utf8").includes("Keep me"), "numbered ADR artifacts must survive init");
+  assert(fs.readFileSync(path.join(repo, "docs", "architecture", "system-context.md"), "utf8").includes("Keep me"), "architecture artifacts must survive init");
+  assert(fs.readFileSync(path.join(repo, "docs", "interfaces", "event-contracts.md"), "utf8").includes("Keep me"), "interface artifacts must survive init");
 
   run("node", [cli, "init"], { cwd: repo });
   const secondDocs = listProjectFiles(path.join(repo, "docs"))

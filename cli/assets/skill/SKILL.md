@@ -84,5 +84,5 @@ Finish registered tasks before changing versions. `autocoding init` is idempoten
 and performs the complete install/upgrade: it replaces every managed constraint,
 preserves only schema-supported project values, installs the canonical docs
 directory framework and managed templates, and archives obsolete content outside
-active `docs/` while preserving valid ADR/DD/review/deploy-record and domain API
-artifacts in their designated directories.
+active `docs/` while preserving valid architecture, ADR, interface, DD, review,
+and deploy-record artifacts in their designated directories.

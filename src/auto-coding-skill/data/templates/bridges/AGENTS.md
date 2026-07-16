@@ -115,9 +115,9 @@ failure may continue in the same conversation/task without a second lifecycle.
   configuration source; `docs/project/` owns durable facts. Do not repeat the
   protocol elsewhere.
 - `autocoding init` owns the active `docs/` directory topology and managed
-  templates. Put durable facts into the installed project/interface files. ADR,
-  DD, review, and deploy-record artifacts may use their designated directories;
-  unrelated directories are archived outside active docs on upgrade.
+  templates. Put durable facts into the installed project files. Architecture,
+  ADR, interface, DD, review, and deploy-record artifacts may use their designated
+  directories; unrelated directories are archived outside active docs on upgrade.
 - Ordinary work creates no taskbook, closure Markdown, evidence JSONL, active-task
   document, or design file. Machine coordination/evidence stays in Git
   common/local state and cannot change the reviewed diff.

@@ -44,9 +44,9 @@ AGENTS.md (fully managed canonical repository contract)
 
 `autocoding init` also installs the exact shared documentation tree under
 `docs/{architecture,bugs,deployment,design,interfaces,project,reviews,testing}`.
-Managed templates are replaced, mutable project docs and valid ADR/DD/review/deploy
-records or domain API documents are preserved, and unrelated directories are archived under
-`.agents/archive/`. Re-running init is the complete upgrade operation;
+Managed templates are replaced; mutable project docs and valid architecture, ADR,
+interface, DD, review, or deploy-record documents are preserved; unrelated
+directories are archived under `.agents/archive/`. Re-running init is the complete upgrade operation;
 `sync` and project-local `upgrade` are compatibility commands, not required steps.
 
 Fill the project/Jenkins/GitLab/Nexus URL, username, and password fields under

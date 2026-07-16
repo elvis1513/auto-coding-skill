@@ -832,10 +832,11 @@ _MANAGED_FRAMEWORK_DOCS = {
 }
 
 _PROJECT_ARTIFACT_PATTERNS = (
-    "docs/architecture/adr/ADR-*.md",
+    "docs/architecture/*.md",
+    "docs/architecture/adr/*.md",
     "docs/deployment/deploy-records/*.md",
     "docs/design/*.md",
-    "docs/interfaces/api-*.md",
+    "docs/interfaces/*.md",
     "docs/reviews/*.md",
 )
 

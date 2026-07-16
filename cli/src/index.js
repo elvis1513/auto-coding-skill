@@ -974,8 +974,8 @@ function frontmatterSequenceHasItems(text, keyPath){
       for (let child = index + 1; child < lines.length; child += 1) {
         if (!lines[child].trim() || lines[child].trim().startsWith("#")) continue;
         const childIndent = lines[child].match(/^\s*/)[0].replace(/\t/g, "  ").length;
+        if (/^\s*-\s+\S/.test(lines[child]) && childIndent >= indent) return true;
         if (childIndent <= indent) return false;
-        if (/^\s*-\s+\S/.test(lines[child])) return true;
       }
       return false;
     }

@@ -360,6 +360,20 @@ function testStatusRejectsLegacyGateEscalation() {
   }
 }
 
+function testStatusAcceptsValidIndentlessYamlRoutes() {
+  const repo = tmpdir("indentless-routes");
+  run("node", [cli, "init"], { cwd: repo });
+  fillRequiredAccess(repo);
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  const text = fs.readFileSync(engineering, "utf8").replace(
+    /(^  routes:\n)([\s\S]*?)(?=^risk:)/m,
+    (_match, heading, body) => heading + body.replace(/^    /gm, "  "),
+  );
+  writeFile(engineering, text);
+  const status = run("node", [cli, "status", "--projects", repo, "--json"]);
+  assert(JSON.parse(status.stdout).results[0].ok === true, "valid indentless YAML routes must not be reported as empty");
+}
+
 function testOrdinaryNodeTestIsNotPromotedToAutomaticGate() {
   const repo = tmpdir("node-gate-inference");
   writeFile(path.join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }, null, 2) + "\n");
@@ -1082,6 +1096,7 @@ testLauncherFallsBackToGlobalRuntime();
 testMinimalInitConvergesWithinBudget();
 testStatusRejectsLegacyIsolation();
 testStatusRejectsLegacyGateEscalation();
+testStatusAcceptsValidIndentlessYamlRoutes();
 testOrdinaryNodeTestIsNotPromotedToAutomaticGate();
 testAccessPasswordsAreRequiredButNeverPrintedByStatus();
 testManagedAgentModelsInheritAndOverridesSurvive();

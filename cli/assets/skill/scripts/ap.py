@@ -46,12 +46,12 @@ _GENERATED_NOISE_PATTERNS = [
 ]
 _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
-_MAX_FINAL_COMMAND_SECONDS = 120.0
-_MAX_FINAL_TOTAL_SECONDS = 180.0
+_RECOMMENDED_FINAL_COMMAND_SECONDS = 120.0
+_RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.1", "engineering": "4.1.1"},
+    "managed_versions": {"agents": "4.1.2", "engineering": "4.1.2"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -638,8 +638,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.1":
-        workflow_cfg["skill_version"] = "4.1.1"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.2":
+        workflow_cfg["skill_version"] = "4.1.2"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -689,8 +689,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
         validation_cfg["on_unmapped"] = "error"
         changed.append("validation.on_unmapped")
     for key, default_value in [
-        ("max_command_seconds", int(_MAX_FINAL_COMMAND_SECONDS)),
-        ("max_total_seconds", int(_MAX_FINAL_TOTAL_SECONDS)),
+        ("max_command_seconds", int(_RECOMMENDED_FINAL_COMMAND_SECONDS)),
+        ("max_total_seconds", int(_RECOMMENDED_FINAL_TOTAL_SECONDS)),
     ]:
         if key not in validation_cfg:
             validation_cfg[key] = default_value
@@ -952,16 +952,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.1\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.2\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.1.md"
+            archive = archive_dir / "AGENTS.pre-4.1.2.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.1-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.2-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -1732,6 +1732,17 @@ def _task_registry_path(repo: Path, task_id: str) -> Path:
     return _task_state_root(repo) / "tasks" / f"{_validate_task_id(task_id)}.json"
 
 
+def _has_registered_active_task(repo: Path) -> bool:
+    registry = _task_state_root(repo) / "tasks"
+    if not registry.exists():
+        return False
+    for path in sorted(registry.glob("*.json")):
+        payload = _read_json_object(path) or {}
+        if _text(payload.get("state")) not in {"", "integrated", "cleanup-pending"}:
+            return True
+    return False
+
+
 def _worktree_manifest_path(repo: Path) -> Path:
     return _git_dir(repo) / "auto-coding-skill-task.json"
 
@@ -2466,6 +2477,7 @@ def _resolve_secret(section_name: str, section_cfg: dict, field: str) -> str:
 
 _GATE_SCOPES = {"auto", "changed", "standard", "full"}
 _WORKFLOW_PROFILES = {"auto", "micro", "standard", "high-risk"}
+_TASK_KINDS = {"auto", "none", "read_only", "change", "terminal_maintenance"}
 _PROFILE_GATE_SCOPE = {"micro": "changed", "standard": "changed", "high-risk": "changed"}
 _PROFILE_RANK = {"micro": 0, "standard": 1, "high-risk": 2}
 _SCOPE_RANK = {"changed": 0, "standard": 1, "full": 2}
@@ -2529,24 +2541,14 @@ def _final_gate_budget(cfg: dict) -> dict[str, float]:
     validation_cfg = _validation_cfg(cfg)
     command_seconds = _positive_seconds(
         validation_cfg.get("max_command_seconds"),
-        _MAX_FINAL_COMMAND_SECONDS,
+        _RECOMMENDED_FINAL_COMMAND_SECONDS,
         "validation.max_command_seconds",
     )
     total_seconds = _positive_seconds(
         validation_cfg.get("max_total_seconds"),
-        _MAX_FINAL_TOTAL_SECONDS,
+        _RECOMMENDED_FINAL_TOTAL_SECONDS,
         "validation.max_total_seconds",
     )
-    if command_seconds > _MAX_FINAL_COMMAND_SECONDS:
-        raise APError(
-            f"validation.max_command_seconds cannot exceed {_MAX_FINAL_COMMAND_SECONDS:.0f}; "
-            "move slower checks to an explicit diagnostic command"
-        )
-    if total_seconds > _MAX_FINAL_TOTAL_SECONDS:
-        raise APError(
-            f"validation.max_total_seconds cannot exceed {_MAX_FINAL_TOTAL_SECONDS:.0f}; "
-            "move slower checks to an explicit diagnostic command"
-        )
     if command_seconds > total_seconds:
         raise APError("validation.max_command_seconds cannot exceed validation.max_total_seconds")
     return {"command_seconds": command_seconds, "total_seconds": total_seconds}
@@ -2588,6 +2590,7 @@ def _run_configured_command_list(
     *,
     deadline: Optional[float] = None,
     command_timeout_s: Optional[float] = None,
+    command_timeouts: Optional[dict[str, float]] = None,
 ) -> list[str]:
     executed: list[str] = []
     missing: list[str] = []
@@ -2597,6 +2600,9 @@ def _run_configured_command_list(
             continue
         if _configured_command(cfg, name):
             timeout_s = command_timeout_s
+            route_timeout = (command_timeouts or {}).get(name)
+            if route_timeout is not None:
+                timeout_s = min(timeout_s, route_timeout) if timeout_s is not None else route_timeout
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -2784,6 +2790,7 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
     normalized = _unique_paths(paths)
     routes = _validation_routes(cfg)
     command_names: list[str] = []
+    command_timeouts: dict[str, float] = {}
     matched_routes: list[str] = []
     coverage: dict[str, list[str]] = {}
     unmapped: list[str] = []
@@ -2794,6 +2801,13 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
             if not _validation_route_matches(path, route):
                 continue
             route_name = _text(route.get("name")) or f"route-{index + 1}"
+            route_timeout: Optional[float] = None
+            if route.get("timeout_seconds") not in {None, ""}:
+                route_timeout = _positive_seconds(
+                    route.get("timeout_seconds"),
+                    1.0,
+                    f"validation.routes[{index}].timeout_seconds",
+                )
             names.append(route_name)
             if route_name not in matched_routes:
                 matched_routes.append(route_name)
@@ -2801,6 +2815,13 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
                 command_name = _command_name(command_ref)
                 if command_name and command_name not in command_names:
                     command_names.append(command_name)
+                if command_name and route_timeout is not None:
+                    current_timeout = command_timeouts.get(command_name)
+                    command_timeouts[command_name] = (
+                        min(current_timeout, route_timeout)
+                        if current_timeout is not None
+                        else route_timeout
+                    )
         coverage[path] = names
         if not names and not _path_matches(path, _DOC_PATH_PATTERNS):
             unmapped.append(path)
@@ -2829,6 +2850,7 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
     return {
         "paths": normalized,
         "commands": command_names,
+        "command_timeouts": command_timeouts,
         "matched_routes": matched_routes,
         "coverage": coverage,
         "unmapped": unmapped,
@@ -2965,6 +2987,7 @@ def _run_changed_gate(
         plan["commands"],
         deadline=deadline,
         command_timeout_s=command_timeout_s,
+        command_timeouts=plan["command_timeouts"],
     )
     print(
         "[validation] routes="
@@ -2990,6 +3013,7 @@ def cmd_validation_map_check(args: argparse.Namespace) -> None:
     result = {
         "paths": plan["paths"],
         "commands": plan["commands"],
+        "command_timeouts": plan["command_timeouts"],
         "matched_routes": plan["matched_routes"],
         "coverage": plan["coverage"],
         "docs_only": plan["docs_only"],
@@ -4464,6 +4488,47 @@ def _classify_intent(intent: str) -> list[str]:
     )
 
 
+def _resolve_task_kind(
+    requested: str,
+    paths: list[str],
+    intent: str,
+) -> str:
+    value = _text(requested).lower().replace("-", "_") or "auto"
+    if value not in _TASK_KINDS:
+        raise APError("task kind must be one of: " + ", ".join(sorted(_TASK_KINDS)))
+    if value != "auto":
+        return value
+    if _is_terminal_ledger_maintenance(paths):
+        return "terminal_maintenance"
+    if paths:
+        return "change"
+    normalized_intent = _text(intent).lower()
+    if not normalized_intent:
+        return "none"
+    terminal_action = bool(
+        re.search(r"\b(archive|close|reconcile)\b", normalized_intent)
+        or any(keyword in normalized_intent for keyword in ["归档", "对账", "收口"])
+    )
+    terminal_subject = bool(
+        re.search(r"\b(closure|ledger|task\s+records?|taskbook)\b", normalized_intent)
+        or any(keyword in normalized_intent for keyword in ["台账", "任务记录", "关闭记录"])
+    )
+    if terminal_action and terminal_subject:
+        return "terminal_maintenance"
+    english_change = re.search(
+        r"\b(add|build|change|create|delete|deploy|develop|fix|implement|migrate|optimize|publish|refactor|release|remove|rename|resolve|update|upgrade)\b",
+        normalized_intent,
+    )
+    chinese_change = any(
+        keyword in normalized_intent
+        for keyword in [
+            "修改", "新增", "删除", "修复", "解决", "整改", "实现", "迁移", "发布",
+            "重构", "改名", "升级", "优化", "完善", "补充", "清理", "落地", "提交", "推送",
+        ]
+    )
+    return "change" if english_change or chinese_change else "read_only"
+
+
 def _normalize_workflow_profile(value: object, default: str = "auto") -> str:
     profile = _text(value).lower() or default
     if profile not in _WORKFLOW_PROFILES:
@@ -4645,46 +4710,66 @@ def _agent_execution_plan(
 
 def _mechanism_plan(
     *,
-    has_task_signal: bool,
-    terminal_maintenance: bool,
+    task_kind: str,
     execution_mode: str,
     review_required: bool,
     design_required: bool,
     parallel_writers: int,
 ) -> dict:
-    code_delivery = has_task_signal and not terminal_maintenance
-    required = ["analysis"] if has_task_signal else []
-    if design_required:
-        required.append("durable_design")
-    if execution_mode == "isolated":
-        required.extend(["task_lifecycle", "worktree"])
-    elif review_required:
-        required.append("task_lifecycle")
-    if parallel_writers > 1:
-        required.append("parallel_fixers")
-    if review_required:
-        required.append("independent_review")
-    if code_delivery:
+    universe = [
+        "analysis",
+        "targeted_consistency_check",
+        "durable_design",
+        "task_lifecycle",
+        "worktree",
+        "read_only_subagents",
+        "parallel_fixers",
+        "independent_review",
+        "final_changed_scope_gate",
+        "commit_push",
+    ]
+    required: list[str] = []
+    optional: list[str] = []
+    if task_kind == "read_only":
+        required = ["analysis"]
+        optional = ["read_only_subagents"]
+    elif task_kind == "terminal_maintenance":
+        required = ["analysis", "targeted_consistency_check", "commit_push"]
+    elif task_kind == "change":
+        required = ["analysis"]
+        if design_required:
+            required.append("durable_design")
+        else:
+            optional.append("durable_design")
+        if execution_mode == "isolated":
+            required.extend(["task_lifecycle", "worktree"])
+        elif review_required:
+            required.append("task_lifecycle")
+        if parallel_writers > 1:
+            required.append("parallel_fixers")
+        else:
+            optional.append("parallel_fixers")
+        if review_required:
+            required.append("independent_review")
+        else:
+            optional.append("independent_review")
+        optional.append("read_only_subagents")
         required.extend(["final_changed_scope_gate", "commit_push"])
     ordered = list(dict.fromkeys(required))
-    optional = [
-        mechanism
-        for mechanism in [
-            "classify",
-            "durable_design",
-            "task_lifecycle",
-            "worktree",
-            "read_only_subagents",
-            "parallel_fixers",
-            "independent_review",
-        ]
-        if mechanism not in ordered
-    ]
+    optional = [item for item in dict.fromkeys(optional) if item not in ordered]
+    forbidden = [item for item in universe if item not in ordered and item not in optional]
     return {
         "required": ordered,
-        "not_required": optional,
+        "optional_when_beneficial": optional,
+        "forbidden": forbidden,
+        # 4.1 compatibility: old clients treat only truly forbidden mechanisms
+        # as not required; model-selectable mechanisms remain available.
+        "not_required": forbidden,
         "lifecycle_required": "task_lifecycle" in ordered,
-        "rule": "do not add a mechanism that is not required unless the user explicitly requests it",
+        "rule": (
+            "run required mechanisms; select optional mechanisms only when expected value exceeds "
+            "coordination cost; do not run forbidden mechanisms unless the user explicitly overrides"
+        ),
     }
 
 
@@ -4700,6 +4785,7 @@ def _resolve_execution_plan(
     planned_paths: Optional[list[str]] = None,
     intent: str = "",
     parallel_writers: int = 1,
+    requested_task_kind: str = "",
 ) -> dict:
     impact = _impact_summary(
         cfg,
@@ -4713,6 +4799,7 @@ def _resolve_execution_plan(
         {_normalize_owned_path(item) for item in (planned_paths or []) if _text(item)}
     )
     classification_inputs = [*paths, *normalized_planned_paths]
+    task_kind = _resolve_task_kind(requested_task_kind, classification_inputs, intent)
     classification = _classify_paths(classification_inputs)
     intent_categories = _classify_intent(intent)
     merged_categories = set(classification["categories"]) | set(intent_categories)
@@ -4733,8 +4820,11 @@ def _resolve_execution_plan(
         (docs_only_paths and str(impact["selected_scope"]) != "full")
         or _tests_only(classification_inputs)
     )
-    terminal_maintenance = _is_terminal_ledger_maintenance(classification_inputs)
-    if docs_or_tests_only and str(impact["selected_scope"]) != "full":
+    terminal_maintenance = task_kind == "terminal_maintenance"
+    if task_kind in {"read_only", "terminal_maintenance", "none"}:
+        detected_profile = "micro"
+        profile_reasons.append(f"task kind: {task_kind}")
+    elif docs_or_tests_only and str(impact["selected_scope"]) != "full":
         detected_profile = "micro"
         profile_reasons.append("only docs/test files changed")
 
@@ -4745,10 +4835,10 @@ def _resolve_execution_plan(
             "matched gate rule has invalid profile: " + ", ".join(sorted(invalid_rule_profiles))
         )
     rule_profiles = raw_rule_profiles
-    if "micro" in rule_profiles and detected_profile == "standard":
+    if task_kind == "change" and "micro" in rule_profiles and detected_profile == "standard":
         detected_profile = "micro"
         profile_reasons.append("matched gate rule with profile=micro")
-    if "standard" in rule_profiles and detected_profile == "micro":
+    if task_kind == "change" and "standard" in rule_profiles and detected_profile == "micro":
         detected_profile = "standard"
         profile_reasons.append("matched gate rule with profile=standard")
 
@@ -4762,9 +4852,9 @@ def _resolve_execution_plan(
         "release_or_tooling",
     }
     high_signals: list[str] = []
-    if categories & high_categories and not docs_or_tests_only:
+    if task_kind == "change" and categories & high_categories and not docs_or_tests_only:
         high_signals.append("high-risk category: " + ", ".join(sorted(categories & high_categories)))
-    if "high-risk" in rule_profiles:
+    if task_kind == "change" and "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
     if high_signals:
         detected_profile = "high-risk"
@@ -4817,19 +4907,19 @@ def _resolve_execution_plan(
         and categories & {"api", "db", "auth", "payment", "file_transfer", "gateway", "prod_config"}
     )
     review_required = bool(
-        not terminal_maintenance
+        task_kind == "change"
         and (effective_profile == "high-risk" or writer_count > 1 or cross_module_contract_risk or rule_review)
     )
     design_required = bool(
-        not terminal_maintenance
+        task_kind == "change"
         and (rule_design or (effective_profile == "high-risk" and cross_module))
     )
-    has_task_signal = bool(classification_inputs or _text(intent))
     workspace_dirty = bool(_working_tree_paths(repo))
+    active_writer = _has_registered_active_task(repo)
     configured_isolation = _task_isolation(cfg)
-    if terminal_maintenance or not has_task_signal:
+    if task_kind != "change":
         execution_mode = "none"
-    elif configured_isolation == "worktree" or writer_count > 1 or workspace_dirty:
+    elif configured_isolation == "worktree" or writer_count > 1 or workspace_dirty or active_writer:
         execution_mode = "isolated"
     else:
         execution_mode = "direct"
@@ -4849,8 +4939,7 @@ def _resolve_execution_plan(
         review_required=review_required,
     )
     mechanism_plan = _mechanism_plan(
-        has_task_signal=has_task_signal,
-        terminal_maintenance=terminal_maintenance,
+        task_kind=task_kind,
         execution_mode=execution_mode,
         review_required=review_required,
         design_required=design_required,
@@ -4863,6 +4952,7 @@ def _resolve_execution_plan(
         "planned_files": normalized_planned_paths,
         "classification_files": classification_inputs,
         "intent_provided": bool(_text(intent)),
+        "task_kind": task_kind,
         "intent_categories": intent_categories,
         "reasons": execution_reasons,
         "configured_profile": configured_profile,
@@ -4875,6 +4965,7 @@ def _resolve_execution_plan(
         "execution_mode": execution_mode,
         "terminal_maintenance": terminal_maintenance,
         "workspace_dirty": workspace_dirty,
+        "active_writer": active_writer,
         "parallel_writers": writer_count,
         "cross_module": cross_module,
         "review_required": review_required,
@@ -4923,6 +5014,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
         planned_paths=list(getattr(args, "planned_path", []) or []),
         intent="\n".join(part for part in intent_parts if part),
         parallel_writers=int(getattr(args, "writers", 1) or 1),
+        requested_task_kind=_text(getattr(args, "task_kind", "")),
     )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands: list[str] = []
@@ -4937,6 +5029,7 @@ def cmd_classify(args: argparse.Namespace) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"[classify] risk={risk}")
+        print(f"[classify] task_kind={result['task_kind']}")
         print(f"[classify] profile={result['profile']}")
         print(f"[classify] effective_mode={result['effective_mode']}")
         print(f"[classify] execution_mode={result['execution_mode']}")
@@ -4951,8 +5044,12 @@ def cmd_classify(args: argparse.Namespace) -> None:
             + (", ".join(result["mechanism_plan"]["required"]) or "(none)")
         )
         print(
-            "[classify] not_required="
-            + (", ".join(result["mechanism_plan"]["not_required"]) or "(none)")
+            "[classify] optional_when_beneficial="
+            + (", ".join(result["mechanism_plan"]["optional_when_beneficial"]) or "(none)")
+        )
+        print(
+            "[classify] forbidden="
+            + (", ".join(result["mechanism_plan"]["forbidden"]) or "(none)")
         )
         for stage in result["agent_plan"]["stages"]:
             print(
@@ -5217,6 +5314,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     missing: List[str] = []
     validation_errors: List[str] = []
+    advisories: List[str] = []
     validation_errors.extend(_workflow_policy_issues(repo, cfg))
 
     mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
@@ -5303,9 +5401,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if on_unmapped not in {"error", "fallback"}:
         validation_errors.append("validation.on_unmapped must be error or fallback")
     try:
-        _final_gate_budget(cfg)
+        final_budget = _final_gate_budget(cfg)
+        if final_budget["command_seconds"] > _RECOMMENDED_FINAL_COMMAND_SECONDS:
+            advisories.append(
+                "validation.max_command_seconds exceeds the recommended 120s default; "
+                "keep the affected-scope route targeted"
+            )
+        if final_budget["total_seconds"] > _RECOMMENDED_FINAL_TOTAL_SECONDS:
+            advisories.append(
+                "validation.max_total_seconds exceeds the recommended 180s default; "
+                "keep the final gate bounded to affected scope"
+            )
     except APError as exc:
         validation_errors.append(str(exc))
+        final_budget = {
+            "command_seconds": _RECOMMENDED_FINAL_COMMAND_SECONDS,
+            "total_seconds": _RECOMMENDED_FINAL_TOTAL_SECONDS,
+        }
     routes = validation_cfg.get("routes") or []
     if not isinstance(routes, list):
         validation_errors.append("validation.routes must be a list")
@@ -5324,6 +5436,20 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 validation_errors.append(
                     f"validation.routes[{index}] references missing commands.{command_name}"
                 )
+        if "timeout_seconds" in route:
+            try:
+                route_timeout = _positive_seconds(
+                    route.get("timeout_seconds"),
+                    final_budget["command_seconds"],
+                    f"validation.routes[{index}].timeout_seconds",
+                )
+                if route_timeout > final_budget["command_seconds"]:
+                    advisories.append(
+                        f"validation.routes[{index}].timeout_seconds exceeds max_command_seconds "
+                        "and will be capped"
+                    )
+            except APError as exc:
+                validation_errors.append(str(exc))
     fallback_name = _command_name(validation_cfg.get("fallback_command"))
     if on_unmapped == "fallback" and not fallback_name:
         validation_errors.append(
@@ -5390,6 +5516,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         "pass",
         {"mode": mode, "completion": completion, "access_fields": len(_REQUIRED_ACCESS_FIELDS)},
     )
+    for advisory in advisories:
+        print(f"[doctor] WARN: {advisory}")
     print("[doctor] OK")
 
 
@@ -6600,6 +6728,41 @@ def cmd_task_start(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
+    _require_control_checkout(repo)
+    task_id = _validate_task_id(args.task_id)
+    owned_paths = sorted({_normalize_owned_path(item) for item in (args.owned_path or [])})
+    if not owned_paths:
+        raise APError("task-start requires at least one --owned-path.")
+    if _is_terminal_ledger_maintenance(owned_paths):
+        raise APError(
+            "Pure taskbook/closure/archive reconciliation is terminal maintenance and must not "
+            "create another task lifecycle. Run the targeted document check, commit once, and push."
+        )
+    writer_count = max(1, int(getattr(args, "writers", 1) or 1))
+    if writer_count != 1:
+        raise APError(
+            "task-start creates exactly one writer lease and one worktree. Start each parallel "
+            "writer as its own task ID; use --writers only with classify for planning."
+        )
+    explicit_lifecycle = bool(
+        getattr(args, "isolated", False)
+        or getattr(args, "review_required", False)
+        or getattr(args, "force_lifecycle", False)
+    )
+    preflight_plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        planned_paths=owned_paths,
+        parallel_writers=writer_count,
+        requested_task_kind="change",
+    )
+    if not preflight_plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
+        raise APError(
+            "This clean serial task does not need a machine task lifecycle. Work directly on "
+            "the current branch, run the routed final gate, commit, and push. Use task-start "
+            "only when classify requires isolation/review or the user explicitly requests it."
+        )
+
     _require_workflow_policy_clean(repo, cfg)
     configured_isolation = _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
@@ -6608,8 +6771,6 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "Project initialization is incomplete; fill docs/ENGINEERING.md before starting work:\n- "
             + "\n- ".join(access_issues)
         )
-    task_id = _validate_task_id(args.task_id)
-    _require_control_checkout(repo)
     remote, target_branch, base_ref = _task_remote_and_target(cfg, args)
     concurrency_cfg = _concurrency_cfg(cfg)
     timeout_s = float(concurrency_cfg.get("lock_timeout_sec") or 30)
@@ -6626,20 +6787,6 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         if not getattr(args, "no_fetch", False) and base_ref.startswith(f"{remote}/"):
             _fetch_target(repo, remote, target_branch)
         base_sha = _resolve_commit(repo, base_ref)
-        owned_paths = sorted({_normalize_owned_path(item) for item in (args.owned_path or [])})
-        if not owned_paths:
-            raise APError("task-start requires at least one --owned-path.")
-        if _is_terminal_ledger_maintenance(owned_paths):
-            raise APError(
-                "Pure taskbook/closure/archive reconciliation is terminal maintenance and must not "
-                "create another task lifecycle. Run the targeted document check, commit once, and push."
-            )
-        writer_count = max(1, int(getattr(args, "writers", 1) or 1))
-        if writer_count != 1:
-            raise APError(
-                "task-start creates exactly one writer lease and one worktree. Start each parallel "
-                "writer as its own task ID; use --writers only with classify for planning."
-            )
         registry_dir = _task_state_root(repo) / "tasks"
         for manifest_path in sorted(registry_dir.glob("*.json")) if registry_dir.exists() else []:
             active_manifest = _read_json_object(manifest_path) or {}
@@ -6679,11 +6826,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             repo,
             planned_paths=owned_paths,
             parallel_writers=writer_count,
-        )
-        explicit_lifecycle = bool(
-            getattr(args, "isolated", False)
-            or getattr(args, "review_required", False)
-            or getattr(args, "force_lifecycle", False)
+            requested_task_kind="change",
         )
         if not plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
             raise APError(
@@ -7925,6 +8068,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--planned-path", action="append")
     s.add_argument("--intent")
     s.add_argument("--intent-file")
+    s.add_argument("--task-kind", choices=sorted(_TASK_KINDS), default="auto")
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)

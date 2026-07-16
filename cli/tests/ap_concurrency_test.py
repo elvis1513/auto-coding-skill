@@ -420,6 +420,30 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertEqual(before, git_output(repo, "rev-parse", "HEAD"))
         self.assertFalse(self.registry_manifest_path(repo, "DIRECT-NOOP").exists())
 
+    def test_unnecessary_lifecycle_rejects_before_access_or_fetch_checks(self) -> None:
+        _, repo, _ = self.make_repo("adaptive", require_review=False)
+        engineering = repo / "docs" / "ENGINEERING.md"
+        text = engineering.read_text(encoding="utf-8")
+        engineering.write_text(text.replace("front-pass", "", 1), encoding="utf-8")
+        git(repo, "add", "docs/ENGINEERING.md")
+        git(repo, "commit", "-qm", "invalidate access for preflight test")
+        git(repo, "push", "-q", "origin", "dev")
+
+        result = self.ap(
+            repo,
+            "task-start",
+            "DIRECT-PREFLIGHT",
+            "--base",
+            "origin/branch-that-must-not-be-fetched",
+            "--owned-path",
+            "shared.txt",
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("does not need a machine task lifecycle", output)
+        self.assertNotIn("initialization is incomplete", output)
+
     def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
         _, repo, _ = self.make_repo()
         self.start_task(repo, "LEGACY-SCHEMA")

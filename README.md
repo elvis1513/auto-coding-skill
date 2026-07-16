@@ -9,7 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.1 consolidates the 4.x delivery-first workflow into one canonical
+Version 4.1.2 makes the workflow decision explicit: mechanisms are required,
+model-selectable when beneficial, or forbidden for the current task. Version
+4.1.1 consolidated the 4.x delivery-first workflow into one canonical
 repository contract. Version 4.0 replaced the 3.x governance-first defaults with progressive
 guardrails. Clean single-writer work stays on the current branch. Worktrees,
 parallel fixers, fingerprint review, durable design records, and stronger
@@ -65,8 +67,11 @@ The result includes:
 - `execution_mode=isolated`: dirty checkout, explicit isolation, or multiple writers.
 - `execution_mode=none`: no task signal or change; create no branch/worktree.
 - `review_required` and `design_required`: risk-based escalation decisions.
+- `task_kind`: `read_only`, `change`, `terminal_maintenance`, or `none`.
 - `mechanism_plan.required`: the complete minimum mechanism set for the task.
-- `mechanism_plan.not_required`: mechanisms that stay off unless the user asks.
+- `mechanism_plan.optional_when_beneficial`: model-selectable mechanisms whose
+  expected benefit must exceed coordination cost.
+- `mechanism_plan.forbidden`: mechanisms that stay off unless the user overrides.
 - an adaptive agent plan that does not force fan-out for ordinary work.
 
 Clean serial work proceeds directly on the current branch with normal Git; it does
@@ -75,7 +80,7 @@ requires isolation/review or the user explicitly requests lifecycle tracking:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
-  --owned-path backend/internal/orders
+  --owned-path backend/internal/orders --force-lifecycle
 python3 docs/tools/autopipeline/ap.py commit-push T0001 \
   --msg "T0001: fix order retry"
 ```
@@ -90,8 +95,9 @@ Dirty or parallel work receives an isolated task branch/worktree:
 python3 docs/tools/autopipeline/ap.py task-start T0002 \
   --owned-path backend --review-required
 # implement in the printed worktree
+python3 docs/tools/autopipeline/ap.py task-status T0002 --json
 python3 docs/tools/autopipeline/ap.py task-review T0002 \
-  --verdict approved --diff-fingerprint "$SHA256"
+  --verdict approved --diff-fingerprint "$CURRENT_DIFF_FINGERPRINT"
 python3 docs/tools/autopipeline/ap.py commit-push T0002 \
   --msg "T0002: bounded change"
 python3 docs/tools/autopipeline/ap.py task-integrate T0002
@@ -122,6 +128,7 @@ validation:
     - name: backend
       paths: ["backend/**", "contracts/**"]
       commands: [backend_fast]
+      timeout_seconds: 90
     - name: frontend
       paths: ["frontend/**"]
       commands: [frontend_fast]
@@ -152,9 +159,10 @@ closure gate is limited to one stable-diff run. Full regression, Docker, builds,
 Jenkins, deployment, API verification, and target checks remain explicit
 diagnostics outside normal closure.
 
-The final closure gate is hard-bounded to at most 120 seconds per command and 180
-seconds total; projects may lower those values. A timeout requires a narrower
-route and never triggers a broader fallback.
+The recommended final closure defaults are 120 seconds per command and 180
+seconds total. Projects may raise them for measured affected-scope checks or set
+a smaller `timeout_seconds` on a route. A timeout calls for a narrower route and
+never triggers a broader fallback.
 
 ## Risk and subagent policy
 
@@ -192,11 +200,25 @@ project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` i
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
 
+## What changed in 4.1.2
+
+- Added explicit read-only, change, and terminal-maintenance task kinds so
+  intent-only questions cannot accidentally trigger code-delivery machinery.
+- Split mechanism planning into required, model-selectable, and forbidden sets;
+  read-only discovery agents remain available when they save time or add needed
+  expertise.
+- Made 120/180-second gate budgets recommended defaults, added route-level
+  timeouts, and kept project-specific affected-scope overrides valid.
+- Rejected unnecessary lifecycle creation before access checks, fetching, locks,
+  or branch work; corrected the review lifecycle examples.
+- Added a release-package assertion and prepack cache cleanup so generated Python
+  caches cannot leak into the npm tarball.
+
 ## What changed in 4.1.1
 
 - Added a machine-readable minimum mechanism plan and rejected unnecessary clean
   serial task lifecycles unless explicitly requested.
-- Added hard per-command and total time ceilings for the final changed-scope gate.
+- Added bounded per-command and total time budgets for the final changed-scope gate.
 - Made root `AGENTS.md` the sole behavioral protocol, reduced `SKILL.md` to
   invocation guidance, and reduced `ENGINEERING.md` to project configuration and
   facts.

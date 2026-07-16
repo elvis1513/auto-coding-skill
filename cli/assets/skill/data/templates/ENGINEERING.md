@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.1.1"
+  skill_version: "4.1.2"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -56,8 +56,8 @@ commands:
 
 validation:
   on_unmapped: "error"
-  # Normal closure cannot exceed these hard ceilings. Values may be lowered but
-  # not raised above 120 seconds per command or 180 seconds total.
+  # Recommended fast defaults. Raise only for a measured affected-scope check;
+  # an individual route may set a smaller timeout_seconds.
   max_command_seconds: 120
   max_total_seconds: 180
   # Initialization must replace this with real path-to-command mappings. Empty
@@ -94,7 +94,7 @@ docs:
 
 # Engineering Configuration and Project Facts
 
-<!-- auto-coding-skill:managed-workflow:start version=4.1.1 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.1.2 -->
 
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the single source for the
@@ -107,8 +107,8 @@ The frontmatter contract is:
 - `concurrency`: target branch and adaptive isolation settings.
 - `commands`: project-native executable commands.
 - `validation`: explicit path-to-command routes plus the bounded final-gate time
-  budget. Code/config paths must be mapped; slower checks belong to explicit
-  diagnostics.
+  budget. Code/config paths must be mapped; route-level `timeout_seconds` can
+  bound a slower command without changing the project defaults.
 - `risk`: project-specific signals that increase design/review depth but never
   expand the automatic local gate.
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.

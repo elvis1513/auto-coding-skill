@@ -1125,15 +1125,15 @@ function projectStatus(project, assetSkill, assetAgents){
     if (isolationState.present && !["adaptive", "worktree"].includes(frontmatterScalarValue(isolationState.value).toLowerCase())) {
       invalidConfigTokens.push("concurrency.isolation (must be adaptive or worktree)");
     }
-    for (const [pathParts, maximum] of [
-      [["validation", "max_command_seconds"], 120],
-      [["validation", "max_total_seconds"], 180],
+    for (const pathParts of [
+      ["validation", "max_command_seconds"],
+      ["validation", "max_total_seconds"],
     ]) {
       const state = frontmatterPathState(text, pathParts);
       if (!state.present) continue;
       const value = Number(frontmatterScalarValue(state.value));
-      if (!Number.isFinite(value) || value <= 0 || value > maximum) {
-        invalidConfigTokens.push(`${pathParts.join(".")} (must be > 0 and <= ${maximum})`);
+      if (!Number.isFinite(value) || value <= 0) {
+        invalidConfigTokens.push(`${pathParts.join(".")} (must be > 0)`);
       }
     }
     const commandState = frontmatterPathState(text, ["validation", "max_command_seconds"]);

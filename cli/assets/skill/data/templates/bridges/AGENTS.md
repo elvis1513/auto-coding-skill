@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.1 -->
+<!-- auto-coding-skill:managed-agents:start version=4.1.2 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -26,7 +26,7 @@ The default budget is:
 
 | Situation | Required mechanisms |
 | --- | --- |
-| Read-only question | none |
+| Read-only question | analysis only; no workflow command |
 | Obvious clean serial edit | analysis, affected gate, commit/push |
 | Terminal ledger/archive maintenance | targeted consistency check, one commit |
 | Dirty checkout or concurrent writer | registered lifecycle and isolated worktree |
@@ -34,9 +34,11 @@ The default budget is:
 | Multiple independent writers | one task/worktree/lease per writer, ordered integration |
 
 Do not add classify, task lifecycle, durable design, subagents, reviewer, or a
-worktree outside this budget merely because the tool exists. If impact is unclear,
-run `classify` and follow `mechanism_plan.required`; items in
-`mechanism_plan.not_required` stay off unless the user explicitly requests them.
+worktree merely because the tool exists. If task kind or impact is unclear, run
+`classify`: run `mechanism_plan.required`, let the model select
+`optional_when_beneficial` only when expected value exceeds coordination cost,
+and keep `forbidden` mechanisms off unless the user explicitly overrides the
+plan. Reclassify only after a material task-kind, scope, risk, or writer change.
 
 Normal delivery is:
 
@@ -64,8 +66,9 @@ failure may continue in the same conversation/task without a second lifecycle.
 
 ## Design, agents, and review
 
-- Micro and standard tasks stay main-agent-only unless independent delegation has
-  a concrete latency or expertise benefit.
+- Micro and standard tasks stay main-agent-only unless the model identifies an
+  independent question whose latency or expertise benefit exceeds coordination
+  cost.
 - Create DD/ADR only for lasting cross-module, API, data, security, deployment,
   or key user-flow decisions.
 - Use read-only explorer/docs/browser agents only for independent questions.
@@ -90,9 +93,10 @@ failure may continue in the same conversation/task without a second lifecycle.
   validation.
 - Focused tests may run and rerun during development. Run one final routed gate
   after the diff is stable.
-- The final gate has hard project-configurable ceilings of 120 seconds per command
-  and 180 seconds total. A timeout must narrow the route; never expand or retry it
-  as a full gate.
+- The final gate defaults to 120 seconds per command and 180 seconds total. A
+  project may raise either budget for a measured affected-scope check, and may set
+  a smaller `timeout_seconds` on an individual route. A timeout should narrow the
+  route; never expand or retry it as a full gate.
 - Do not proactively install dependencies. Only after the selected route fails
   because a repository-locked dependency is absent may it be restored once and
   only that route retried.

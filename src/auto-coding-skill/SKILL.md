@@ -1,16 +1,15 @@
 ---
 name: auto-coding-skill
-description: Delivery-first engineering workflow for repository changes. Use for analysis, task decomposition, necessary design, implementation, bounded changed-scope validation, safe commit/push, adaptive Git isolation, parallel writer coordination, and temporary branch cleanup. Keep clean serial work on the current branch and add lifecycle, worktrees, subagents, design, or review only when classify marks them required or the user explicitly requests them.
+description: Optional delivery-first engineering workflow for repository changes. Use when its bounded validation, adaptive Git isolation, review, or coordination will improve delivery speed or defect prevention. Keep clean serial work on the current branch and let the model select beneficial design or subagents without turning them into mandatory ceremony.
 ---
 
 # Auto Coding Skill
 
 ## Use the two authorities
 
-Read root `AGENTS.md` for the shared behavioral protocol. Read
-`docs/ENGINEERING.md` frontmatter for project facts, access values, risk rules,
-validation routes, and time budgets. Do not reconstruct or duplicate those rules
-from historical task documents.
+Read root `AGENTS.md` for the shared behavioral protocol and
+`docs/ENGINEERING.md` for project facts, access, risk, validation, and budgets.
+Do not reconstruct or duplicate those rules from historical task documents.
 
 Normal delivery is:
 
@@ -19,24 +18,32 @@ changed-scope gate → commit/push`.
 
 ## Select the minimum mechanism set
 
-Skip classification for read-only work, obvious clean serial edits, and terminal
-ledger maintenance. When impact, risk, or concurrency is unclear, run:
+Read-only questions need no workflow command. Obvious clean serial edits and
+terminal ledger maintenance may follow root `AGENTS.md` directly. When task kind,
+impact, risk, or concurrency is unclear, run:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py classify --scope auto \
-  --planned-path <PATH> --intent "<intent>" [--writers <N>]
+  --planned-path <PATH> --intent "<intent>" [--writers <N>] \
+  [--task-kind read_only|change|terminal_maintenance]
 ```
 
-Follow `mechanism_plan.required`. Do not add anything listed under
-`mechanism_plan.not_required` unless the user explicitly requests it. In
-particular, ordinary direct work does not create a task lifecycle.
+Run `mechanism_plan.required`. The model may select
+`optional_when_beneficial` only when expected value exceeds coordination cost.
+Do not run `forbidden` mechanisms unless the user explicitly overrides the plan.
+Reclassify only when task kind, scope, risk, or writer count materially changes.
+Ordinary direct work does not create a task lifecycle.
 
 Use the registered lifecycle only when classification requires isolation or
 fingerprinted review, or when the user explicitly requests it:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
-  --owned-path src [--isolated] [--review-required]
+  --owned-path src [--isolated] [--review-required] [--force-lifecycle]
+# For review-required work, obtain the current fingerprint and approve it:
+python3 docs/tools/autopipeline/ap.py task-status T0001 --json
+python3 docs/tools/autopipeline/ap.py task-review T0001 \
+  --verdict approved --diff-fingerprint <CURRENT_DIFF_FINGERPRINT>
 python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
 # Isolated tasks only:
 python3 docs/tools/autopipeline/ap.py task-integrate T0001
@@ -54,21 +61,20 @@ python3 docs/tools/autopipeline/ap.py light-gate --scope changed --explain
 ```
 
 Every changed code/config path must map to a real project command. The runtime
-de-duplicates matched commands and enforces both per-command and total closure
-budgets. A timeout means the route must be narrowed; it never falls back to a full
-build. Focused test/fix/retest loops remain allowed before the final gate.
+de-duplicates commands and enforces route, command, and total budgets. Defaults
+are 120 seconds per command and 180 total; projects may raise them for a measured
+affected-scope check. Timeouts should narrow the route, never trigger a full build.
+Focused test/fix/retest loops remain allowed before the final gate.
 
 Run full regression, Docker, Jenkins, deployment, browser/device writes, or target
-acceptance only as an explicit diagnostic. If the user asks to diagnose the
-just-pushed failure, continue in the same conversation/task without inventing a
-new ledger lifecycle.
+acceptance only as an explicit diagnostic. A requested just-pushed failure
+diagnosis continues in the same task without inventing another lifecycle.
 
 ## Keep state and upgrades safe
 
-Machine task state, leases, fingerprints, and gate evidence stay in Git
-common/local state. Ordinary work creates no taskbook, closure Markdown, evidence
-JSONL, active-task, or design artifact. Terminal ledger reconciliation validates
-and commits once without creating another lifecycle.
+Machine task state, leases, fingerprints, and gate evidence stay in Git local
+state. Ordinary work creates no taskbook, closure, evidence JSONL, active-task,
+or design artifact. Terminal ledger reconciliation validates and commits once.
 
 ```bash
 autocoding init
@@ -78,6 +84,5 @@ python3 docs/tools/autopipeline/ap.py upgrade --write
 python3 docs/tools/autopipeline/ap.py doctor
 ```
 
-Finish registered tasks before changing runtime versions. Sync replaces the
-canonical root `AGENTS.md`, archives its previous content, preserves project facts
-and access values, and converges all managed Skill/runtime/agent assets together.
+Finish registered tasks before changing versions. Sync replaces root `AGENTS.md`,
+archives it, preserves project facts/access, and converges all managed assets.

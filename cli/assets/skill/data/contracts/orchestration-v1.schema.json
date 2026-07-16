@@ -13,9 +13,11 @@
     },
     "mechanismPlan": {
       "type": "object",
-      "required": ["required", "not_required", "lifecycle_required", "rule"],
+      "required": ["required", "optional_when_beneficial", "forbidden", "not_required", "lifecycle_required", "rule"],
       "properties": {
         "required": { "$ref": "#/$defs/stringArray" },
+        "optional_when_beneficial": { "$ref": "#/$defs/stringArray" },
+        "forbidden": { "$ref": "#/$defs/stringArray" },
         "not_required": { "$ref": "#/$defs/stringArray" },
         "lifecycle_required": { "type": "boolean" },
         "rule": { "type": "string", "minLength": 1 }
@@ -452,6 +454,7 @@
         "classification_files",
         "intent_provided",
         "intent_categories",
+        "task_kind",
         "profile",
         "categories",
         "recommended_agents",
@@ -479,6 +482,9 @@
         },
         "intent_categories": {
           "$ref": "#/$defs/stringArray"
+        },
+        "task_kind": {
+          "enum": ["none", "read_only", "change", "terminal_maintenance"]
         },
         "profile": {
           "enum": [

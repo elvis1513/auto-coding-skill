@@ -243,6 +243,7 @@ class AutoCodingProfileTests(unittest.TestCase):
         repo, cfg = self.make_repo()
         plan = self.plan(repo, cfg, planned_paths=["src/widget.py"])
         self.assertEqual("standard", plan["profile"])
+        self.assertEqual("change", plan["task_kind"])
         self.assertEqual("changed", plan["selected_scope"])
         self.assertEqual("dev", plan["effective_mode"])
         self.assertEqual([], plan["recommended_agents"])
@@ -269,7 +270,48 @@ class AutoCodingProfileTests(unittest.TestCase):
             plan["mechanism_plan"]["required"],
         )
         self.assertFalse(plan["mechanism_plan"]["lifecycle_required"])
-        self.assertIn("task_lifecycle", plan["mechanism_plan"]["not_required"])
+        self.assertIn("read_only_subagents", plan["mechanism_plan"]["optional_when_beneficial"])
+        self.assertIn("task_lifecycle", plan["mechanism_plan"]["forbidden"])
+
+    def test_intent_only_classifies_read_only_change_and_terminal_work(self) -> None:
+        repo, cfg = self.make_repo()
+        read_only = self.plan(repo, cfg, intent="Explain how authentication currently works")
+        self.assertEqual("read_only", read_only["task_kind"])
+        self.assertEqual("none", read_only["execution_mode"])
+        self.assertEqual(["analysis"], read_only["mechanism_plan"]["required"])
+        self.assertIn(
+            "read_only_subagents",
+            read_only["mechanism_plan"]["optional_when_beneficial"],
+        )
+        self.assertIn("commit_push", read_only["mechanism_plan"]["forbidden"])
+
+        change = self.plan(repo, cfg, intent="Fix the login redirect bug")
+        self.assertEqual("change", change["task_kind"])
+        self.assertEqual("direct", change["execution_mode"])
+        self.assertIn("commit_push", change["mechanism_plan"]["required"])
+
+        chinese_change = self.plan(repo, cfg, intent="请解决并优化登录跳转问题")
+        self.assertEqual("change", chinese_change["task_kind"])
+
+        forced_read_only = self.plan(
+            repo,
+            cfg,
+            intent="Fix wording in the explanation",
+            requested_task_kind="read_only",
+        )
+        self.assertEqual("read_only", forced_read_only["task_kind"])
+
+        terminal = self.plan(
+            repo,
+            cfg,
+            intent="reconcile the completed task ledger",
+        )
+        self.assertEqual("terminal_maintenance", terminal["task_kind"])
+        self.assertEqual(
+            ["analysis", "targeted_consistency_check", "commit_push"],
+            terminal["mechanism_plan"]["required"],
+        )
+        self.assertIn("task_lifecycle", terminal["mechanism_plan"]["forbidden"])
 
     def test_execution_mode_is_none_direct_isolated_or_parallel(self) -> None:
         repo, cfg = self.make_repo()
@@ -312,7 +354,7 @@ class AutoCodingProfileTests(unittest.TestCase):
             ap._validate_validation_plan(cfg, ap._validation_plan(cfg, ["contracts/api.yaml"]))
         self.assertIn("no validation route", str(context.exception))
 
-    def test_final_gate_budget_is_hard_bounded_and_times_out(self) -> None:
+    def test_final_gate_budget_is_configurable_and_times_out(self) -> None:
         cfg = base_config()
         cfg["validation"] = {
             "on_unmapped": "error",
@@ -335,10 +377,42 @@ class AutoCodingProfileTests(unittest.TestCase):
             )
         self.assertIn("timed out", str(context.exception))
 
-        cfg["validation"]["max_command_seconds"] = 121
+        cfg["validation"]["max_command_seconds"] = 240
+        cfg["validation"]["max_total_seconds"] = 300
+        self.assertEqual(
+            {"command_seconds": 240.0, "total_seconds": 300.0},
+            ap._final_gate_budget(cfg),
+        )
+
+        cfg["validation"]["max_total_seconds"] = 200
         with self.assertRaises(APError) as context:
             ap._final_gate_budget(cfg)
-        self.assertIn("cannot exceed 120", str(context.exception))
+        self.assertIn("cannot exceed validation.max_total_seconds", str(context.exception))
+
+    def test_route_timeout_uses_smallest_matching_budget(self) -> None:
+        cfg = base_config()
+        cfg["commands"] = {"one": "true", "two": "true"}
+        cfg["validation"] = {
+            "on_unmapped": "error",
+            "max_command_seconds": 120,
+            "max_total_seconds": 180,
+            "routes": [
+                {
+                    "name": "all-src",
+                    "paths": ["src/**"],
+                    "commands": ["one", "two"],
+                    "timeout_seconds": 90,
+                },
+                {
+                    "name": "python",
+                    "paths": ["**/*.py"],
+                    "commands": ["two"],
+                    "timeout_seconds": 30,
+                },
+            ],
+        }
+        plan = ap._validation_plan(cfg, ["src/widget.py"])
+        self.assertEqual({"one": 90.0, "two": 30.0}, plan["command_timeouts"])
 
     def test_test_only_change_resolves_micro(self) -> None:
         repo, cfg = self.make_repo("tests/widget_test.py")

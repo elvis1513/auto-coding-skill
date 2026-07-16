@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.7 -->
+<!-- auto-coding-skill:managed-agents:start version=4.1.8 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -11,7 +11,8 @@ Use this order when sources disagree:
 1. The current user request.
 2. Code, tests, schemas, migrations, and runtime configuration for behavior that
    exists now.
-3. `docs/ENGINEERING.md` for project facts and workflow configuration.
+3. `docs/ENGINEERING.md` for workflow configuration and access values, then the
+   managed `docs/project/` files for durable project facts.
 4. Current interface documentation for intended contracts.
 5. Accepted DD/ADR for lasting decisions.
 6. Taskbooks, closures, reviews, and deployment records as history only.
@@ -110,10 +111,12 @@ failure may continue in the same conversation/task without a second lifecycle.
 ## Documentation and access
 
 - This AGENTS file is the single behavioral protocol. The installed `SKILL.md`
-  contains invocation guidance. `docs/ENGINEERING.md` is the single project
-  configuration and facts source. Do not repeat the protocol elsewhere.
-- Put larger product, repository, and runtime facts under `docs/project/` and link
-  them from ENGINEERING.
+  contains invocation guidance. `docs/ENGINEERING.md` is the exact project
+  configuration source; `docs/project/` owns durable facts. Do not repeat the
+  protocol elsewhere.
+- `autocoding init` owns the exact active `docs/` tree. Put durable product,
+  repository, and runtime facts into the installed `docs/project/` files; extra
+  paths are archived outside active docs on the next upgrade.
 - Ordinary work creates no taskbook, closure Markdown, evidence JSONL, active-task
   document, or design file. Machine coordination/evidence stays in Git
   common/local state and cannot change the reviewed diff.

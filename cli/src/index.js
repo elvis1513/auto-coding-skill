@@ -138,6 +138,27 @@ function requireRuntimeDependencies(assetSkill){
     + `Run: ${install}\nThen rerun autocoding init.`,
   );
 }
+
+function runtimePython(){
+  const fallback = process.platform === "win32" ? "python" : "python3";
+  return String(process.env.AUTOCODING_PYTHON || fallback).trim() || fallback;
+}
+
+function runEngineeringConvergence(project, skillRoot, write){
+  const script = path.join(skillRoot, "scripts", "ap.py");
+  const command = [script, "--repo", project, "project-converge", "--json"];
+  if (write) command.push("--write");
+  const result = spawnSync(runtimePython(), command, { encoding: "utf8", stdio: "pipe" });
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || result.error?.message || "project convergence failed").trim();
+    die(`unable to converge docs/ENGINEERING.md: ${detail}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    die("project convergence returned invalid JSON");
+  }
+}
 function shouldSkip(name){
   return name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
 }
@@ -359,6 +380,7 @@ function compareManagedAgents(assetAgents, agentsDir){
 function syncManagedAgents(assetAgents, agentsDir, options = {}){
   fs.mkdirSync(agentsDir, { recursive: true });
   const bindings = [];
+  const managedFiles = new Set(listFiles(assetAgents));
   for (const rel of listFiles(assetAgents)) {
     const src = path.join(assetAgents, rel);
     const dst = path.join(agentsDir, rel);
@@ -369,6 +391,11 @@ function syncManagedAgents(assetAgents, agentsDir, options = {}){
     fs.writeFileSync(dst, rendered);
     const model = inspectTopLevelModel(rendered);
     bindings.push({ agent: rel, model: model.present ? model.value : "inherit" });
+  }
+  if (options.removeExtra === true) {
+    for (const rel of listFiles(agentsDir)) {
+      if (!managedFiles.has(rel)) fs.rmSync(path.join(agentsDir, rel), { force: true });
+    }
   }
   return bindings;
 }
@@ -1174,27 +1201,47 @@ function projectStatus(project, assetSkill, assetAgents){
     scriptDiffs.push({ path: "docs/tools/autopipeline/ap.py", status: "stale" });
   }
   const missingDocs = [];
-  const srcDocs = path.join(assetSkill, "data", "templates", "docs");
   for (const rel of CORE_DOCS) {
     if (!exists(path.join(root, "docs", rel))) missingDocs.push(path.join("docs", rel));
+  }
+  let docsDiffs = [];
+  const convergenceCheck = spawnSync(
+    runtimePython(),
+    [path.join(assetSkill, "scripts", "ap.py"), "--repo", root, "project-converge", "--json"],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  if (convergenceCheck.status === 0) {
+    try {
+      docsDiffs = (JSON.parse(convergenceCheck.stdout).actions || []).filter(item =>
+        item.path === "docs/ENGINEERING.md" || item.path.startsWith("docs/"),
+      );
+    } catch {
+      docsDiffs = [{ action: "invalid", path: "docs", detail: "convergence check returned invalid JSON" }];
+    }
+  } else {
+    docsDiffs = [{
+      action: "invalid",
+      path: "docs",
+      detail: String(convergenceCheck.stderr || convergenceCheck.stdout || "convergence check failed").trim(),
+    }];
   }
   const skillDiffs = exists(skillDir) ? compareDirs(assetSkill, skillDir, { includeExtra: true }) : [{ path: ".agents/skills/auto-coding-skill", status: "missing" }];
   const agentStatus = exists(agentsDir)
     ? compareManagedAgents(assetAgents, agentsDir)
     : { diffs: [{ path: ".agents/agents", status: "missing" }], bindings: [] };
   const agentDiffs = agentStatus.diffs;
-  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current" && managedAgentsDocument.state === "current";
+  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && docsDiffs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current" && managedAgentsDocument.state === "current";
   let next = "";
   if (!exists(skillDir) || !exists(agentsDir)) {
-    next = "run autocoding init --force";
+    next = "run autocoding init";
   } else if (skillDiffs.length || agentDiffs.length) {
-    next = "run autocoding sync --projects <repo>";
-  } else if (engineeringMissing || managedWorkflow.state !== "current" || managedAgentsDocument.state !== "current" || scriptDiffs.length || missingDocs.length) {
-    next = "run autocoding sync --projects <repo> or python3 .agents/skills/auto-coding-skill/scripts/ap.py --repo . install";
+    next = "run autocoding init";
+  } else if (engineeringMissing || managedWorkflow.state !== "current" || managedAgentsDocument.state !== "current" || scriptDiffs.length || missingDocs.length || docsDiffs.length) {
+    next = "run autocoding init";
   } else if (missingConfigPaths.length) {
-    next = "run project-local ap.py upgrade --write to merge missing paths, fill every required value in docs/ENGINEERING.md, then run doctor";
+    next = "run autocoding init, fill every required value in docs/ENGINEERING.md, then run doctor";
   } else if (invalidConfigTokens.length) {
-    next = "run project-local ap.py upgrade --write to migrate concurrency.isolation to adaptive, then run doctor";
+    next = "run autocoding init, then run doctor";
   } else if (unfilledConfigTokens.length) {
     next = "fill every required value in docs/ENGINEERING.md, then run project-local ap.py doctor";
   }
@@ -1205,6 +1252,7 @@ function projectStatus(project, assetSkill, assetAgents){
     agentDiffs,
     agentBindings: agentStatus.bindings,
     scriptDiffs,
+    docsDiffs,
     missingDocs,
     missingConfigTokens,
     missingConfigPaths,
@@ -1226,6 +1274,10 @@ function printProjectStatus(result){
     }
   }
   for (const item of result.missingDocs) console.log(`[autocoding] doc missing: ${item}`);
+  for (const item of result.docsDiffs || []) {
+    const detail = item.detail ? ` - ${item.detail}` : "";
+    console.log(`[autocoding] docs ${item.action}: ${item.path}${detail}`);
+  }
   for (const item of result.missingConfigTokens) console.log(`[autocoding] config missing path: ${item}`);
   if (result.managedWorkflow?.state !== "current") {
     const detail = result.managedWorkflow?.detail ? ` - ${result.managedWorkflow.detail}` : "";
@@ -1347,6 +1399,71 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
   };
 }
 
+function convergeProjectInstall(project, assetSkill, assetAgents, resetAgentModels){
+  const root = path.resolve(project);
+  const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
+  const agentsDir = path.join(root, ".agents", "agents");
+  const toolDir = path.join(root, "docs", "tools", "autopipeline");
+  const actions = [];
+
+  // Validate the authoritative template and legacy input before the first write.
+  runEngineeringConvergence(root, assetSkill, false);
+
+  rmrf(skillDir);
+  copyDir(assetSkill, skillDir);
+  actions.push({ action: "replace", path: path.relative(root, skillDir) });
+
+  syncManagedAgents(assetAgents, agentsDir, { resetModel: resetAgentModels, removeExtra: true });
+  actions.push({ action: "sync", path: path.relative(root, agentsDir) });
+
+  fs.mkdirSync(toolDir, { recursive: true });
+  fs.copyFileSync(
+    path.join(assetSkill, "data", "templates", "tools", "ap.py"),
+    path.join(toolDir, "ap.py"),
+  );
+  actions.push({ action: "replace", path: "docs/tools/autopipeline/ap.py" });
+
+  const agentsDocument = path.join(root, "AGENTS.md");
+  const canonicalAgents = fs.readFileSync(
+    path.join(assetSkill, "data", "templates", "bridges", "AGENTS.md"),
+    "utf8",
+  );
+  const currentAgents = exists(agentsDocument) ? fs.readFileSync(agentsDocument, "utf8") : "";
+  if (currentAgents !== canonicalAgents) {
+    if (currentAgents) {
+      let archive = path.join(
+        root,
+        ".agents",
+        "archive",
+        "auto-coding-skill",
+        readPackageVersion(),
+        "AGENTS.md",
+      );
+      if (exists(archive) && fs.readFileSync(archive, "utf8") !== currentAgents) {
+        archive = path.join(
+          path.dirname(archive),
+          `AGENTS-${crypto.createHash("sha256").update(currentAgents).digest("hex").slice(0, 12)}.md`,
+        );
+      }
+      if (!exists(archive)) {
+        fs.mkdirSync(path.dirname(archive), { recursive: true });
+        fs.writeFileSync(archive, currentAgents);
+        actions.push({
+          action: "archive",
+          path: path.relative(root, archive),
+          detail: "historical and non-authoritative",
+        });
+      }
+    }
+    fs.writeFileSync(agentsDocument, canonicalAgents);
+    actions.push({ action: "replace", path: "AGENTS.md" });
+  }
+
+  const engineering = runEngineeringConvergence(root, skillDir, true);
+  actions.push(...engineering.actions);
+  return { project: root, actions };
+}
+
 function projectRoot(){ return process.cwd(); }
 
 function resolveInstallDirs(mode, destOverride){
@@ -1360,29 +1477,34 @@ function resolveInstallDirs(mode, destOverride){
       return {
         skillDir: dest,
         agentsDir: path.join(grandparent, "agents"),
+        projectDir: path.dirname(grandparent),
       };
     }
     if (path.basename(dest) === "skills" && path.basename(parent) === ".agents") {
       return {
         skillDir: path.join(dest, "auto-coding-skill"),
         agentsDir: path.join(parent, "agents"),
+        projectDir: path.dirname(parent),
       };
     }
     if (path.basename(dest) === "agents" && path.basename(parent) === ".agents") {
       return {
         skillDir: path.join(parent, "skills", "auto-coding-skill"),
         agentsDir: dest,
+        projectDir: path.dirname(parent),
       };
     }
     if (path.basename(dest) === ".agents") {
       return {
         skillDir: path.join(dest, "skills", "auto-coding-skill"),
         agentsDir: path.join(dest, "agents"),
+        projectDir: path.dirname(dest),
       };
     }
     return {
       skillDir: path.join(dest, ".agents", "skills", "auto-coding-skill"),
       agentsDir: path.join(dest, ".agents", "agents"),
+      projectDir: dest,
     };
   }
 
@@ -1390,6 +1512,7 @@ function resolveInstallDirs(mode, destOverride){
   return {
     skillDir: path.join(root, ".agents", "skills", "auto-coding-skill"),
     agentsDir: path.join(root, ".agents", "agents"),
+    projectDir: root,
   };
 }
 
@@ -1401,7 +1524,7 @@ function main(){
 autocoding - install auto-coding-skill into generic .agents paths
 
 Usage:
-  autocoding init [--mode project|global] [--dest <repo-root|.agents-dir|skill-dir>] [--force] [--reset-agent-models]
+  autocoding init [--mode project|global] [--dest <repo-root|.agents-dir|skill-dir>] [--reset-agent-models]
   autocoding status --projects <path[,path...]> [--json]
   autocoding sync --projects <path[,path...]> [--dry-run] [--json] [--reset-agent-models]
 
@@ -1412,6 +1535,7 @@ Examples:
 
 Compatibility:
   --ai <value> is accepted for old scripts and ignored.
+  --force is accepted for old scripts; project init is already an idempotent full convergence.
   Existing managed-agent model lines are preserved unless --reset-agent-models is used.
 `);
     process.exit(0);
@@ -1492,22 +1616,22 @@ Compatibility:
 
   requireRuntimeDependencies(assetSkill);
 
-  const { skillDir, agentsDir } = resolveInstallDirs(args.mode, args.dest);
-  const existingTargets = [skillDir, agentsDir].filter(target => exists(target));
-  if (existingTargets.length && !args.force) {
-    die(`target exists: ${existingTargets.join(", ")}\nRe-run with --force to overwrite managed templates.`);
-  }
-  if (exists(skillDir)) {
-    rmrf(skillDir);
-  }
-  copyDir(assetSkill, skillDir);
-  console.log(`[autocoding] installed skill to: ${skillDir}`);
-
-  syncManagedAgents(assetAgents, agentsDir, { resetModel: args.resetAgentModels });
-  console.log(`[autocoding] installed agents to: ${agentsDir}`);
-
+  const { skillDir, agentsDir, projectDir } = resolveInstallDirs(args.mode, args.dest);
   if (args.mode === "project") {
-    console.log("[autocoding] next: run autocoding sync --projects ., fill every access.* field in docs/ENGINEERING.md, then run doctor.");
+    assertNoRegisteredTasks([projectDir]);
+    const result = convergeProjectInstall(projectDir, assetSkill, assetAgents, args.resetAgentModels);
+    console.log(`[autocoding] project=${result.project}`);
+    for (const item of result.actions) {
+      const detail = item.detail ? ` - ${item.detail}` : "";
+      console.log(`[autocoding] ${item.action}: ${item.path}${detail}`);
+    }
+    console.log("[autocoding] next: fill any blank access.* values and validation.routes in docs/ENGINEERING.md, then run doctor.");
+  } else {
+    rmrf(skillDir);
+    copyDir(assetSkill, skillDir);
+    syncManagedAgents(assetAgents, agentsDir, { resetModel: args.resetAgentModels });
+    console.log(`[autocoding] installed skill to: ${skillDir}`);
+    console.log(`[autocoding] installed agents to: ${agentsDir}`);
   }
   console.log("[autocoding] done.");
 }

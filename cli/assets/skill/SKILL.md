@@ -7,8 +7,9 @@ description: Optional delivery-first engineering workflow for repository changes
 
 ## Use the two authorities
 
-Read root `AGENTS.md` for the shared behavioral protocol and
-`docs/ENGINEERING.md` for project facts, access, risk, validation, and budgets.
+Read root `AGENTS.md` for the shared behavioral protocol,
+`docs/ENGINEERING.md` for access/risk/validation configuration, and
+`docs/project/` for durable project facts.
 Do not reconstruct or duplicate those rules from historical task documents.
 
 Normal delivery is:
@@ -76,11 +77,10 @@ or design artifact. Terminal ledger reconciliation validates and commits once.
 
 ```bash
 autocoding init
-autocoding sync --projects .
-python3 docs/tools/autopipeline/ap.py upgrade --dry-run
-python3 docs/tools/autopipeline/ap.py upgrade --write
 python3 docs/tools/autopipeline/ap.py doctor
 ```
 
-Finish registered tasks before changing versions. Sync replaces root `AGENTS.md`,
-archives it, preserves project facts/access, and converges all managed assets.
+Finish registered tasks before changing versions. `autocoding init` is idempotent
+and performs the complete install/upgrade: it replaces every managed constraint,
+preserves only schema-supported project values, installs the exact docs framework,
+and archives removed content outside active `docs/`.

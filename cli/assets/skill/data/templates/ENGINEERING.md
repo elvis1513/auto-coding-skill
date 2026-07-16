@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.1.7"
+  skill_version: "4.1.8"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -75,6 +75,7 @@ structure:
   layer_rules:
     enabled: true
     block: false
+    rules: []
 
 optimization:
   completion_policy: "no-new-debt"
@@ -84,8 +85,6 @@ optimization:
 docs:
   framework: "engineering-centered"
   design_dir: "docs/design"
-  health_baseline: "docs/reviews/project-health-baseline.md"
-  optimization_backlog: "docs/reviews/optimization-backlog.md"
   structure_standard: "docs/architecture/structure-standard.md"
   api_docs_required: false
   api_doc: "docs/interfaces/api.md"
@@ -94,11 +93,11 @@ docs:
 
 # Engineering Configuration and Project Facts
 
-<!-- auto-coding-skill:managed-workflow:start version=4.1.7 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.1.8 -->
 
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
-`SKILL.md` contains invocation guidance. This file is the single source for the
-project-specific configuration and facts that neither file can infer.
+`SKILL.md` contains invocation guidance. This file is the exact-schema source for
+project workflow configuration and access values that neither file can infer.
 
 The frontmatter contract is:
 
@@ -112,7 +111,7 @@ The frontmatter contract is:
 - `risk`: project-specific signals that increase design/review depth but never
   expand the automatic local gate.
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.
-- `docs`: locations of optional durable project artifacts.
+- `docs`: locations inside the exact managed documentation framework.
 
 Run `python3 docs/tools/autopipeline/ap.py doctor` after changing frontmatter.
 Do not put competing delivery flows, agent roles, lifecycle rules, gate semantics,
@@ -120,17 +119,8 @@ or completion rules outside this managed block.
 
 <!-- auto-coding-skill:managed-workflow:end -->
 
-# Project Facts
+# Project Facts Location
 
-Keep only current, project-specific facts here. Put larger material under
-`docs/project/` and link it from the relevant section.
-
-## Product and domain boundaries
-
-## Repository and ownership map
-
-## Runtime and deployment topology
-
-## External-system and real-device safety
-
-## Interface and decision links
+Keep durable project facts in the installed `docs/project/` files. Do not append
+workflow rules or additional sections here; initialization owns this document's
+schema and body.

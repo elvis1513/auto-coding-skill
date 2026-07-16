@@ -20,6 +20,23 @@ const managedAgentEfforts = {
   "fixer.toml": "medium",
   "reviewer.toml": "xhigh",
 };
+const exactDocs = [
+  "docs/ENGINEERING.md",
+  "docs/architecture/adr/_TEMPLATE-ADR.md",
+  "docs/architecture/structure-standard.md",
+  "docs/bugs/bug-list.md",
+  "docs/deployment/deploy-records/_TEMPLATE-DEPLOY-RECORD.md",
+  "docs/deployment/deploy-runbook.md",
+  "docs/design/_TEMPLATE-DD.md",
+  "docs/interfaces/api-change-log.md",
+  "docs/interfaces/api.md",
+  "docs/project/overview.md",
+  "docs/project/repository-map.md",
+  "docs/project/runtime.md",
+  "docs/reviews/_TEMPLATE-REVIEW.md",
+  "docs/testing/regression-matrix.md",
+  "docs/tools/autopipeline/ap.py",
+];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -138,7 +155,7 @@ function fillRequiredAccess(repo, password = "local-dev-password") {
   ].join("\n");
   const withAccess = text.replace(/^access:\r?\n[\s\S]*?(?=^concurrency:)/m, `${block}\n\n`);
   const updated = withAccess
-    .replace('  project_fast: ""', '  project_fast: "true"')
+    .replace(/  project_fast: (?:""|'')/, '  project_fast: "true"')
     .replace(
       "  routes: []",
       [
@@ -160,13 +177,35 @@ function assertStatusOk(repo) {
   assert(parsed.results[0].ok === true, `status should be ok: ${result.stdout}`);
 }
 
-function testPreflightAvoidsPartialInstall() {
-  const repo = tmpdir("partial-init");
+function testInitFullyConvergesExistingProject() {
+  const repo = tmpdir("full-init");
+  run("node", [cli, "init"], { cwd: repo });
+  fillRequiredAccess(repo, "preserved-project-secret");
+  const engineering = path.join(repo, "docs", "ENGINEERING.md");
+  writeFile(engineering, fs.readFileSync(engineering, "utf8")
+    .replace("concurrency:\n", "legacy_extra:\n  forbidden: true\n\nconcurrency:\n")
+    .replace("# Project Facts", "# Obsolete workflow rules\n\nRun a full build every time.\n\n# Project Facts"));
+  writeFile(path.join(repo, "docs", "legacy", "old-taskbook.md"), "historical\n");
   writeFile(path.join(repo, ".agents", "agents", "custom.toml"), 'name = "custom"\n');
-  const result = run("node", [cli, "init"], { cwd: repo, check: false });
-  assert(result.status !== 0, "init should fail when agents target exists without --force");
-  assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill")), "failed init must not leave a partial skill copy");
-  assert(exists(path.join(repo, ".agents", "agents", "custom.toml")), "existing custom agent should remain");
+  writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt"), "obsolete\n");
+
+  run("node", [cli, "init"], { cwd: repo });
+  const installedDocs = listProjectFiles(path.join(repo, "docs"))
+    .map(file => path.relative(repo, file).split(path.sep).join("/"))
+    .sort();
+  assert(JSON.stringify(installedDocs) === JSON.stringify(exactDocs), `docs must converge exactly: ${installedDocs.join(", ")}`);
+  const converged = fs.readFileSync(engineering, "utf8");
+  assert(converged.includes("preserved-project-secret"), "supported access values must survive init");
+  assert(!converged.includes("legacy_extra") && !converged.includes("Run a full build every time"), "unknown fields and legacy workflow text must be removed");
+  assert(!exists(path.join(repo, ".agents", "agents", "custom.toml")), "extra agents must be removed");
+  assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt")), "extra Skill files must be removed");
+  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
+
+  run("node", [cli, "init"], { cwd: repo });
+  const secondDocs = listProjectFiles(path.join(repo, "docs"))
+    .map(file => path.relative(repo, file).split(path.sep).join("/"))
+    .sort();
+  assert(JSON.stringify(secondDocs) === JSON.stringify(exactDocs), "repeated init must stay idempotent");
 }
 
 function testInitRejectsMissingPythonRuntimeBeforeWrites() {
@@ -219,34 +258,31 @@ function testLauncherFallsBackToGlobalRuntime() {
   assert(help.stdout.includes("autopipeline"), "project launcher should execute the global runtime when no project copy exists");
 }
 
-function testMinimalSyncConvergesWithinBudget() {
+function testMinimalInitConvergesWithinBudget() {
   const repo = tmpdir("minimal-sync");
   run("node", [cli, "init"], { cwd: repo });
-  const before = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
-  assert(before.status !== 0, "status should fail before core scaffold exists");
-  run("node", [cli, "sync", "--projects", repo]);
 
-  for (const rel of ["docs/ENGINEERING.md", "docs/tools/autopipeline/ap.py"]) {
+  for (const rel of exactDocs) {
     assert(exists(path.join(repo, rel)), `missing core scaffold file: ${rel}`);
   }
-  for (const rel of ["docs/tasks/taskbook.md", "docs/tasks/closure-log.md", "docs/interfaces/api.md", "docs/design/_TEMPLATE-DD.md", "docs/testing/regression-matrix.md", "docs/tools/autopipeline/core.py", "docs/tools/autopipeline/http_checks.py"]) {
+  for (const rel of ["docs/tasks/taskbook.md", "docs/tasks/closure-log.md", "docs/tools/autopipeline/core.py", "docs/tools/autopipeline/http_checks.py"]) {
     assert(!exists(path.join(repo, rel)), `optional/duplicate file should not be installed: ${rel}`);
   }
 
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
-  assert(files.length <= 23, `minimal scaffold file budget exceeded: ${files.length}`);
+  assert(files.length <= 40, `minimal scaffold file budget exceeded: ${files.length}`);
   // Deterministic direct-claim and orchestration-contract guards replace model-only
   // assertions in 4.1.4; keep a measured ceiling without forcing opaque code.
-  assert(lines <= 11200, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(lines <= 11800, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
-  assert(engineering.includes("profile: \"auto\""), "engineering should enable adaptive profiles");
-  assert(engineering.includes("isolation: \"adaptive\""), "engineering should default to adaptive clean-branch/worktree isolation");
-  assert(engineering.includes('completion: "push"'), "engineering should complete normal development at push");
-  assert(engineering.includes('project_fast: ""'), "generic projects should expose an optional project-fast command");
+  assert(engineering.includes("profile: auto"), "engineering should enable adaptive profiles");
+  assert(engineering.includes("isolation: adaptive"), "engineering should default to adaptive clean-branch/worktree isolation");
+  assert(engineering.includes("completion: push"), "engineering should complete normal development at push");
+  assert(engineering.includes("project_fast: ''"), "generic projects should expose an optional project-fast command");
   assert(engineering.includes("max_command_seconds: 120"), "engineering should bound each final route command");
   assert(engineering.includes("max_total_seconds: 180"), "engineering should bound the complete final gate");
-  assert(engineering.includes(`name: "${path.basename(repo)}"`), "project name should be initialized automatically");
+  assert(engineering.includes(`name: ${path.basename(repo)}`), "project name should be initialized automatically");
   assert(!engineering.includes("## Design, review, and subagents"), "engineering must not duplicate the behavioral protocol");
   const agentsProtocol = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
   assert(agentsProtocol.includes("## Minimum mechanism budget"), "AGENTS should own the shared behavioral protocol");
@@ -291,8 +327,8 @@ function testStatusRejectsLegacyIsolation() {
   fillRequiredAccess(repo);
   const engineeringPath = path.join(repo, "docs", "ENGINEERING.md");
   const engineering = fs.readFileSync(engineeringPath, "utf8").replace(
-    'isolation: "adaptive"',
-    'isolation: "legacy"',
+    "isolation: adaptive",
+    "isolation: legacy",
   );
   fs.writeFileSync(engineeringPath, engineering);
 
@@ -303,7 +339,7 @@ function testStatusRejectsLegacyIsolation() {
     parsed.invalidConfigTokens.includes("concurrency.isolation (must be adaptive or worktree)"),
     `status should identify the invalid isolation value: ${result.stdout}`,
   );
-  assert(parsed.next.includes("upgrade --write"), "status should direct legacy projects through upgrade");
+  assert(parsed.next.includes("autocoding init"), "status should direct legacy projects through authoritative init");
 }
 
 function testStatusRejectsLegacyGateEscalation() {
@@ -330,7 +366,7 @@ function testOrdinaryNodeTestIsNotPromotedToAutomaticGate() {
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
-  assert(engineering.includes('project_fast: ""'), "ordinary test must not be promoted to the project-fast command");
+  assert(engineering.includes("project_fast: ''"), "ordinary test must not be promoted to the project-fast command");
   assert(!engineering.includes("gate_standard:"), "ordinary test must not seed an automatic standard gate");
   assert(!engineering.includes("gate_full:"), "ordinary test must not seed an automatic full gate");
 
@@ -385,7 +421,7 @@ function testAccessPasswordsAreRequiredButNeverPrintedByStatus() {
 
   writeFile(engineering, fs.readFileSync(engineering, "utf8").replace(/^access:\r?\n[\s\S]*?(?=^concurrency:)/m, ""));
   const absent = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
-  assert(JSON.parse(absent.stdout).results[0].next.includes("upgrade --write"), "missing access paths should recommend configuration upgrade");
+  assert(JSON.parse(absent.stdout).results[0].next.includes("autocoding init"), "missing access paths should recommend authoritative init");
 }
 
 function testManagedAgentModelsInheritAndOverridesSurvive() {
@@ -425,7 +461,7 @@ function testForcePreservesCustomAgentsAndModelOverrides() {
   const explorer = path.join(agentsDir, "explorer.toml");
   writeFile(explorer, fs.readFileSync(explorer, "utf8").replace(/^description\s*=.*$/m, '$&\nmodel = "vendor/override"'));
   run("node", [cli, "init", "--force"], { cwd: repo });
-  assert(fs.readFileSync(custom, "utf8") === customText, "init --force should preserve custom agents");
+  assert(!exists(custom), "init must remove agents outside the managed set");
   assert(fs.readFileSync(explorer, "utf8").includes('model = "vendor/override"'), "init --force should preserve explicit managed-agent model overrides");
 }
 
@@ -502,7 +538,6 @@ function testCommandSpecificArgumentsAreRejectedBeforeWrites() {
 function testBridgeIsGeneric() {
   const repo = tmpdir("bridge");
   run("node", [cli, "init", "--force"], { cwd: repo });
-  run("python3", [assetAp, "--repo", repo, "install", "--bridges"]);
   assert(exists(path.join(repo, "AGENTS.md")), "generic bridge should be created");
   const bridge = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
   assert(bridge.includes("Every delegated fixer or parallel writer owns a task ID/worktree"), "bridge should expose delegated-writer isolation");
@@ -531,6 +566,13 @@ function testOptionalDocsAndLegacyToolsDoNotCauseDrift() {
   writeFile(path.join(repo, "docs", "interfaces", "api.md"), "# Existing API\n");
   writeFile(path.join(repo, "docs", "tools", "autopipeline", "core.py"), "# legacy copy\n");
   writeFile(path.join(repo, "docs", "tools", "autopipeline", "http_checks.py"), "# legacy copy\n");
+  fillRequiredAccess(repo);
+  const drift = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(drift.status !== 0, "modified or extra docs must be reported as drift");
+  run("node", [cli, "init"], { cwd: repo });
+  assert(!exists(path.join(repo, "docs", "tools", "autopipeline", "core.py")), "legacy runtime copy must be removed");
+  assert(!exists(path.join(repo, "docs", "tools", "autopipeline", "http_checks.py")), "legacy HTTP copy must be removed");
+  assert(fs.readFileSync(path.join(repo, "docs", "interfaces", "api.md"), "utf8").startsWith("# API Contract"), "managed docs must be restored to the current template");
   assertStatusOk(repo);
 }
 
@@ -615,7 +657,7 @@ function testUpgradePrefersModernProjectAssetsAndIgnoresRetiredTemplates() {
   );
   const parsed = JSON.parse(result.stdout);
   assert(fs.realpathSync(parsed.source_root) === fs.realpathSync(projectSkill), `upgrade should prefer the modern project asset root: ${result.stdout}`);
-  assert(!exists(path.join(repo, "docs", "interfaces", "api.md")), "upgrade must not materialize retired optional templates");
+  assert(fs.readFileSync(path.join(repo, "docs", "interfaces", "api.md"), "utf8").startsWith("# API Contract"), "compatibility upgrade must not replace the canonical API doc with a retired physical template");
 }
 
 function testUpgradeInitializesNewEngineeringDefaults() {
@@ -629,8 +671,8 @@ function testUpgradeInitializesNewEngineeringDefaults() {
   run("python3", [projectAp, "--repo", repo, "upgrade", "--write"], { env: pythonEnvWithHome(fakeHome) });
 
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
-  assert(engineering.includes(`name: "${path.basename(repo)}"`), "upgrade should initialize a newly created project name");
-  assert(engineering.includes('project_fast: "npm run test:changed"'), "upgrade should infer only a dedicated changed-scope test");
+  assert(engineering.includes(`name: ${path.basename(repo)}`), "upgrade should initialize a newly created project name");
+  assert(engineering.includes("project_fast: npm run test:changed"), "upgrade should infer only a dedicated changed-scope test");
   assert(!engineering.includes("gate_standard:"), "upgrade must not infer an automatic standard gate");
   assert(!engineering.includes("gate_full:"), "upgrade must not infer an automatic full gate");
 }
@@ -745,14 +787,14 @@ function testLedgerArchiveUpdatesExistingPeriodIndex() {
   assert(index.includes("(2 files)"), `archive index should report cumulative design count: ${index}`);
 }
 
-function testManagedEngineeringSyncIsControlledAndIdempotent() {
+function testManagedEngineeringInitIsAuthoritativeAndIdempotent() {
   const repo = tmpdir("managed-engineering");
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.7 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.8 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -763,37 +805,28 @@ function testManagedEngineeringSyncIsControlledAndIdempotent() {
     .replace(endMarker, `${endMarker}\nproject note after managed workflow`)
     .replace("The frontmatter contract is:", "Stale managed workflow contract:");
   writeFile(engineering, customized);
-  const staleStart = customized.indexOf("<!-- auto-coding-skill:managed-workflow:start");
-  const staleEnd = customized.indexOf(endMarker) + endMarker.length;
-  const outsideBefore = customized.slice(0, staleStart);
-  const outsideAfter = customized.slice(staleEnd);
-
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "4.1.7", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "4.1.8", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
-  run("node", [cli, "sync", "--projects", repo]);
+  run("node", [cli, "init"], { cwd: repo });
   const updated = fs.readFileSync(engineering, "utf8");
-  const updatedStart = updated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
-  const updatedEnd = updated.indexOf(endMarker) + endMarker.length;
-  assert(updated.slice(0, updatedStart) === outsideBefore, "sync must preserve frontmatter and content before the managed block byte-for-byte");
-  assert(updated.slice(updatedEnd) === outsideAfter, "sync must preserve content after the managed block byte-for-byte");
-  assert(updated.includes("version=4.1.7"), "sync should install the current managed workflow version");
-  assert(updated.includes("The frontmatter contract is:"), "sync should refresh stale managed workflow content");
+  assert(!updated.includes("project note before") && !updated.includes("project note after"), "init must remove text outside the canonical ENGINEERING body");
+  assert(updated.includes("version=4.1.8"), "init should install the current managed workflow version");
+  assert(updated.includes("The frontmatter contract is:"), "init should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "4.1.7", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "4.1.8", "status should expose the installed managed workflow version");
 
-  const beforeSecondSync = fs.readFileSync(engineering, "utf8");
-  const second = run("node", [cli, "sync", "--projects", repo, "--json"]);
-  assert(!JSON.parse(second.stdout).results[0].actions.some(item => item.path === "docs/ENGINEERING.md"), "current managed workflow should be idempotent");
-  assert(fs.readFileSync(engineering, "utf8") === beforeSecondSync, "idempotent sync must not rewrite ENGINEERING.md");
+  const beforeSecondInit = fs.readFileSync(engineering, "utf8");
+  run("node", [cli, "init"], { cwd: repo });
+  assert(fs.readFileSync(engineering, "utf8") === beforeSecondInit, "idempotent init must not rewrite ENGINEERING.md");
 }
 
 function testLegacyEngineeringMigrationPreservesExistingBody() {
@@ -816,12 +849,8 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=4.1.7"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=4.1.8"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
-  const migratedStart = migrated.indexOf("<!-- auto-coding-skill:managed-workflow:start");
-  const migratedEnd = migrated.indexOf(endMarker) + endMarker.length;
-  assert(`${migrated.slice(0, migratedStart)}${migrated.slice(migratedEnd)}` === legacy, "removing the inserted managed block should recover custom legacy content byte-for-byte");
-
   const stable = fs.readFileSync(engineering, "utf8");
   run("node", [cli, "sync", "--projects", repo]);
   assert(fs.readFileSync(engineering, "utf8") === stable, "legacy migration should converge after one sync");
@@ -920,7 +949,7 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=4.1.7"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=4.1.8"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -939,12 +968,12 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=4.1.7"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("managed-agents:start version=4.1.8"), "AGENTS migration should install the current managed block");
   assert(!migrated.includes("Preserve this repository-specific rule exactly."), "root AGENTS must contain no project-specific tail");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
   const canonical = fs.readFileSync(path.join(repoRoot, "cli", "assets", "skill", "data", "templates", "bridges", "AGENTS.md"), "utf8");
   assert(migrated === canonical, "root AGENTS must be byte-identical to the packaged canonical file");
-  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.7.md");
+  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.8.md");
   assert(fs.readFileSync(archive, "utf8").includes("Preserve this repository-specific rule exactly."), "previous AGENTS content must be archived once");
   const stable = fs.readFileSync(agents);
   run("node", [cli, "sync", "--projects", repo]);
@@ -988,41 +1017,32 @@ function testEngineeringMarkerBoundaryIsNormalized() {
   assert(normalized.includes(`${marker}\n# Project-specific workflow\n`), "sync should normalize a heading glued to the managed end marker");
 }
 
-function testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow() {
+function testEngineeringFrameworkRejectsAnyNonCanonicalWorkflowText() {
   const repo = tmpdir("engineering-framework");
   run("node", [cli, "init"], { cwd: repo });
   run("node", [cli, "sync", "--projects", repo]);
   fillRequiredAccess(repo);
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   fs.appendFileSync(engineering, "\n# Project Facts\n\n## Repository boundaries\n\n- backend owns APIs.\n");
-  const projectFactsStatus = run("node", [cli, "status", "--projects", repo, "--json"]);
-  assert(JSON.parse(projectFactsStatus.stdout).results[0].managedWorkflow.state === "current", "project fact sections should remain outside the managed block");
+  const status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  assert(status.status !== 0, "text outside the canonical ENGINEERING body must be drift");
+  assert(JSON.parse(status.stdout).results[0].docsDiffs.some(item => item.path === "docs/ENGINEERING.md"), "status should identify ENGINEERING convergence");
 
-  fs.appendFileSync(engineering, "\n## Delivery flow\n\n1. Known obsolete workflow.\n");
-  const migration = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
-  const migrationResult = JSON.parse(migration.stdout).results[0];
-  assert(migrationResult.managedWorkflow.state === "stale", "known duplicate sections should use controlled migration");
-  assert(migrationResult.managedWorkflow.migrations.includes("engineering-section-delivery-flow"), "known section migration should be explicit");
-  assert(migrationResult.actions.some(item => item.action === "would-archive" && item.path.includes("ENGINEERING.pre-4.1.7")), "controlled section cleanup should archive the previous ENGINEERING file");
-  run("node", [cli, "sync", "--projects", repo]);
-  assert(!fs.readFileSync(engineering, "utf8").includes("Known obsolete workflow"), "known duplicate workflow section should be removed");
-
-  fs.appendFileSync(engineering, "\n## Team workflow\n\n1. Unknown competing workflow.\n");
-  const duplicateStatus = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
-  assert(duplicateStatus.status !== 0, "duplicate workflow sections must make status non-current");
-  const plan = JSON.parse(duplicateStatus.stdout).results[0].managedWorkflow;
-  assert(plan.state === "conflict" && plan.conflicts.some(item => item.ruleId === "duplicate-managed-workflow-section"), "duplicate workflow conflict should identify the docs framework rule");
+  run("node", [cli, "init"], { cwd: repo });
+  assert(!fs.readFileSync(engineering, "utf8").includes("backend owns APIs"), "init must restore the canonical ENGINEERING body");
+  const archived = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "ENGINEERING.md");
+  assert(fs.readFileSync(archived, "utf8").includes("backend owns APIs"), "removed project text should remain in non-authoritative history");
 }
 
 function testReleaseVersionMarkersStayInSync() {
-  const expected = "4.1.7";
+  const expected = "4.1.8";
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
   const policy = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "workflow-migrations-v1.json"),
     "utf8",
   ));
-  assert(pkg.version === expected, "package version must match the 4.1.7 release");
+  assert(pkg.version === expected, "package version must match the 4.1.8 release");
   assert(lock.version === expected && lock.packages[""].version === expected, "package-lock versions must match");
   assert(policy.managed_versions.engineering === expected && policy.managed_versions.agents === expected, "managed workflow versions must match");
   const publishWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "npm-publish.yml"), "utf8");
@@ -1055,11 +1075,11 @@ function testProtocolResponsibilitiesStaySeparated() {
   assert(engineering.includes("The frontmatter contract is:") && !engineering.includes("## Git and parallel work"), "ENGINEERING must remain project configuration/facts");
 }
 
-testPreflightAvoidsPartialInstall();
+testInitFullyConvergesExistingProject();
 testInitRejectsMissingPythonRuntimeBeforeWrites();
 testDestVariants();
 testLauncherFallsBackToGlobalRuntime();
-testMinimalSyncConvergesWithinBudget();
+testMinimalInitConvergesWithinBudget();
 testStatusRejectsLegacyIsolation();
 testStatusRejectsLegacyGateEscalation();
 testOrdinaryNodeTestIsNotPromotedToAutomaticGate();
@@ -1082,7 +1102,7 @@ testRemovedVerificationFlagsFailFast();
 testUpgradeInstallsRuntimeRequiredByLauncher();
 testLedgerArchiveRecognizesSettledStatuses();
 testLedgerArchiveUpdatesExistingPeriodIndex();
-testManagedEngineeringSyncIsControlledAndIdempotent();
+testManagedEngineeringInitIsAuthoritativeAndIdempotent();
 testLegacyEngineeringMigrationPreservesExistingBody();
 testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication();
 testMalformedManagedMarkersFailClosed();
@@ -1091,7 +1111,7 @@ testLegacyTaskPreflightRejectsWholeBatchAtomically();
 testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules();
 testUnknownWorkflowConflictFailsWholeBatchBeforeWrites();
 testEngineeringMarkerBoundaryIsNormalized();
-testEngineeringFrameworkAllowsProjectFactsButRejectsDuplicateWorkflow();
+testEngineeringFrameworkRejectsAnyNonCanonicalWorkflowText();
 testReleaseVersionMarkersStayInSync();
 testProtocolResponsibilitiesStaySeparated();
 

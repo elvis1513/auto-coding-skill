@@ -9,9 +9,11 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.7 makes the Python runtime check, release verification, and tag
-publication environment reproducible while removing the unnecessary `requests`
-dependency. Version 4.1.4
+Version 4.1.8 makes `autocoding init` the idempotent install-and-upgrade entry:
+it replaces every managed constraint, migrates only schema-approved project
+configuration, and converges `docs/` to one exact framework. Version 4.1.7 made
+the Python runtime check, release verification, and tag publication environment
+reproducible while removing the unnecessary `requests` dependency. Version 4.1.4
 made direct continuation provably pre-write, closed self-review and
 risk-classification gaps, validated Agent contracts, and made tag publication
 idempotent. Version 4.1.3 closed classification bypasses. Version 4.1.2 made mechanisms required,
@@ -28,7 +30,6 @@ affected-scope checks are enabled only when concurrency or risk justifies them.
 npm install -g @elvis1513/auto-coding-skill
 python3 -m pip install PyYAML==6.0.3
 autocoding init
-autocoding sync --projects .
 ```
 
 The project install contains:
@@ -41,15 +42,16 @@ docs/tools/autopipeline/ap.py
 AGENTS.md (fully managed canonical repository contract)
 ```
 
-Ordinary projects no longer receive taskbook or closure logs. Existing optional
-documents are preserved during upgrades but are not required or updated by the
-normal workflow.
+`autocoding init` also installs the exact shared documentation tree under
+`docs/{architecture,bugs,deployment,design,interfaces,project,reviews,testing}`.
+Files outside the canonical tree are archived under `.agents/archive/` and
+removed from active `docs/`. Re-running init is the complete upgrade operation;
+`sync` and project-local `upgrade` are compatibility commands, not required steps.
 
 Fill the project/Jenkins/GitLab/Nexus URL, username, and password fields under
 `access.*`, then configure one real fast validation command and run:
 
 ```bash
-python3 docs/tools/autopipeline/ap.py upgrade --write
 python3 docs/tools/autopipeline/ap.py doctor
 ```
 
@@ -194,24 +196,33 @@ integration, push, and cleanup. Push ends the coding task; later CI/acceptance i
 not polled automatically. An explicitly requested failure diagnosis may continue
 in the same conversation/task without an artificial second ledger lifecycle.
 
-## Upgrade and multi-project sync
+## Upgrade projects
 
-Finish every registered task using its currently installed runtime before syncing
-a different Skill version. Batch sync fails before any writes when it finds an
-active manifest, regardless of schema version.
+Finish every registered task using its currently installed runtime before changing
+the Skill version. Then run `autocoding init` from each project root. It is safe to
+rerun and needs no force flag.
 
 ```bash
+cd /path/a && autocoding init
+cd /path/b && autocoding init
 autocoding status --projects /path/a,/path/b
-autocoding sync --projects /path/a,/path/b --dry-run
-autocoding sync --projects /path/a,/path/b
 ```
 
-Sync replaces the managed Skill directory, so missing files are restored and
-obsolete managed files are removed. It preserves project frontmatter, access
-values, custom role agents, explicit model overrides, optional documents, and
-project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
-replaced as a whole; its previous content is archived under
-`docs/archive/workflow/` as historical, non-authoritative context.
+Init replaces the managed Skill, root `AGENTS.md`, managed agents, ENGINEERING
+schema/body, runtime launcher, and documentation framework. It preserves explicit
+model overrides and current values at supported project/access/concurrency/route
+fields. Removed content is archived outside active docs.
+
+## What changed in 4.1.8
+
+- Made `autocoding init` perform a complete project install or upgrade without a
+  separate sync/upgrade chain or `--force`.
+- Rebuilt ENGINEERING from the current schema, preserving only supported project
+  values and removing unknown legacy fields and competing workflow text.
+- Made the generated docs file/directory set exact and identical across projects;
+  prior or extra content is archived under `.agents/archive/` before removal.
+- Made root AGENTS, managed agents, the Skill copy, and the project launcher fully
+  converge during init.
 
 ## What changed in 4.1.7
 

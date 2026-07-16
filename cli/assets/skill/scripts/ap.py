@@ -46,7 +46,7 @@ _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.7", "engineering": "4.1.7"},
+    "managed_versions": {"agents": "4.1.8", "engineering": "4.1.8"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -620,6 +620,317 @@ def _initialize_engineering_defaults(path: Path, repo: Path) -> None:
         path.write_text(updated, encoding="utf-8")
 
 
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _copy_scalar_path(source: dict, target: dict, path: tuple[str, ...]) -> None:
+    current: object = source
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return
+        current = current[key]
+    destination = target
+    for key in path[:-1]:
+        destination = destination[key]
+    expected = destination[path[-1]]
+    compatible = (
+        (isinstance(expected, bool) and isinstance(current, bool))
+        or (isinstance(expected, str) and isinstance(current, str))
+        or (
+            isinstance(expected, (int, float))
+            and not isinstance(expected, bool)
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+        )
+    )
+    if compatible:
+        destination[path[-1]] = current
+
+
+def _normalize_validation_routes(value: object) -> list[dict]:
+    routes: list[dict] = []
+    if not isinstance(value, list):
+        return routes
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        route: dict = {}
+        name = _text(raw.get("name"))
+        paths = _string_list(raw.get("paths"))
+        commands = [_command_name(item) for item in _string_list(raw.get("commands"))]
+        commands = [item for item in commands if item]
+        if name:
+            route["name"] = name
+        if paths:
+            route["paths"] = paths
+        exclude = _string_list(raw.get("exclude"))
+        if exclude:
+            route["exclude"] = exclude
+        if commands:
+            route["commands"] = commands
+        timeout = raw.get("timeout_seconds")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            route["timeout_seconds"] = timeout
+        if paths and commands:
+            routes.append(route)
+    return routes
+
+
+def _normalize_risk_rules(value: object) -> list[dict]:
+    rules: list[dict] = []
+    if not isinstance(value, list):
+        return rules
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        rule: dict = {}
+        name = _text(raw.get("name"))
+        paths = _string_list(raw.get("paths"))
+        if name:
+            rule["name"] = name
+        if paths:
+            rule["paths"] = paths
+        profile = _text(raw.get("profile")).lower()
+        if profile in _WORKFLOW_PROFILES - {"auto"}:
+            rule["profile"] = profile
+        for key in ["review", "design"]:
+            value_text = _text(raw.get(key)).lower()
+            if value_text in {"required", "true", "yes", "false", "no"}:
+                rule[key] = value_text
+        if paths:
+            rules.append(rule)
+    return rules
+
+
+def _normalize_layer_rules(value: object) -> list[dict]:
+    rules: list[dict] = []
+    if not isinstance(value, list):
+        return rules
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        paths = _string_list(raw.get("paths"))
+        forbidden = _string_list(raw.get("forbidden_imports"))
+        if not paths or not forbidden:
+            continue
+        rule = {"paths": paths, "forbidden_imports": forbidden}
+        name = _text(raw.get("name"))
+        if name:
+            rule = {"name": name, **rule}
+        rules.append(rule)
+    return rules
+
+
+def _converged_engineering_document(repo: Path, template_path: Path) -> str:
+    template_cfg, template_body = _read_frontmatter_markdown(template_path)
+    engineering = repo / "docs" / "ENGINEERING.md"
+    current_cfg: dict = {}
+    if engineering.exists():
+        try:
+            current_cfg, _ = _read_frontmatter_markdown(engineering)
+        except Exception:
+            # Initialization is an authoritative reset. Malformed legacy policy
+            # must not prevent the current schema from taking effect.
+            current_cfg = {}
+
+    converged = json.loads(json.dumps(template_cfg))
+    preserve_scalar_paths = [
+        ("project", "name"),
+        ("project", "repo_root"),
+        ("project", "stack"),
+        ("access", "project", "frontend", "url"),
+        ("access", "project", "frontend", "username"),
+        ("access", "project", "frontend", "password"),
+        ("access", "project", "backend", "url"),
+        ("access", "project", "backend", "username"),
+        ("access", "project", "backend", "password"),
+        ("access", "jenkins", "frontend", "url"),
+        ("access", "jenkins", "frontend", "username"),
+        ("access", "jenkins", "frontend", "password"),
+        ("access", "jenkins", "backend", "url"),
+        ("access", "jenkins", "backend", "username"),
+        ("access", "jenkins", "backend", "password"),
+        ("access", "gitlab", "url"),
+        ("access", "gitlab", "username"),
+        ("access", "gitlab", "password"),
+        ("access", "nexus", "frontend", "url"),
+        ("access", "nexus", "frontend", "username"),
+        ("access", "nexus", "frontend", "password"),
+        ("concurrency", "base_ref"),
+        ("concurrency", "target_branch"),
+        ("concurrency", "branch_prefix"),
+        ("concurrency", "worktree_root"),
+        ("concurrency", "cleanup_merged"),
+        ("concurrency", "delete_remote_branch"),
+        ("validation", "max_command_seconds"),
+        ("validation", "max_total_seconds"),
+        ("structure", "architecture_standard"),
+        ("docs", "api_docs_required"),
+    ]
+    for field_path in preserve_scalar_paths:
+        _copy_scalar_path(current_cfg, converged, field_path)
+
+    current_concurrency = _mapping(current_cfg.get("concurrency"))
+    isolation = _text(current_concurrency.get("isolation")).lower()
+    if isolation in {"adaptive", "worktree"}:
+        converged["concurrency"]["isolation"] = isolation
+    converged["concurrency"]["disposable_ignored"] = _string_list(
+        current_concurrency.get("disposable_ignored")
+    )
+
+    current_commands = _mapping(current_cfg.get("commands"))
+    current_validation = _mapping(current_cfg.get("validation"))
+    routes = _normalize_validation_routes(current_validation.get("routes"))
+    referenced_commands = {
+        command
+        for route in routes
+        for command in _string_list(route.get("commands"))
+    }
+    referenced_commands.add("project_fast")
+    commands = {
+        str(name): value.strip()
+        for name, value in current_commands.items()
+        if name in referenced_commands and isinstance(name, str) and isinstance(value, str) and value.strip()
+    }
+    inferred = _inferred_gate_commands(repo)
+    if not commands.get("project_fast") and inferred.get("project_fast"):
+        commands["project_fast"] = inferred["project_fast"]
+    converged["commands"].update(commands)
+
+    converged["validation"]["routes"] = routes
+    converged["risk"]["rules"] = _normalize_risk_rules(
+        _mapping(current_cfg.get("risk")).get("rules")
+    )
+    current_structure = _mapping(current_cfg.get("structure"))
+    converged["structure"]["accepted_debt_paths"] = _string_list(
+        current_structure.get("accepted_debt_paths")
+    )
+    current_layers = _mapping(current_structure.get("layer_rules"))
+    converged["structure"]["layer_rules"]["rules"] = _normalize_layer_rules(
+        current_layers.get("rules")
+    )
+
+    if not _text(_mapping(converged.get("project")).get("name")):
+        converged["project"]["name"] = repo.name
+    dumped = require_yaml().safe_dump(converged, allow_unicode=True, sort_keys=False).strip()
+    return f"---\n{dumped}\n---\n{template_body.lstrip()}"
+
+
+def cmd_project_converge(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
+    engineering = repo / "docs" / "ENGINEERING.md"
+    output = _converged_engineering_document(repo, template)
+    current = engineering.read_text(encoding="utf-8") if engineering.exists() else ""
+    changed = not bool(current)
+    if current:
+        try:
+            current_cfg, current_body = _parse_frontmatter_markdown_text(current, engineering)
+            output_cfg, output_body = _parse_frontmatter_markdown_text(output, engineering)
+            changed = current_cfg != output_cfg or current_body != output_body
+        except Exception:
+            changed = True
+    actions: list[dict] = []
+    version = _text(_mapping(_read_frontmatter_markdown(template)[0].get("workflow")).get("skill_version")) or "current"
+
+    def archive_previous(source_path: Path, content: str, label: str) -> None:
+        archive_root = repo / ".agents" / "archive" / "auto-coding-skill" / version
+        archive = archive_root / source_path.relative_to(repo)
+        if archive.exists() and archive.read_text(encoding="utf-8") != content:
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+            archive = archive.with_name(f"{archive.stem}-{digest}{archive.suffix}")
+        if archive.exists():
+            return
+        actions.append({"action": "archive", "path": _repo_rel(repo, archive), "detail": label})
+        if args.write:
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_text(content, encoding="utf-8")
+
+    def archive_extra(source_path: Path, label: str) -> None:
+        content = source_path.read_bytes()
+        archive_root = repo / ".agents" / "archive" / "auto-coding-skill" / version
+        archive = archive_root / source_path.relative_to(repo)
+        if archive.exists() and archive.read_bytes() != content:
+            digest = hashlib.sha256(content).hexdigest()[:12]
+            archive = archive.with_name(f"{archive.stem}-{digest}{archive.suffix}")
+        if not archive.exists():
+            actions.append({"action": "archive", "path": _repo_rel(repo, archive), "detail": label})
+            if args.write:
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                archive.write_bytes(content)
+
+    if changed and current:
+        archive_header = (
+            f"# Archived ENGINEERING.md before auto-coding-skill {version}\n\n"
+            "Historical and non-authoritative. Do not use this file as workflow policy.\n\n---\n\n"
+        )
+        archive_previous(engineering, archive_header + current, "previous project configuration")
+    if changed:
+        actions.append({
+            "action": "create" if not current else "replace",
+            "path": "docs/ENGINEERING.md",
+        })
+        if args.write:
+            engineering.parent.mkdir(parents=True, exist_ok=True)
+            engineering.write_text(output, encoding="utf-8")
+
+    for rel, canonical in sorted(templates_for("all").items()):
+        target = repo / rel
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        if existing == canonical:
+            continue
+        if existing:
+            archive_previous(target, existing, "previous generated documentation")
+        actions.append({"action": "create" if not existing else "replace", "path": rel})
+        if args.write:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(canonical, encoding="utf-8")
+
+    allowed_docs = {
+        Path("docs/ENGINEERING.md"),
+        Path("docs/tools/autopipeline/ap.py"),
+        *(Path(rel) for rel in templates_for("all")),
+    }
+    docs_root = repo / "docs"
+    if docs_root.exists():
+        for candidate in sorted(docs_root.rglob("*")):
+            if not candidate.is_file() and not candidate.is_symlink():
+                continue
+            rel = candidate.relative_to(repo)
+            if rel in allowed_docs:
+                continue
+            archive_extra(candidate, "removed from the exact docs framework")
+            actions.append({"action": "delete", "path": rel.as_posix()})
+            if args.write:
+                candidate.unlink()
+        if args.write:
+            for directory in sorted(
+                (item for item in docs_root.rglob("*") if item.is_dir()),
+                key=lambda item: len(item.parts),
+                reverse=True,
+            ):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+
+    result = {"changed": bool(actions), "mode": "write" if args.write else "plan", "actions": actions}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for action in actions:
+        print(f"[project-converge] {action['action']}: {action['path']}")
+    if not actions:
+        print("[project-converge] OK: already current")
+
+
 def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     changed: list[str] = []
 
@@ -633,8 +944,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.7":
-        workflow_cfg["skill_version"] = "4.1.7"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.8":
+        workflow_cfg["skill_version"] = "4.1.8"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -947,16 +1258,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.7\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.8\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.7.md"
+            archive = archive_dir / "AGENTS.pre-4.1.8.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.7-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.8-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -8551,6 +8862,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--write", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_upgrade)
+
+    s = sp.add_parser("project-converge", help=argparse.SUPPRESS)
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_project_converge)
 
     s = sp.add_parser("baseline")
     baseline_sp = s.add_subparsers(dest="baseline_cmd", required=True)

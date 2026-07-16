@@ -9,7 +9,12 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.2.1 makes dirty/concurrent classification fail closed, bounds focused
+Version 4.2.2 preserves project-owned risk and structure policy during upgrades,
+restores explicit full and final changed-scope structure enforcement, makes
+Reviewer assignments deadline-bound and directly executable, fixes task merge
+status semantics, and updates Jenkins/target diagnostics for the current
+`access.*` schema while retaining legacy fallback. Version 4.2.1 makes
+dirty/concurrent classification fail closed, bounds focused
 review latency, provides a complete Reviewer result template, preserves the
 caller's runtime environment for routed commands, keeps non-authoritative Agent
 history out of structure findings, and distinguishes UI paths and mechanical
@@ -51,8 +56,9 @@ AGENTS.md (fully managed canonical repository contract)
 
 `autocoding init` also installs the exact shared documentation tree under
 `docs/{architecture,bugs,deployment,design,interfaces,project,reviews,testing}`.
-Managed templates are replaced; mutable project docs and valid architecture, ADR,
-interface, DD, review, or deploy-record documents are preserved; unrelated
+Managed templates are replaced; the scaffolded project structure standard,
+mutable project docs, and valid architecture, ADR, interface, DD, review, or
+deploy-record documents are preserved; unrelated
 directories are archived under `.agents/archive/`. Re-running init is the complete upgrade operation;
 `sync` and project-local `upgrade` are compatibility commands, not required steps.
 
@@ -131,10 +137,8 @@ Dirty or parallel work receives an isolated task branch/worktree:
 python3 docs/tools/autopipeline/ap.py task-start T0002 \
   --owned-path backend --review-required
 # implement in the printed worktree
-python3 docs/tools/autopipeline/ap.py task-status T0002 --json
-python3 docs/tools/autopipeline/ap.py task-review T0002 \
-  --verdict approved --diff-fingerprint "$CURRENT_DIFF_FINGERPRINT" \
-  --reviewer "$REVIEWER_ID"
+python3 docs/tools/autopipeline/ap.py review-run T0002 \
+  --reviewer "$REVIEWER_ID" --json
 python3 docs/tools/autopipeline/ap.py commit-push T0002 \
   --msg "T0002: bounded change"
 python3 docs/tools/autopipeline/ap.py task-integrate T0002
@@ -202,7 +206,9 @@ diagnostics outside normal closure.
 
 Registered tasks call `commit-push` directly because it performs or strictly
 reuses that final gate. Run `light-gate` manually only for unregistered normal Git
-closure or when explicitly requesting a fresh diagnostic pass.
+closure or when explicitly requesting a fresh diagnostic pass. When project
+`structure.enabled` is true, the same final gate also runs the changed-scope
+structure check; `structure.enforcement: blocking` makes new violations fail.
 
 The recommended final closure defaults are 120 seconds per command and 180
 seconds total. Projects may raise them for measured affected-scope checks or set
@@ -224,12 +230,25 @@ never triggers a broader fallback.
   gateway, or production-configuration boundaries use 300-second deep review.
   Fixing Reviewer JSON formatting reuses the same analysis and never starts
   another substantive review.
+- `review-assignment` writes the validated assignment under Git-local state with
+  the exact fingerprint, HEAD, scope revision, owning fixer, review depth, and
+  90/300-second deadline. Reissuing the same live assignment is idempotent;
+  expired or completed attempts cannot be silently renewed, and late results are
+  rejected by `task-review`.
+- `review-run` is the default executable path: it creates/reuses that assignment,
+  starts a separate `codex exec` session in read-only mode, removes the parent
+  lifecycle identity, and supervises the full process group against the original
+  remaining deadline. Timeout performs TERM then KILL, records a Git-local blocked
+  receipt, and cannot be converted into approval. Plain `review-assignment` remains
+  available only when another host can enforce the deadline itself; it does not
+  stop an in-app subagent.
 - DD/ADR is created only for lasting cross-module, API, data, security,
   deployment, or key user-flow decisions.
 - Historical debt does not block product work unless the current change worsens it.
 
-Before returning a Reviewer result, generate the complete 16-field skeleton from
-the validated assignment, then fill its summary, evidence, findings, and risks:
+Before returning a Reviewer result, use the absolute assignment path printed by
+`review-assignment` to generate the complete 16-field skeleton, then fill its
+summary, evidence, findings, and risks:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py agent-result-template \
@@ -259,8 +278,32 @@ autocoding status --projects /path/a,/path/b
 
 Init replaces the managed Skill, root `AGENTS.md`, managed agents, ENGINEERING
 schema/body, runtime launcher, and documentation framework. It preserves explicit
-model overrides and current values at supported project/access/concurrency/route
-fields. Removed content is archived outside active docs.
+model overrides, complete project `risk.rules`, supported project/access/
+concurrency/route/structure values, and an existing project-owned structure
+standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.2
+
+- Classified root and nested `package.json` files as `release_or_tooling` high-risk
+  changes requiring review, and added upgrade regression coverage that preserves
+  complete project `risk.rules` instead of deleting partially overlapping rules.
+- Honored explicit `structure-check --scope full`, included tracked and unignored
+  untracked files, and restored the enabled structure check inside the final
+  changed-scope gate. Init now preserves supported strict structure settings and
+  treats `docs/architecture/structure-standard.md` as scaffold-once project policy.
+- Added `review-run` with a validated Git-local assignment, fixed 90/300-second
+  process-group supervision, one attempt per fingerprint, Reviewer identity/HEAD/
+  scope binding, safe result normalization, and late-result rejection. The child
+  runs as a separate read-only Codex process without the lifecycle-owner identity;
+  the documented template command uses the complete
+  `python3 docs/tools/autopipeline/ap.py ...` invocation.
+- Added `has_task_commits` and prevented a no-commit task from reporting
+  `merged_into_target=true` merely because its baseline equals the target tip.
+- Updated `verify-jenkins`, `verify-jenkins-build`, `verify-target`, and target
+  health checks to prefer `access.jenkins.<component>` and
+  `access.project.<component>`, fail before network activity on missing or
+  ambiguous endpoints, isolate Jenkins crumbs by URL and username, and preserve
+  legacy `jenkins.*` / `target_env.*` compatibility.
 
 ## What changed in 4.2.1
 

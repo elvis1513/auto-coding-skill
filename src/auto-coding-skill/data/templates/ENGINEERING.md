@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.2.1"
+  skill_version: "4.2.2"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -82,7 +82,7 @@ docs:
   api_change_log: "docs/interfaces/api-change-log.md"
 ---
 # Engineering Configuration and Project Facts
-<!-- auto-coding-skill:managed-workflow:start version=4.2.1 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.2.2 -->
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the exact-schema source for
 project workflow configuration and access values that neither file can infer.

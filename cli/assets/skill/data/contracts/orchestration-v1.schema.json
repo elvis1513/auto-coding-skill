@@ -124,6 +124,28 @@
         "owning_fixer": {
           "type": "string",
           "minLength": 1
+        },
+        "review_depth": {
+          "enum": [
+            "focused",
+            "deep"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "issued_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deadline_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "allOf": [

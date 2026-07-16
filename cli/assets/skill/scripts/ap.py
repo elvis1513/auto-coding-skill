@@ -10,13 +10,18 @@ import contextlib
 import hashlib
 import datetime as _dt
 import fnmatch
+import io
 import json
 import os
 import posixpath
 import re
+import shutil
+import signal
 import socket
+import subprocess
 import sys
 import time
+import tomllib
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -29,7 +34,7 @@ from install_integrity import verify_managed_install
 from scaffold_templates import MANAGED_FRAMEWORK_DOCS, scaffold_groups, templates_for
 
 
-_JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
+_JENKINS_CRUMB_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 _INVALID_PLACEHOLDERS = {"N/A", "TODO", "TBD", "CHANGEME", "CHANGE_ME", "FILL_ME", "FILL-ME", "PLACEHOLDER", "XXX", "NULL", "~"}
 _GENERATED_NOISE_PATTERNS = [
     ".local/auto-coding-skill/**",
@@ -44,6 +49,16 @@ _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _FOCUSED_REVIEW_TIMEOUT_SECONDS = 90
 _DEEP_REVIEW_TIMEOUT_SECONDS = 300
+_REVIEW_RUNTIME_FIELDS = (
+    "runtime_state",
+    "runtime_started_at",
+    "runtime_finished_at",
+    "runtime_result_path",
+    "runtime_exit_code",
+    "runtime_command_sha256",
+    "runtime_receipt_path",
+)
+_REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _DEEP_REVIEW_CATEGORIES = {
     "api",
     "auth",
@@ -53,6 +68,15 @@ _DEEP_REVIEW_CATEGORIES = {
     "payment",
     "prod_config",
 }
+
+
+class _ReviewerRuntimeTimeout(RuntimeError):
+    """Raised after the supervised Reviewer process group has been stopped."""
+
+    def __init__(self, stdout: str = "", stderr: str = "") -> None:
+        super().__init__("Reviewer runtime exceeded its assignment deadline.")
+        self.stdout = stdout
+        self.stderr = stderr
 _RECOMMENDED_FINAL_COMMAND_SECONDS = 120.0
 _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _FINAL_GATE_CACHE_SCHEMA = 1
@@ -60,7 +84,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.1", "engineering": "4.2.1"},
+    "managed_versions": {"agents": "4.2.2", "engineering": "4.2.2"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -261,27 +285,101 @@ def _run_configured_command(
     return True
 
 
-def _jenkins_basic_auth_headers(cfg: dict) -> dict:
+def _jenkins_access_cfg(cfg: dict, component: str) -> dict:
+    access = cfg.get("access") or {}
+    jenkins = access.get("jenkins") or {}
+    value = jenkins.get(component) or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _configured_jenkins_components(cfg: dict) -> list[str]:
+    return [
+        component
+        for component in ("frontend", "backend")
+        if any(
+            _is_explicit_fill(value)
+            for value in _jenkins_access_cfg(cfg, component).values()
+        )
+    ]
+
+
+def _require_http_url(field: str, value: object) -> str:
+    raw = _text(value).rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if not _is_explicit_fill(raw) or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise APError(f"Missing or invalid {field}; fill an http/https URL in docs/ENGINEERING.md.")
+    return raw
+
+
+def _resolve_jenkins_component(
+    cfg: dict,
+    requested: str = "",
+    explicit_job_url: str = "",
+) -> str:
+    component = _text(requested).lower()
+    configured = _configured_jenkins_components(cfg)
+    if component:
+        if component not in {"frontend", "backend"}:
+            raise APError("Jenkins component must be frontend or backend.")
+        if component not in configured:
+            raise APError(f"Missing access.jenkins.{component} configuration.")
+        return component
+    explicit = _text(explicit_job_url).rstrip("/")
+    if explicit:
+        matches = [
+            candidate
+            for candidate in configured
+            if _text(_jenkins_access_cfg(cfg, candidate).get("url")).rstrip("/") == explicit
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    if len(configured) == 1:
+        return configured[0]
+    if len(configured) > 1:
+        identities: set[tuple[str, str, str]] = set()
+        for candidate in configured:
+            lane = _jenkins_access_cfg(cfg, candidate)
+            try:
+                secret = _resolve_secret(f"access.jenkins.{candidate}", lane, "password")
+            except APError:
+                break
+            identities.add(
+                (
+                    _text(lane.get("url")).rstrip("/"),
+                    _text(lane.get("username")),
+                    secret,
+                )
+            )
+        if len(identities) == 1:
+            return configured[0]
+        raise APError(
+            "Multiple access.jenkins endpoints are configured; pass --component frontend or backend."
+        )
+    return ""
+
+
+def _jenkins_auth_config(cfg: dict, component: str = "") -> tuple[str, dict, str, str]:
+    if component:
+        lane = _jenkins_access_cfg(cfg, component)
+        if not _is_explicit_fill(lane.get("username")):
+            raise APError(f"Missing access.jenkins.{component}.username.")
+        return f"access.jenkins.{component}", lane, "username", "password"
+
     jenkins_cfg = (cfg.get("jenkins") or {})
     credential_pairs = [
         ("api_user", "api_password"),
         ("ui_username", "ui_password"),
     ]
     errors: list[str] = []
-
     for user_field, secret_field in credential_pairs:
         user = _text(jenkins_cfg.get(user_field))
-        if not _is_explicit_fill(user):
-            continue
-        try:
-            secret = _resolve_secret("jenkins", jenkins_cfg, secret_field)
-        except APError as exc:
-            errors.append(str(exc))
-            continue
-        raw = f"{user}:{secret}".encode("utf-8")
-        auth = base64.b64encode(raw).decode("ascii")
-        return {"Authorization": f"Basic {auth}"}
-
+        if _is_explicit_fill(user):
+            try:
+                _resolve_secret("jenkins", jenkins_cfg, secret_field)
+            except APError as exc:
+                errors.append(str(exc))
+                continue
+            return "jenkins", jenkins_cfg, user_field, secret_field
     detail = "\n- " + "\n- ".join(errors) if errors else ""
     raise APError(
         "Missing Jenkins API credentials. Configure jenkins.api_user with "
@@ -289,6 +387,15 @@ def _jenkins_basic_auth_headers(cfg: dict) -> dict:
         "jenkins.ui_username with jenkins.ui_password or jenkins.ui_password_env."
         + detail
     )
+
+
+def _jenkins_basic_auth_headers(cfg: dict, component: str = "") -> dict:
+    section_name, section_cfg, user_field, secret_field = _jenkins_auth_config(cfg, component)
+    user = _text(section_cfg.get(user_field))
+    secret = _resolve_secret(section_name, section_cfg, secret_field)
+    raw = f"{user}:{secret}".encode("utf-8")
+    auth = base64.b64encode(raw).decode("ascii")
+    return {"Authorization": f"Basic {auth}"}
 
 
 def _http_error_body(exc: urllib.error.HTTPError) -> str:
@@ -313,13 +420,14 @@ def _basic_auth_header(username: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {auth}"}
 
 
-def _jenkins_root_url(cfg: dict, job_url: str = "") -> str:
+def _jenkins_root_url(cfg: dict, job_url: str = "", component: str = "") -> str:
     jenkins_cfg = (cfg.get("jenkins") or {})
-    base_url = str(jenkins_cfg.get("base_url") or "").strip().rstrip("/")
+    lane_url = _text(_jenkins_access_cfg(cfg, component).get("url")) if component else ""
+    base_url = "" if component else str(jenkins_cfg.get("base_url") or "").strip().rstrip("/")
     if base_url:
         return base_url
 
-    source = str(job_url or jenkins_cfg.get("job_url") or "").strip().rstrip("/")
+    source = str(job_url or lane_url or jenkins_cfg.get("job_url") or "").strip().rstrip("/")
     if not source:
         return ""
     if "/job/" in source:
@@ -327,23 +435,30 @@ def _jenkins_root_url(cfg: dict, job_url: str = "") -> str:
     return source
 
 
-def _jenkins_crumb_api_url(cfg: dict, job_url: str = "") -> str:
-    root = _jenkins_root_url(cfg, job_url=job_url)
+def _jenkins_crumb_api_url(cfg: dict, job_url: str = "", component: str = "") -> str:
+    root = _jenkins_root_url(cfg, job_url=job_url, component=component)
     if not root:
         return ""
     return root.rstrip("/") + "/crumbIssuer/api/json"
 
 
-def _jenkins_crumb_headers(cfg: dict, job_url: str = "", timeout_s: int = 15) -> dict:
-    crumb_url = _jenkins_crumb_api_url(cfg, job_url=job_url)
+def _jenkins_crumb_headers(
+    cfg: dict,
+    job_url: str = "",
+    timeout_s: int = 15,
+    component: str = "",
+) -> dict:
+    crumb_url = _jenkins_crumb_api_url(cfg, job_url=job_url, component=component)
     if not crumb_url:
         return {}
-    cached = _JENKINS_CRUMB_CACHE.get(crumb_url)
+    _, auth_cfg, user_field, _ = _jenkins_auth_config(cfg, component)
+    cache_key = (crumb_url, _text(auth_cfg.get(user_field)))
+    cached = _JENKINS_CRUMB_CACHE.get(cache_key)
     if cached:
         return dict(cached)
 
     headers = {"Accept": "application/json"}
-    headers.update(_jenkins_basic_auth_headers(cfg))
+    headers.update(_jenkins_basic_auth_headers(cfg, component))
     req = urllib.request.Request(crumb_url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -370,13 +485,19 @@ def _jenkins_crumb_headers(cfg: dict, job_url: str = "", timeout_s: int = 15) ->
         return {}
 
     crumb_headers = {field: crumb}
-    _JENKINS_CRUMB_CACHE[crumb_url] = crumb_headers
+    _JENKINS_CRUMB_CACHE[cache_key] = crumb_headers
     return dict(crumb_headers)
 
 
-def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15, allow_404: bool = False) -> Optional[dict]:
+def _jenkins_api_get_json(
+    url: str,
+    cfg: dict,
+    timeout_s: int = 15,
+    allow_404: bool = False,
+    component: str = "",
+) -> Optional[dict]:
     headers = {"Accept": "application/json"}
-    headers.update(_jenkins_basic_auth_headers(cfg))
+    headers.update(_jenkins_basic_auth_headers(cfg, component))
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -386,7 +507,12 @@ def _jenkins_api_get_json(url: str, cfg: dict, timeout_s: int = 15, allow_404: b
         if exc.code == 404 and allow_404:
             return None
         if exc.code == 403:
-            crumb_headers = _jenkins_crumb_headers(cfg, job_url=url, timeout_s=timeout_s)
+            crumb_headers = _jenkins_crumb_headers(
+                cfg,
+                job_url=url,
+                timeout_s=timeout_s,
+                component=component,
+            )
             if crumb_headers:
                 retry_headers = dict(headers)
                 retry_headers.update(crumb_headers)
@@ -494,12 +620,21 @@ def _jenkins_branch_job_urls(root_job_url: str, branch_name: str) -> List[str]:
     return urls
 
 
-def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -> str:
+def _resolve_jenkins_job_url(
+    cfg: dict,
+    job_name: str = "",
+    job_url: str = "",
+    component: str = "",
+) -> str:
     jenkins_cfg = (cfg.get("jenkins") or {})
     explicit_url = str(job_url or "").strip()
     requested_name = str(job_name or "").strip()
-    configured_url = str(jenkins_cfg.get("job_url") or "").strip()
-    base_url = str(jenkins_cfg.get("base_url") or "").strip()
+    configured_url = (
+        _text(_jenkins_access_cfg(cfg, component).get("url"))
+        if component
+        else str(jenkins_cfg.get("job_url") or "").strip()
+    )
+    base_url = _jenkins_root_url(cfg, component=component)
 
     if explicit_url:
         return explicit_url.rstrip("/")
@@ -508,13 +643,13 @@ def _resolve_jenkins_job_url(cfg: dict, job_name: str = "", job_url: str = "") -
             return _jenkins_job_url_from_name(base_url, requested_name)
         raise APError(
             f"Cannot resolve Jenkins job URL for job '{requested_name}'. "
-            "Pass --job-url, or fill jenkins.base_url in docs/ENGINEERING.md."
+            "Pass --job-url, or fill the selected Jenkins endpoint in docs/ENGINEERING.md."
         )
     if configured_url:
         return configured_url.rstrip("/")
     raise APError(
-        "Missing Jenkins job location. Fill jenkins.job_url in docs/ENGINEERING.md, "
-        "or pass --job-url / --job-name explicitly."
+        "Missing Jenkins job location. Fill access.jenkins.<component>.url or "
+        "legacy jenkins.job_url, or pass --job-url / --job-name explicitly."
     )
 
 
@@ -526,6 +661,7 @@ def _resolve_jenkins_job_candidates(
     job_url: str = "",
     multibranch_root_job: str = "",
     branch_name: str = "",
+    component: str = "",
 ) -> List[str]:
     jenkins_cfg = (cfg.get("jenkins") or {})
     effective_branch = str(branch_name or "").strip()
@@ -537,25 +673,36 @@ def _resolve_jenkins_job_candidates(
 
     explicit_url = str(job_url or "").strip()
     explicit_name = str(job_name or "").strip()
-    configured_url = str(jenkins_cfg.get("job_url") or "").strip()
+    configured_url = (
+        _text(_jenkins_access_cfg(cfg, component).get("url"))
+        if component
+        else str(jenkins_cfg.get("job_url") or "").strip()
+    )
 
     if effective_branch:
         if explicit_url:
             return _jenkins_branch_job_urls(explicit_url, effective_branch)
         if effective_root:
-            base_url = str(jenkins_cfg.get("base_url") or "").strip()
+            base_url = _jenkins_root_url(cfg, component=component)
             return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, effective_root), effective_branch)
         if explicit_name:
-            base_url = str(jenkins_cfg.get("base_url") or "").strip()
+            base_url = _jenkins_root_url(cfg, component=component)
             return _jenkins_branch_job_urls(_jenkins_job_url_from_name(base_url, explicit_name), effective_branch)
         if configured_url:
             return _jenkins_branch_job_urls(configured_url, effective_branch)
         raise APError(
             "Missing Jenkins multibranch root job location. Pass --job-url / --job-name together with "
-            "--branch-name, or pass --multibranch-root-job with jenkins.base_url."
+            "--branch-name, or pass --multibranch-root-job with a configured Jenkins endpoint."
         )
 
-    return [_resolve_jenkins_job_url(cfg, job_name=job_name, job_url=job_url)]
+    return [
+        _resolve_jenkins_job_url(
+            cfg,
+            job_name=job_name,
+            job_url=job_url,
+            component=component,
+        )
+    ]
 
 
 def _jenkins_build_api_url(job_url: str, build_number: int) -> str:
@@ -785,7 +932,14 @@ def _converged_engineering_document(repo: Path, template_path: Path) -> str:
         ("concurrency", "delete_remote_branch"),
         ("validation", "max_command_seconds"),
         ("validation", "max_total_seconds"),
+        ("structure", "enabled"),
+        ("structure", "enforcement"),
         ("structure", "architecture_standard"),
+        ("structure", "layer_rules", "enabled"),
+        ("structure", "layer_rules", "block"),
+        ("optimization", "completion_policy"),
+        ("optimization", "require_baseline_for_global_review"),
+        ("optimization", "report_accepted_debt_as_findings"),
         ("docs", "api_docs_required"),
     ]
     for field_path in preserve_scalar_paths:
@@ -823,6 +977,22 @@ def _converged_engineering_document(repo: Path, template_path: Path) -> str:
         _mapping(current_cfg.get("risk")).get("rules")
     )
     current_structure = _mapping(current_cfg.get("structure"))
+    for key in ("exclude", "allow_large_files", "reusable_tool_dirs"):
+        if isinstance(current_structure.get(key), list):
+            converged["structure"][key] = _string_list(current_structure.get(key))
+    for key in (
+        "max_file_lines_warn",
+        "max_file_lines_block",
+        "max_function_lines_warn",
+        "max_added_lines_to_large_file",
+    ):
+        value = current_structure.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            converged["structure"][key] = value
+    for key in ("require_reuse_search", "block_new_responsibility_in_large_file"):
+        value = current_structure.get(key)
+        if isinstance(value, bool):
+            converged["structure"][key] = value
     converged["structure"]["accepted_debt_paths"] = _string_list(
         current_structure.get("accepted_debt_paths")
     )
@@ -973,8 +1143,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.1":
-        workflow_cfg["skill_version"] = "4.2.1"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.2":
+        workflow_cfg["skill_version"] = "4.2.2"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1287,16 +1457,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.1\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.2\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.1.md"
+            archive = archive_dir / "AGENTS.pre-4.2.2.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.1-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.2-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2342,6 +2512,7 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         "pending",
         "approved",
         "changes-requested",
+        "blocked",
     }:
         raise APError(f"Task {task_id} has an invalid review contract.")
     review_required = manifest.get("review_required", schema < 3)
@@ -2356,6 +2527,13 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
     effective_profile = _text(manifest.get("effective_profile"))
     if effective_profile and effective_profile not in (_WORKFLOW_PROFILES - {"auto"}):
         raise APError(f"Task {task_id} has an invalid effective_profile.")
+    review_depth = _text(manifest.get("review_depth"))
+    if review_depth and review_depth not in {"none", "focused", "deep"}:
+        raise APError(f"Task {task_id} has an invalid review_depth.")
+    if "review_timeout_seconds" in manifest:
+        timeout_value = manifest.get("review_timeout_seconds")
+        if isinstance(timeout_value, bool) or not isinstance(timeout_value, int) or timeout_value < 0:
+            raise APError(f"Task {task_id} has an invalid review_timeout_seconds.")
     if "design_required" in manifest and not isinstance(manifest.get("design_required"), bool):
         raise APError(f"Task {task_id} has an invalid design_required flag.")
     if "scope_history" in manifest and not isinstance(manifest.get("scope_history"), list):
@@ -3004,16 +3182,25 @@ def _reconcile_task_risk(repo: Path, cfg: dict, manifest: dict) -> None:
     )
     review_required = bool(manifest.get("review_required") or plan.get("review_required"))
     design_required = bool(manifest.get("design_required") or plan.get("design_required"))
+    review_depth, review_timeout_seconds = _normalized_task_review_policy(
+        review_required,
+        manifest.get("review_depth"),
+        plan.get("review_depth"),
+    )
     escalated = (
         effective_profile != old_profile
         or review_required != bool(manifest.get("review_required"))
         or design_required != bool(manifest.get("design_required"))
+        or review_depth != (_text(manifest.get("review_depth")) or "none")
+        or review_timeout_seconds != int(manifest.get("review_timeout_seconds") or 0)
     )
     if not escalated:
         return
     manifest["effective_profile"] = effective_profile
     manifest["review_required"] = review_required
     manifest["design_required"] = design_required
+    manifest["review_depth"] = review_depth
+    manifest["review_timeout_seconds"] = review_timeout_seconds
     _invalidate_task_review(manifest, "actual changed paths raised task risk; review again")
     _clear_final_gate_receipt(repo)
     _save_task_manifest(repo, manifest)
@@ -3271,6 +3458,8 @@ _DEFAULT_FULL_PATH_PATTERNS = [
     "compose*.yaml",
     "docs/ENGINEERING.md",
     "docs/tools/autopipeline/**",
+    "package.json",
+    "**/package.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
@@ -3689,6 +3878,25 @@ def _select_gate_scope(cfg: dict, requested_scope: str, paths: list[str]) -> tup
     return "changed", [reason], matching_rules
 
 
+def _select_structure_scope(
+    cfg: dict,
+    repo: Path,
+    requested_scope: str,
+    base_ref: str,
+) -> str:
+    """Keep repository-wide structure scans explicit while honoring them."""
+    requested = _text(requested_scope).lower()
+    if requested == "full":
+        return "full"
+    impact = _impact_summary(
+        cfg,
+        repo,
+        requested_scope=requested,
+        base_ref=base_ref,
+    )
+    return str(impact["selected_scope"])
+
+
 def _impact_summary(
     cfg: dict,
     repo: Path,
@@ -4078,10 +4286,17 @@ def _is_structure_candidate(path: str, structure_cfg: dict) -> bool:
 
 def _structure_paths_for_scope(repo: Path, scope: str, base_ref: str, structure_cfg: dict) -> list[str]:
     if scope == "full":
-        paths = _tracked_files(repo)
+        paths = _unique_paths(
+            _tracked_files(repo)
+            + _git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"])
+        )
     else:
         paths = _changed_files(repo, base_ref=base_ref)
-    return [path for path in paths if _is_structure_candidate(path, structure_cfg)]
+    return [
+        path
+        for path in paths
+        if (repo / path).is_file() and _is_structure_candidate(path, structure_cfg)
+    ]
 
 
 def _read_text_lines(repo: Path, path: str) -> Optional[list[str]]:
@@ -4797,9 +5012,8 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
-    impact = _impact_summary(cfg, repo, requested_scope=requested_scope, base_ref=str(getattr(args, "base", "") or ""))
-    selected_scope = str(impact["selected_scope"])
     base_ref = str(getattr(args, "base", "") or "")
+    selected_scope = _select_structure_scope(cfg, repo, requested_scope, base_ref)
 
     structure_cfg = _structure_cfg(cfg)
     optimization_cfg = _optimization_cfg(cfg)
@@ -4896,11 +5110,25 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
         print(f"[structure-check] OK scope={selected_scope} inspected={inspected} warnings={len(warnings)}")
 
 
-def _run_structure_check_for_gate(repo: Path, cfg: dict, selected_scope: str, base_ref: str) -> list[str]:
+def _run_structure_check_for_gate(
+    repo: Path,
+    cfg: dict,
+    selected_scope: str,
+    base_ref: str,
+    *,
+    deadline: Optional[float] = None,
+    command_timeout_s: Optional[float] = None,
+) -> list[str]:
     if not _structure_gate_enabled(cfg):
         return []
     if _configured_command(cfg, "structure_check"):
-        _run_configured_command(repo, cfg, "structure_check")
+        timeout_s = command_timeout_s
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise APError("Final changed-scope gate budget exhausted before structure check.")
+            timeout_s = min(timeout_s, remaining) if timeout_s is not None else remaining
+        _run_configured_command(repo, cfg, "structure_check", timeout_s=timeout_s)
         return ["structure_check"]
     cmd_structure_check(
         argparse.Namespace(
@@ -5535,6 +5763,11 @@ def _agent_contract_shape() -> tuple[dict, list[str]]:
                 "diff_head",
                 "diff_fingerprint",
                 "owning_fixer",
+                "review_depth",
+                "timeout_seconds",
+                "issued_at",
+                "deadline_at",
+                "scope_revision",
             ],
         },
         [
@@ -5644,6 +5877,12 @@ def _contract_validation_errors(
         if pattern and not re.search(str(pattern), value):
             errors.append(f"{path}: string does not match {pattern!r}")
 
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in fragment and value < fragment["minimum"]:
+            errors.append(f"{path}: number is below minimum {fragment['minimum']}")
+        if "maximum" in fragment and value > fragment["maximum"]:
+            errors.append(f"{path}: number exceeds maximum {fragment['maximum']}")
+
     if isinstance(value, list):
         if "maxItems" in fragment and len(value) > int(fragment["maxItems"]):
             errors.append(f"{path}: too many array items")
@@ -5701,6 +5940,31 @@ def _validate_orchestration_contract(kind: str, payload: dict) -> dict:
     if kind == "assignment" and role == "reviewer":
         if _text(payload.get("node_id")) == _text(payload.get("owning_fixer")):
             errors.append("$.node_id: reviewer must differ from owning_fixer")
+        timing_fields = ("issued_at", "deadline_at", "timeout_seconds")
+        timing_values = [payload.get(field) for field in timing_fields]
+        if any(value is not None for value in timing_values):
+            if not all(value is not None for value in timing_values):
+                errors.append("$: reviewer timing fields must be supplied together")
+            else:
+                try:
+                    issued_at = _parse_iso_timestamp(payload.get("issued_at"), "issued_at")
+                    deadline_at = _parse_iso_timestamp(payload.get("deadline_at"), "deadline_at")
+                    timeout_seconds = int(payload.get("timeout_seconds"))
+                    expected_timeout = {
+                        "focused": _FOCUSED_REVIEW_TIMEOUT_SECONDS,
+                        "deep": _DEEP_REVIEW_TIMEOUT_SECONDS,
+                    }.get(_text(payload.get("review_depth")))
+                    if expected_timeout is not None and timeout_seconds != expected_timeout:
+                        errors.append(
+                            "$.timeout_seconds: must match the fixed "
+                            f"{_text(payload.get('review_depth'))} review budget {expected_timeout}"
+                        )
+                    if deadline_at <= issued_at:
+                        errors.append("$.deadline_at: must be after issued_at")
+                    elif int((deadline_at - issued_at).total_seconds()) != timeout_seconds:
+                        errors.append("$.deadline_at: interval must equal timeout_seconds")
+                except (APError, TypeError, ValueError) as exc:
+                    errors.append(f"$: invalid reviewer timing contract: {exc}")
     if kind == "result":
         owned_paths = payload.get("owned_paths")
         changed_paths = payload.get("changed_paths")
@@ -5774,6 +6038,165 @@ def _reviewer_result_template(assignment: dict, verdict: str) -> dict:
     return _validate_orchestration_contract("result", result)
 
 
+def _normalize_reviewer_runtime_result(assignment: dict, payload: dict) -> dict:
+    """Normalize presentation fields while refusing assignment-binding spoofing."""
+    if not isinstance(payload, dict):
+        raise APError("Reviewer runtime output must be one JSON object.")
+    verdict = _text(payload.get("verdict")).lower()
+    if verdict not in {"approved", "changes-requested", "blocked"}:
+        raise APError(
+            "Reviewer runtime output must include verdict=approved, changes-requested, or blocked."
+        )
+    result = _reviewer_result_template(assignment, verdict)
+    binding_fields = {
+        "contract_version": result["contract_version"],
+        "node_id": result["node_id"],
+        "role": result["role"],
+        "task_id": result["task_id"],
+        "base_sha": result["base_sha"],
+        "diff_fingerprint": result["diff_fingerprint"],
+    }
+    mismatched = [
+        field
+        for field, expected in binding_fields.items()
+        if field in payload and payload.get(field) != expected
+    ]
+    if mismatched:
+        raise APError(
+            "Reviewer runtime result does not match its assignment: "
+            + ", ".join(mismatched)
+        )
+    if "summary" in payload:
+        if not isinstance(payload["summary"], str):
+            raise APError("Reviewer runtime result summary must be a string.")
+        result["summary"] = payload["summary"]
+    for field in ("evidence", "findings", "risks"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise APError(f"Reviewer runtime result {field} must be an array of strings.")
+        result[field] = value
+    return _validate_orchestration_contract("result", result)
+
+
+def _reviewer_agent_instructions(worktree: Path) -> str:
+    candidates = [
+        worktree / ".agents" / "agents" / "reviewer.toml",
+        _skill_root().parent.parent / "agents" / "reviewer.toml",
+    ]
+    for path in candidates:
+        try:
+            payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise APError(f"Cannot load managed Reviewer Agent config: {path}: {exc}") from exc
+        instructions = _text(payload.get("developer_instructions"))
+        if instructions:
+            return instructions
+    return (
+        "Act as an independent read-only code reviewer. Review only the supplied "
+        "assignment and return one JSON object with an approved, changes-requested, "
+        "or blocked verdict. Do not modify files."
+    )
+
+
+def _codex_reviewer_command(
+    worktree: Path,
+    assignment_path: Path,
+    result_path: Path,
+) -> list[str]:
+    codex = shutil.which("codex")
+    if not codex:
+        raise APError(
+            "The supervised Reviewer runtime requires the Codex CLI on PATH. "
+            "Install Codex or run review-assignment and use another deadline-capable host."
+        )
+    instructions = _reviewer_agent_instructions(worktree)
+    prompt = (
+        f"Review the exact assignment at {assignment_path}. "
+        "Stay inside its diff, identity, and deadline. Use "
+        "`python3 docs/tools/autopipeline/ap.py agent-result-template --file "
+        f"{assignment_path} --verdict <approved|changes-requested|blocked>` when useful. "
+        "Return only one JSON object as the final response; do not modify files."
+    )
+    return [
+        codex,
+        "-a",
+        "never",
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "-C",
+        str(worktree),
+        "-s",
+        "read-only",
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "-c",
+        "developer_instructions=" + json.dumps(instructions, ensure_ascii=False),
+        "-o",
+        str(result_path),
+        prompt,
+    ]
+
+
+def _terminate_reviewer_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    if process.poll() is None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        stdout, stderr = process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+    return stdout or "", stderr or ""
+
+
+def _run_supervised_reviewer_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    if timeout_seconds <= 0:
+        raise _ReviewerRuntimeTimeout()
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = _terminate_reviewer_process(process)
+        raise _ReviewerRuntimeTimeout(stdout, stderr) from exc
+    return subprocess.CompletedProcess(
+        command,
+        int(process.returncode or 0),
+        stdout or "",
+        stderr or "",
+    )
+
+
 def _validate_agent_plan(plan: dict) -> dict:
     required = {
         "contract_version",
@@ -5820,6 +6243,24 @@ def _review_execution_policy(
         ),
         "analysis_attempt_limit": 1,
     }
+
+
+def _normalized_task_review_policy(
+    review_required: bool,
+    *depth_candidates: object,
+) -> tuple[str, int]:
+    if not review_required:
+        return "none", 0
+    depth_rank = {"none": 0, "focused": 1, "deep": 2}
+    depth = "focused"
+    for candidate in depth_candidates:
+        normalized = _text(candidate).lower()
+        if depth_rank.get(normalized, 0) > depth_rank[depth]:
+            depth = normalized
+    timeout_seconds = (
+        _DEEP_REVIEW_TIMEOUT_SECONDS if depth == "deep" else _FOCUSED_REVIEW_TIMEOUT_SECONDS
+    )
+    return depth, timeout_seconds
 
 
 def _agent_execution_plan(
@@ -6531,6 +6972,16 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
         deadline=deadline,
         command_timeout_s=budget["command_seconds"],
     )
+    executed.extend(
+        _run_structure_check_for_gate(
+            repo,
+            cfg,
+            selected_scope,
+            _text(getattr(args, "base", "")),
+            deadline=deadline,
+            command_timeout_s=budget["command_seconds"],
+        )
+    )
 
     _run_git_diff_check(repo, cfg)
     if time.monotonic() > deadline:
@@ -6612,25 +7063,30 @@ def cmd_runtime_down(args: argparse.Namespace) -> None:
     print("[runtime-down] OK")
 
 
-def cmd_wait_health(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).resolve()
-    cfg = _load_cfg(repo)
-    scope = args.scope
-    if scope == "runtime":
-        runtime_cfg = (cfg.get("runtime") or {})
-        url = _join_url(str(runtime_cfg.get("health_base_url") or ""), str(runtime_cfg.get("health_path") or ""))
-        timeout_s = int(runtime_cfg.get("startup_timeout_sec") or 120)
-    else:
-        target_cfg = (cfg.get("target_env") or {})
-        jenkins_cfg = (cfg.get("jenkins") or {})
-        base_url = str(target_cfg.get("health_base_url") or "")
-        path = str(target_cfg.get("health_path") or "")
-        url = _join_url(
-            base_url,
-            path,
-        )
-        timeout_s = int(jenkins_cfg.get("deploy_timeout_sec") or 1800)
+def _target_endpoint_config(
+    cfg: dict,
+    component: str,
+) -> tuple[str, dict, str, str, str]:
+    access = cfg.get("access") or {}
+    project = access.get("project") or {}
+    lane = project.get(component) or {}
+    if isinstance(lane, dict) and any(_is_explicit_fill(value) for value in lane.values()):
+        base_url = _require_http_url(f"access.project.{component}.url", lane.get("url"))
+        return f"access.project.{component}", lane, base_url, "username", "password"
+    legacy = cfg.get("target_env") or {}
+    base_field = f"{component}_base_url"
+    base_url = _require_http_url(f"target_env.{base_field}", legacy.get(base_field))
+    return (
+        "target_env",
+        legacy,
+        base_url,
+        f"{component}_username",
+        f"{component}_password",
+    )
 
+
+def _wait_for_health_url(scope: str, url: str, timeout_s: int) -> None:
+    _require_http_url(f"{scope} health URL", url)
     deadline = time.time() + timeout_s
     last_error = "(none)"
     while time.time() < deadline:
@@ -6646,50 +7102,94 @@ def cmd_wait_health(args: argparse.Namespace) -> None:
     raise APError(f"Health check timeout for {scope}: {url}\nLast result: {last_error}")
 
 
+def cmd_wait_health(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    cfg = _load_cfg(repo)
+    scope = args.scope
+    requested_timeout = int(getattr(args, "timeout_sec", 0) or 0)
+    if scope == "runtime":
+        runtime_cfg = cfg.get("runtime") or {}
+        base_url = _require_http_url("runtime.health_base_url", runtime_cfg.get("health_base_url"))
+        url = _join_url(base_url, runtime_cfg.get("health_path"))
+        timeout_s = requested_timeout or int(runtime_cfg.get("startup_timeout_sec") or 120)
+    else:
+        target_cfg = cfg.get("target_env") or {}
+        explicit_path = _text(getattr(args, "path", ""))
+        legacy_base = _text(target_cfg.get("health_base_url"))
+        legacy_path = _text(target_cfg.get("health_path"))
+        if explicit_path:
+            component = _text(getattr(args, "component", "")) or "backend"
+            _, _, base_url, _, _ = _target_endpoint_config(cfg, component)
+            url = _join_url(base_url, explicit_path)
+        elif legacy_base and legacy_path:
+            base_url = _require_http_url("target_env.health_base_url", legacy_base)
+            url = _join_url(base_url, legacy_path)
+        else:
+            raise APError(
+                "Target health check requires --component and --path for access.project, "
+                "or legacy target_env.health_base_url plus target_env.health_path."
+            )
+        timeout_s = requested_timeout or int((cfg.get("jenkins") or {}).get("deploy_timeout_sec") or 120)
+    _wait_for_health_url(scope, url, timeout_s)
+
+
 def cmd_verify_target(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
-    target_cfg = (cfg.get("target_env") or {})
+    requested = {
+        "backend": list(args.backend_path or []),
+        "frontend": list(args.frontend_path or []),
+    }
+    target_cfg = cfg.get("target_env") or {}
+    legacy_health_base = _text(target_cfg.get("health_base_url"))
+    legacy_health_path = _text(target_cfg.get("health_path"))
+    if not any(requested.values()) and not (legacy_health_base and legacy_health_path):
+        raise APError(
+            "verify-target requires --backend-path or --frontend-path when no legacy target health check is configured."
+        )
 
-    cmd_wait_health(argparse.Namespace(repo=str(repo), scope="target"))
+    planned_checks: list[tuple[str, str, dict[str, str]]] = []
+    for component in ("backend", "frontend"):
+        paths = requested[component]
+        if not paths:
+            continue
+        section_name, section_cfg, base_url, user_field, secret_field = _target_endpoint_config(
+            cfg,
+            component,
+        )
+        headers: dict[str, str] = {}
+        if bool(getattr(args, f"{component}_basic_auth")):
+            username = _text(section_cfg.get(user_field))
+            if not _is_explicit_fill(username):
+                raise APError(f"Missing {section_name}.{user_field} for basic auth.")
+            password = _resolve_secret(section_name, section_cfg, secret_field)
+            headers = _basic_auth_header(username, password)
+        for path in paths:
+            url = _join_url(base_url, path)
+            _require_http_url(f"{component} target URL", url)
+            planned_checks.append((component, url, headers))
+
+    health_url = ""
+    if legacy_health_base or legacy_health_path:
+        if not (legacy_health_base and legacy_health_path):
+            raise APError(
+                "Legacy target health config requires both target_env.health_base_url and target_env.health_path."
+            )
+        health_base = _require_http_url("target_env.health_base_url", legacy_health_base)
+        health_url = _join_url(health_base, legacy_health_path)
+
+    if health_url:
+        timeout_s = int((cfg.get("jenkins") or {}).get("deploy_timeout_sec") or 120)
+        _wait_for_health_url("target", health_url, timeout_s)
 
     checks: List[str] = []
-
-    backend_base = str(target_cfg.get("backend_base_url") or "").strip().rstrip("/")
-    frontend_base = str(target_cfg.get("frontend_base_url") or "").strip().rstrip("/")
-
-    backend_headers: dict[str, str] = {}
-    frontend_headers: dict[str, str] = {}
-    if args.backend_basic_auth:
-        user = str(target_cfg.get("backend_username") or "").strip()
-        if not user:
-            raise APError("Missing target_env.backend_username for backend basic auth.")
-        password = _resolve_secret("target_env", target_cfg, "backend_password")
-        backend_headers = _basic_auth_header(user, password)
-    if args.frontend_basic_auth:
-        user = str(target_cfg.get("frontend_username") or "").strip()
-        if not user:
-            raise APError("Missing target_env.frontend_username for frontend basic auth.")
-        password = _resolve_secret("target_env", target_cfg, "frontend_password")
-        frontend_headers = _basic_auth_header(user, password)
-
-    for path in args.backend_path or []:
-        if not backend_base:
-            raise APError("Missing target_env.backend_base_url for backend path verification.")
-        url = _join_url(backend_base, path)
-        status, body = _http_get(url, headers=backend_headers, timeout_s=10)
+    for component, url, headers in planned_checks:
+        status, body = _http_get(url, headers=headers, timeout_s=10)
         if not (200 <= status < 400):
-            raise APError(f"Backend target verification failed: {url} -> {status}\n{body[:400]}")
-        checks.append(f"backend:{url}->{status}")
-
-    for path in args.frontend_path or []:
-        if not frontend_base:
-            raise APError("Missing target_env.frontend_base_url for frontend path verification.")
-        url = _join_url(frontend_base, path)
-        status, body = _http_get(url, headers=frontend_headers, timeout_s=10)
-        if not (200 <= status < 400):
-            raise APError(f"Frontend target verification failed: {url} -> {status}\n{body[:400]}")
-        checks.append(f"frontend:{url}->{status}")
+            raise APError(
+                f"{component.title()} target verification failed: {url} -> {status}\n{body[:400]}"
+            )
+        checks.append(f"{component}:{url}->{status}")
 
     summary = ", ".join(checks) if checks else "health-only"
     _record_evidence(repo, cfg, "verify_target", "pass", {"summary": summary, "checks": checks})
@@ -6706,6 +7206,28 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     jenkinsfile = Path(repo, str(project_cfg.get("jenkinsfile") or "Jenkinsfile"))
     if not jenkinsfile.exists():
         raise APError(f"Jenkinsfile not found: {jenkinsfile}")
+
+    configured_components = _configured_jenkins_components(cfg)
+    if configured_components:
+        requested = _text(getattr(args, "component", "all")).lower() or "all"
+        selected = ("frontend", "backend") if requested == "all" else (requested,)
+        checked: list[str] = []
+        for component in selected:
+            lane = _jenkins_access_cfg(cfg, component)
+            _require_http_url(f"access.jenkins.{component}.url", lane.get("url"))
+            if not _is_explicit_fill(lane.get("username")):
+                raise APError(f"Missing access.jenkins.{component}.username.")
+            _resolve_secret(f"access.jenkins.{component}", lane, "password")
+            checked.append(component)
+        _record_evidence(
+            repo,
+            cfg,
+            "verify_jenkins",
+            "pass",
+            {"jenkinsfile": str(jenkinsfile), "components": checked},
+        )
+        print(f"[verify-jenkins] OK: {jenkinsfile} components={','.join(checked)}")
+        return
 
     required = [
         ("jenkins.base_url", jenkins_cfg.get("base_url")),
@@ -6963,6 +7485,16 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
     jenkins_cfg = (cfg.get("jenkins") or {})
+    component = _resolve_jenkins_component(
+        cfg,
+        _text(getattr(args, "component", "")),
+        _text(args.job_url),
+    )
+    if component:
+        lane = _jenkins_access_cfg(cfg, component)
+        _require_http_url(f"access.jenkins.{component}.url", lane.get("url"))
+        _jenkins_auth_config(cfg, component)
+        _resolve_secret(f"access.jenkins.{component}", lane, "password")
     git_ref = str(args.git_ref or "HEAD").strip()
     candidate_job_urls = _resolve_jenkins_job_candidates(
         cfg,
@@ -6972,6 +7504,7 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         job_url=args.job_url,
         multibranch_root_job=args.multibranch_root_job,
         branch_name=args.branch_name,
+        component=component,
     )
     build_number = args.build_number
     max_builds = int(args.max_builds or 20)
@@ -6985,6 +7518,7 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         args.multibranch_root_job
         or args.job_name
         or args.job_url
+        or (_jenkins_access_cfg(cfg, component).get("url") if component else "")
         or jenkins_cfg.get("job_url")
         or ""
     ).strip()
@@ -7000,7 +7534,12 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
             payload = None
             for candidate_job_url in candidate_job_urls:
                 api_url = _jenkins_build_api_url(candidate_job_url, int(build_number))
-                payload = _jenkins_api_get_json(api_url, cfg, allow_404=True)
+                payload = _jenkins_api_get_json(
+                    api_url,
+                    cfg,
+                    allow_404=True,
+                    component=component,
+                )
                 if payload is not None:
                     break
             if payload is not None and not payload.get("building"):
@@ -7046,7 +7585,12 @@ def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
         matched = None
         for candidate_job_url in candidate_job_urls:
             api_url = _jenkins_builds_api_url(candidate_job_url, max_builds)
-            payload = _jenkins_api_get_json(api_url, cfg, allow_404=True)
+            payload = _jenkins_api_get_json(
+                api_url,
+                cfg,
+                allow_404=True,
+                component=component,
+            )
             if payload is None:
                 continue
             builds = payload.get("builds") or []
@@ -8296,6 +8840,11 @@ def cmd_task_start(args: argparse.Namespace) -> None:
                 "only when classify requires isolation/review or the user explicitly requests it."
             )
         review_required = bool(getattr(args, "review_required", False) or plan["review_required"])
+        review_depth, review_timeout_seconds = _normalized_task_review_policy(
+            review_required,
+            plan.get("review_depth"),
+            getattr(args, "review_depth", ""),
+        )
         registry_dir = _task_state_root(repo) / "tasks"
         other_active = any(
             _text((payload or {}).get("state"))
@@ -8350,6 +8899,8 @@ def cmd_task_start(args: argparse.Namespace) -> None:
                 "scope_revision": 1,
                 "effective_profile": plan["profile"],
                 "design_required": bool(plan["design_required"]),
+                "review_depth": review_depth,
+                "review_timeout_seconds": review_timeout_seconds,
                 "scope_history": [],
                 "depends_on": depends_on,
                 "prerequisite_shas": prerequisite_shas,
@@ -8435,6 +8986,8 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "scope_revision": 1,
             "effective_profile": plan["profile"],
             "design_required": bool(plan["design_required"]),
+            "review_depth": review_depth,
+            "review_timeout_seconds": review_timeout_seconds,
             "scope_history": [],
             "depends_on": depends_on,
             "prerequisite_shas": prerequisite_shas,
@@ -8509,18 +9062,49 @@ def _task_status_payload(repo: Path, manifest: dict) -> dict:
     remote = _text(manifest.get("remote")) or "origin"
     target = _text(manifest.get("target_branch"))
     remote_ref = f"refs/remotes/{remote}/{target}"
-    merged = bool(
+    base_sha = _text(manifest.get("base_sha"))
+    has_task_commits = bool(
         tip
+        and base_sha
+        and tip != base_sha
+        and run(
+            ["git", "merge-base", "--is-ancestor", base_sha, tip],
+            cwd=repo,
+            check=False,
+        ).returncode
+        == 0
+    )
+    merged = bool(
+        has_task_commits
         and _git_ref_exists(repo, remote_ref)
         and run(["git", "merge-base", "--is-ancestor", tip, remote_ref], cwd=repo, check=False).returncode == 0
     )
+    review = manifest.get("review") or {}
+    deadline_at = _text(review.get("deadline_at"))
+    review_seconds_remaining: Optional[int] = None
+    review_deadline_expired = False
+    if deadline_at:
+        try:
+            remaining = (
+                _parse_iso_timestamp(deadline_at, "deadline_at")
+                - _dt.datetime.now(_dt.timezone.utc)
+            ).total_seconds()
+            seconds = int(remaining)
+            review_seconds_remaining = max(0, seconds)
+            review_deadline_expired = remaining < 0
+        except APError:
+            review_deadline_expired = True
+            review_seconds_remaining = 0
     return {
         **manifest,
         "worktree_exists": worktree.exists(),
         "dirty": bool(_git_status(worktree)) if worktree.exists() else False,
         "local_branch_exists": bool(tip),
         "tip": tip,
+        "has_task_commits": has_task_commits,
         "merged_into_target": merged,
+        "review_deadline_expired": review_deadline_expired,
+        "review_seconds_remaining": review_seconds_remaining,
         "current_diff_fingerprint": _task_review_fingerprint(worktree, manifest)
         if worktree.exists()
         else "",
@@ -8551,7 +9135,9 @@ def cmd_task_status(args: argparse.Namespace) -> None:
         print(
             f"[task-status] task={status['task_id']} state={status.get('state')} "
             f"branch={status.get('task_branch')} worktree={status.get('worktree_path')} "
-            f"dirty={str(status['dirty']).lower()} merged={str(status['merged_into_target']).lower()}"
+            f"dirty={str(status['dirty']).lower()} commits="
+            f"{str(status['has_task_commits']).lower()} "
+            f"merged={str(status['merged_into_target']).lower()}"
         )
 
 
@@ -8678,6 +9264,13 @@ def cmd_task_scope_add(args: argparse.Namespace) -> None:
             manifest["design_required"] = bool(
                 manifest.get("design_required") or plan.get("design_required")
             )
+            review_depth, review_timeout_seconds = _normalized_task_review_policy(
+                bool(manifest["review_required"]),
+                manifest.get("review_depth"),
+                plan.get("review_depth"),
+            )
+            manifest["review_depth"] = review_depth
+            manifest["review_timeout_seconds"] = review_timeout_seconds
             manifest["claimed_paths"] = []
             history = list(manifest.get("scope_history") or [])
             history.append(
@@ -8730,6 +9323,543 @@ def cmd_task_scope_add(args: argparse.Namespace) -> None:
         )
 
 
+def _parse_iso_timestamp(value: object, field: str) -> _dt.datetime:
+    raw = _text(value)
+    try:
+        parsed = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise APError(f"Invalid {field} timestamp in review assignment: {raw!r}.") from exc
+    if parsed.tzinfo is None:
+        raise APError(f"Review assignment {field} must include a timezone.")
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _task_review_policy(cfg: dict, worktree: Path, manifest: dict) -> tuple[str, int]:
+    changed_paths = _task_changed_paths_from_base(worktree, _text(manifest.get("base_sha")))
+    plan = _resolve_execution_plan(
+        cfg,
+        worktree,
+        changed_paths=changed_paths,
+        planned_paths=list(manifest.get("owned_paths") or []),
+        requested_task_kind="change",
+    )
+    return _normalized_task_review_policy(
+        True,
+        manifest.get("review_depth"),
+        plan.get("review_depth"),
+    )
+
+
+def cmd_review_assignment(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        lifecycle_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+        if not lifecycle_actor or lifecycle_actor != _text(manifest.get("owner")):
+            raise APError("Only the task lifecycle owner may issue a review assignment.")
+        if _text(manifest.get("state")) not in {"active", "pushed", "integration-raced"}:
+            raise APError(f"Task {task_id} is not reviewable in state={manifest.get('state')}.")
+        if not bool(manifest.get("review_required")):
+            raise APError(f"Task {task_id} does not require an independent review assignment.")
+        if not worktree.exists():
+            raise APError(f"Task worktree is missing: {worktree}")
+        worktree_cfg = _load_cfg(worktree)
+        unowned = _task_unowned_paths(worktree, worktree_cfg, manifest)
+        if unowned:
+            raise APError("Changes outside task owned_paths:\n- " + "\n- ".join(unowned))
+        changed_paths = _task_changed_paths_from_base(
+            worktree,
+            _text(manifest.get("base_sha")),
+        )
+        owned_paths = [
+            path
+            for path in changed_paths
+            if _path_is_owned(path, list(manifest.get("owned_paths") or []))
+        ]
+        if not owned_paths:
+            raise APError("Cannot issue a review assignment before the task has an owned diff.")
+        reviewer = _text(args.reviewer)
+        if not reviewer or any(char in reviewer for char in "\0\r\n"):
+            raise APError("Reviewer identity is empty or contains invalid characters.")
+        owner = _text(manifest.get("owner"))
+        owning_fixer = _text((manifest.get("writer_lease") or {}).get("holder")) or owner
+        if reviewer in {owner, owning_fixer}:
+            raise APError("Independent reviewer must differ from lifecycle owner and owning fixer.")
+        fingerprint = _task_review_fingerprint(worktree, manifest, worktree_cfg)
+        depth, review_timeout = _task_review_policy(worktree_cfg, worktree, manifest)
+        issued = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+        deadline = issued + _dt.timedelta(seconds=review_timeout)
+        assignment = {
+            "contract_version": _AGENT_CONTRACT_VERSION,
+            "node_id": reviewer,
+            "task_id": task_id,
+            "role": "reviewer",
+            "base_sha": _text(manifest.get("base_sha")),
+            "scope": f"Review the task-owned diff for {task_id}",
+            "depends_on": [owning_fixer],
+            "acceptance": [
+                "Review only the assigned stable diff and supplied evidence.",
+                "Return the complete 16-field reviewer result bound to diff_fingerprint.",
+            ],
+            "diff_base": _text(manifest.get("base_sha")),
+            "diff_head": _resolve_commit(worktree, "HEAD"),
+            "diff_fingerprint": fingerprint,
+            "owning_fixer": owning_fixer,
+            "review_depth": depth,
+            "timeout_seconds": review_timeout,
+            "issued_at": issued.isoformat(),
+            "deadline_at": deadline.isoformat(),
+            "scope_revision": int(manifest.get("scope_revision") or 1),
+        }
+        _validate_orchestration_contract("assignment", assignment)
+        assignment_path = (
+            _task_state_root(control_repo)
+            / "reviews"
+            / f"{task_id}-{fingerprint}.assignment.json"
+        )
+        prior_review = manifest.get("review") or {}
+        if (
+            _text(prior_review.get("diff_fingerprint")) == fingerprint
+            and (
+                _text(prior_review.get("verdict"))
+                in {"approved", "changes-requested", "blocked"}
+                or _text(prior_review.get("runtime_state"))
+                or _text(prior_review.get("runtime_receipt_path"))
+            )
+        ):
+            raise APError(
+                "The single review attempt for this diff fingerprint is already complete or consumed."
+            )
+        existing_assignment = _read_json_object(assignment_path)
+        if existing_assignment:
+            _validate_orchestration_contract("assignment", existing_assignment)
+            expected_fields = {
+                "task_id": task_id,
+                "base_sha": assignment["base_sha"],
+                "diff_base": assignment["diff_base"],
+                "diff_head": assignment["diff_head"],
+                "diff_fingerprint": fingerprint,
+                "owning_fixer": owning_fixer,
+                "scope_revision": assignment["scope_revision"],
+            }
+            mismatched = [
+                field
+                for field, expected in expected_fields.items()
+                if existing_assignment.get(field) != expected
+            ]
+            if mismatched:
+                raise APError(
+                    "Existing review assignment does not match current task state: "
+                    + ", ".join(mismatched)
+                )
+            if _text(existing_assignment.get("node_id")) != reviewer:
+                raise APError(
+                    "This diff fingerprint already has a reviewer assignment; "
+                    "the single review attempt cannot be reassigned."
+                )
+            existing_deadline = _parse_iso_timestamp(
+                existing_assignment.get("deadline_at"),
+                "deadline_at",
+            )
+            if _dt.datetime.now(_dt.timezone.utc) > existing_deadline:
+                raise APError(
+                    "Review attempt timed out and is blocked for this diff fingerprint; "
+                    "do not renew it without a semantic diff/scope change or explicit user authorization."
+                )
+            assignment = existing_assignment
+            depth = _text(assignment.get("review_depth"))
+            review_timeout = int(assignment.get("timeout_seconds") or 0)
+        elif (
+            _text(prior_review.get("diff_fingerprint")) == fingerprint
+            and _text(prior_review.get("deadline_at"))
+        ):
+            if _text(prior_review.get("reviewer")) != reviewer:
+                raise APError(
+                    "This diff fingerprint already has a reviewer assignment; "
+                    "the single review attempt cannot be reassigned."
+                )
+            issued = _parse_iso_timestamp(prior_review.get("issued_at"), "issued_at")
+            deadline = _parse_iso_timestamp(prior_review.get("deadline_at"), "deadline_at")
+            if _dt.datetime.now(_dt.timezone.utc) > deadline:
+                raise APError(
+                    "Review attempt timed out and is blocked for this diff fingerprint; "
+                    "do not renew it without a semantic diff/scope change or explicit user authorization."
+                )
+            assignment["issued_at"] = issued.isoformat()
+            assignment["deadline_at"] = deadline.isoformat()
+            assignment["timeout_seconds"] = int((deadline - issued).total_seconds())
+            _validate_orchestration_contract("assignment", assignment)
+            _write_json_object(assignment_path, assignment)
+            depth = _text(assignment.get("review_depth"))
+            review_timeout = int(assignment.get("timeout_seconds") or 0)
+        else:
+            _write_json_object(assignment_path, assignment)
+        manifest["review_depth"] = depth
+        manifest["review_timeout_seconds"] = review_timeout
+        review_state = {
+            "verdict": "pending",
+            "diff_base": assignment["diff_base"],
+            "diff_head": assignment["diff_head"],
+            "diff_fingerprint": fingerprint,
+            "reviewer": reviewer,
+            "reviewed_at": "",
+            "reason": "review assignment issued",
+            "assignment_path": str(assignment_path),
+            "issued_at": assignment["issued_at"],
+            "deadline_at": assignment["deadline_at"],
+        }
+        if _text(prior_review.get("diff_fingerprint")) == fingerprint:
+            for field in _REVIEW_RUNTIME_FIELDS:
+                if field in prior_review:
+                    review_state[field] = prior_review[field]
+        manifest["review"] = review_state
+        _save_task_manifest(control_repo, manifest)
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {"assignment_path": str(assignment_path), "assignment": assignment},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(f"[review-assignment] task={task_id} reviewer={reviewer} depth={depth}")
+        print(f"[review-assignment] timeout_seconds={review_timeout}")
+        print(f"[review-assignment] assignment={assignment_path}")
+
+
+def _write_private_json(path: Path, payload: dict) -> None:
+    _write_json_object(path, payload)
+    try:
+        path.chmod(0o600)
+    except OSError as exc:
+        raise APError(f"Cannot protect Git-local review state: {path}: {exc}") from exc
+
+
+def _review_runtime_paths(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+) -> tuple[Path, Path]:
+    root = _task_state_root(control_repo) / "reviews"
+    stem = f"{_validate_task_id(task_id)}-{fingerprint}"
+    return root / f"{stem}.result.json", root / f"{stem}.run.json"
+
+
+def _review_command_sha256(command: list[str]) -> str:
+    digest = hashlib.sha256()
+    for argument in command:
+        digest.update(argument.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _bounded_reviewer_output(value: str, label: str) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) > _REVIEW_OUTPUT_MAX_BYTES:
+        raise APError(f"Reviewer {label} exceeded {_REVIEW_OUTPUT_MAX_BYTES} bytes; refusing oversized output.")
+    return value
+
+
+def _read_bounded_reviewer_output(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(_REVIEW_OUTPUT_MAX_BYTES + 1)
+    except OSError as exc:
+        raise APError(f"Cannot read Reviewer result: {path}: {exc}") from exc
+    if len(payload) > _REVIEW_OUTPUT_MAX_BYTES:
+        raise APError(f"Reviewer result exceeded {_REVIEW_OUTPUT_MAX_BYTES} bytes; refusing oversized output.")
+    return payload.decode("utf-8", errors="strict")
+
+
+def _review_result_file_sha256(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(_REVIEW_OUTPUT_MAX_BYTES + 1)
+    except OSError as exc:
+        raise APError(f"Cannot hash Reviewer result: {path}: {exc}") from exc
+    if len(payload) > _REVIEW_OUTPUT_MAX_BYTES:
+        raise APError(f"Reviewer result exceeded {_REVIEW_OUTPUT_MAX_BYTES} bytes; refusing oversized output.")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _update_review_runtime(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+    *,
+    updates: dict,
+    receipt_path: Path,
+    receipt_updates: dict,
+) -> dict:
+    cfg = _load_cfg(control_repo)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        review = dict(manifest.get("review") or {})
+        if _text(review.get("diff_fingerprint")) != fingerprint:
+            raise APError("Reviewer runtime assignment became stale while the process was running.")
+        review.update(updates)
+        manifest["review"] = review
+        receipt = _read_json_object(receipt_path) or {}
+        receipt.update(receipt_updates)
+        _write_private_json(receipt_path, receipt)
+        _save_task_manifest(control_repo, manifest)
+        return manifest
+
+
+def _blocked_reviewer_runtime_result(
+    assignment: dict,
+    reason: str,
+    evidence: list[str],
+) -> dict:
+    result = _reviewer_result_template(assignment, "blocked")
+    result["summary"] = reason
+    result["evidence"] = evidence
+    return _validate_orchestration_contract("result", result)
+
+
+def cmd_review_run(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    reviewer = _text(args.reviewer)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_review_assignment(
+            argparse.Namespace(
+                repo=str(repo),
+                task_id=task_id,
+                reviewer=reviewer,
+                json=False,
+            )
+        )
+
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    manifest = _load_task_manifest(control_repo, task_id)
+    review = manifest.get("review") or {}
+    assignment_path = Path(_text(review.get("assignment_path"))).resolve()
+    assignment = _read_json_object(assignment_path)
+    if not assignment:
+        raise APError("Review assignment file is missing or invalid.")
+    _validate_orchestration_contract("assignment", assignment)
+    fingerprint = _text(assignment.get("diff_fingerprint"))
+    result_path, receipt_path = _review_runtime_paths(control_repo, task_id, fingerprint)
+
+    command_override = _text(getattr(args, "runner_command_json", ""))
+    if command_override:
+        try:
+            command_value = json.loads(command_override)
+        except json.JSONDecodeError as exc:
+            raise APError("--runner-command-json must be a JSON array of argv strings.") from exc
+        if not isinstance(command_value, list) or not command_value or not all(
+            isinstance(item, str) and item for item in command_value
+        ):
+            raise APError("--runner-command-json must be a non-empty JSON array of argv strings.")
+        command = command_value
+    else:
+        command = _codex_reviewer_command(worktree, assignment_path, result_path)
+    command_sha256 = _review_command_sha256(command)
+    started_at = _now_iso()
+    receipt = {
+        "schema": 1,
+        "task_id": task_id,
+        "reviewer": reviewer,
+        "diff_fingerprint": fingerprint,
+        "assignment_path": str(assignment_path),
+        "result_path": str(result_path),
+        "command_sha256": command_sha256,
+        "status": "starting",
+        "started_at": started_at,
+        "finished_at": "",
+        "exit_code": None,
+    }
+    timeout_s = float(_concurrency_cfg(_load_cfg(control_repo)).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        current_review = dict(manifest.get("review") or {})
+        if _text(current_review.get("diff_fingerprint")) != fingerprint:
+            raise APError("Review assignment became stale before Reviewer runtime start.")
+        if _text(current_review.get("runtime_state")) or receipt_path.exists():
+            raise APError(
+                "The supervised Reviewer runtime has already started for this diff fingerprint."
+            )
+        deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+        if _dt.datetime.now(_dt.timezone.utc) >= deadline:
+            raise APError("Review assignment deadline expired before Reviewer runtime start.")
+        _write_private_json(receipt_path, receipt)
+        current_review.update(
+            {
+                "runtime_state": "starting",
+                "runtime_started_at": started_at,
+                "runtime_finished_at": "",
+                "runtime_result_path": str(result_path),
+                "runtime_exit_code": None,
+                "runtime_command_sha256": command_sha256,
+                "runtime_receipt_path": str(receipt_path),
+            }
+        )
+        manifest["review"] = current_review
+        _save_task_manifest(control_repo, manifest)
+
+    env = os.environ.copy()
+    env.pop("CODEX_THREAD_ID", None)
+    env.update(
+        {
+            "AUTOCODING_REVIEW_ASSIGNMENT": str(assignment_path),
+            "AUTOCODING_REVIEW_RESULT": str(result_path),
+            "AUTOCODING_REVIEW_DEADLINE": _text(assignment.get("deadline_at")),
+            "AUTOCODING_REVIEW_TIMEOUT_SECONDS": str(int(assignment.get("timeout_seconds") or 0)),
+        }
+    )
+    deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+    remaining = (deadline - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    try:
+        completed = _run_supervised_reviewer_process(
+            command,
+            cwd=worktree,
+            env=env,
+            timeout_seconds=remaining,
+        )
+    except _ReviewerRuntimeTimeout as exc:
+        finished_at = _now_iso()
+        result = _blocked_reviewer_runtime_result(
+            assignment,
+            "Reviewer runtime reached its fixed deadline and was terminated.",
+            ["runtime_timeout=true"],
+        )
+        _write_private_json(result_path, result)
+        _update_review_runtime(
+            control_repo,
+            task_id,
+            fingerprint,
+            updates={
+                "verdict": "blocked",
+                "reason": "reviewer runtime timeout",
+                "runtime_state": "timed-out",
+                "runtime_finished_at": finished_at,
+                "runtime_exit_code": None,
+            },
+            receipt_path=receipt_path,
+            receipt_updates={
+                "status": "timed-out",
+                "finished_at": finished_at,
+                "exit_code": None,
+            },
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise APError("Reviewer runtime timed out and was terminated; review is blocked.") from exc
+
+    finished_at = _now_iso()
+    if completed.returncode != 0:
+        result = _blocked_reviewer_runtime_result(
+            assignment,
+            "Reviewer runtime exited unsuccessfully.",
+            [f"runner_exit_code={completed.returncode}"],
+        )
+        _write_private_json(result_path, result)
+        _update_review_runtime(
+            control_repo,
+            task_id,
+            fingerprint,
+            updates={
+                "verdict": "blocked",
+                "reason": "reviewer runtime failed",
+                "runtime_state": "failed",
+                "runtime_finished_at": finished_at,
+                "runtime_exit_code": completed.returncode,
+            },
+            receipt_path=receipt_path,
+            receipt_updates={
+                "status": "failed",
+                "finished_at": finished_at,
+                "exit_code": completed.returncode,
+            },
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise APError(
+            f"Reviewer runtime failed with exit code {completed.returncode}; review is blocked."
+        )
+
+    try:
+        stdout = _bounded_reviewer_output(completed.stdout, "stdout")
+        _bounded_reviewer_output(completed.stderr, "stderr")
+        raw = _read_bounded_reviewer_output(result_path) if result_path.exists() else stdout
+        payload = json.loads(raw)
+        result = _normalize_reviewer_runtime_result(assignment, payload)
+    except (APError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        result = _blocked_reviewer_runtime_result(
+            assignment,
+            "Reviewer runtime returned an invalid result.",
+            ["result_contract_valid=false"],
+        )
+        _write_private_json(result_path, result)
+        _update_review_runtime(
+            control_repo,
+            task_id,
+            fingerprint,
+            updates={
+                "verdict": "blocked",
+                "reason": "invalid reviewer runtime result",
+                "runtime_state": "failed",
+                "runtime_finished_at": finished_at,
+                "runtime_exit_code": completed.returncode,
+            },
+            receipt_path=receipt_path,
+            receipt_updates={
+                "status": "result-invalid",
+                "finished_at": finished_at,
+                "exit_code": completed.returncode,
+            },
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise APError(f"Reviewer runtime result is invalid; review is blocked: {exc}") from exc
+
+    _write_private_json(result_path, result)
+    result_sha256 = _review_result_file_sha256(result_path)
+    runtime_state = "blocked" if result["verdict"] == "blocked" else "completed"
+    _update_review_runtime(
+        control_repo,
+        task_id,
+        fingerprint,
+        updates={
+            "verdict": "blocked" if result["verdict"] == "blocked" else "pending",
+            "reason": "reviewer reported blocked" if result["verdict"] == "blocked" else "",
+            "runtime_state": runtime_state,
+            "runtime_finished_at": finished_at,
+            "runtime_exit_code": completed.returncode,
+        },
+        receipt_path=receipt_path,
+        receipt_updates={
+            "status": runtime_state,
+            "finished_at": finished_at,
+            "exit_code": completed.returncode,
+            "verdict": result["verdict"],
+            "result_sha256": result_sha256,
+        },
+    )
+    if result["verdict"] == "blocked":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise APError("Reviewer returned blocked; task-review was not recorded.")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_task_review(
+            argparse.Namespace(
+                repo=str(repo),
+                task_id=task_id,
+                verdict=result["verdict"],
+                diff_fingerprint=fingerprint,
+                reviewer=reviewer,
+            )
+        )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_task_review(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
@@ -8767,7 +9897,137 @@ def cmd_task_review(args: argparse.Namespace) -> None:
             writer = _text((manifest.get("writer_lease") or {}).get("holder"))
             if reviewer == writer:
                 raise APError("Independent reviewer identity must differ from the current writer lease holder.")
-        manifest["review"] = {
+        assigned_review = manifest.get("review") or {}
+        if bool(manifest.get("review_required")) and not all(
+            _text(assigned_review.get(field))
+            for field in ("assignment_path", "reviewer", "diff_fingerprint", "deadline_at")
+        ):
+            raise APError(
+                "Review-required tasks must use review-assignment before task-review."
+            )
+        assigned_reviewer = _text(assigned_review.get("reviewer"))
+        if assigned_reviewer and reviewer != assigned_reviewer:
+            raise APError(
+                f"Review verdict reviewer mismatch: assigned={assigned_reviewer}, supplied={reviewer}."
+            )
+        assigned_fingerprint = _text(assigned_review.get("diff_fingerprint"))
+        if assigned_fingerprint and assigned_fingerprint != fingerprint:
+            raise APError("Review assignment is stale; issue a new assignment for the current diff.")
+        assigned_head = _text(assigned_review.get("diff_head"))
+        current_head = _resolve_commit(worktree, "HEAD")
+        if assigned_head and assigned_head != current_head:
+            raise APError("Review assignment HEAD is stale for the current task.")
+        assignment_path = _text(assigned_review.get("assignment_path"))
+        assignment: Optional[dict] = None
+        if assignment_path:
+            expected_assignment_path = (
+                _task_state_root(control_repo)
+                / "reviews"
+                / f"{task_id}-{fingerprint}.assignment.json"
+            ).resolve()
+            if Path(assignment_path).resolve() != expected_assignment_path:
+                raise APError("Review assignment path does not match Git-local task state.")
+            assignment = _read_json_object(expected_assignment_path)
+            if not assignment:
+                raise APError("Review assignment file is missing or invalid.")
+            _validate_orchestration_contract("assignment", assignment)
+            expected_assignment_fields = {
+                "task_id": task_id,
+                "base_sha": _text(manifest.get("base_sha")),
+                "diff_base": _text(manifest.get("base_sha")),
+                "diff_head": current_head,
+                "diff_fingerprint": fingerprint,
+                "node_id": reviewer,
+                "owning_fixer": _text((manifest.get("writer_lease") or {}).get("holder")),
+                "issued_at": _text(assigned_review.get("issued_at")),
+                "deadline_at": _text(assigned_review.get("deadline_at")),
+            }
+            mismatched = [
+                field
+                for field, expected in expected_assignment_fields.items()
+                if assignment.get(field) != expected
+            ]
+            if mismatched:
+                raise APError(
+                    "Review assignment does not match the recorded task state: "
+                    + ", ".join(mismatched)
+                )
+            if int(assignment.get("scope_revision") or 0) != int(
+                manifest.get("scope_revision") or 1
+            ):
+                raise APError("Review assignment scope revision is stale.")
+        runtime_state = _text(assigned_review.get("runtime_state"))
+        if runtime_state:
+            if runtime_state != "completed":
+                raise APError(
+                    f"Reviewer runtime state={runtime_state} cannot be recorded by task-review."
+                )
+            if assignment is None:
+                raise APError("Reviewer runtime result has no validated assignment.")
+            if assigned_review.get("runtime_exit_code") != 0:
+                raise APError("Reviewer runtime did not exit successfully.")
+            expected_result_path, expected_receipt_path = _review_runtime_paths(
+                control_repo,
+                task_id,
+                fingerprint,
+            )
+            result_path = Path(_text(assigned_review.get("runtime_result_path"))).resolve()
+            receipt_path = Path(_text(assigned_review.get("runtime_receipt_path"))).resolve()
+            if result_path != expected_result_path.resolve():
+                raise APError("Reviewer runtime result path does not match Git-local task state.")
+            if receipt_path != expected_receipt_path.resolve():
+                raise APError("Reviewer runtime receipt path does not match Git-local task state.")
+            try:
+                result_payload = json.loads(_read_bounded_reviewer_output(result_path))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise APError("Reviewer runtime result file is invalid JSON.") from exc
+            if not isinstance(result_payload, dict):
+                raise APError("Reviewer runtime result file must contain one JSON object.")
+            _validate_orchestration_contract("result", result_payload)
+            normalized_result = _normalize_reviewer_runtime_result(assignment, result_payload)
+            if result_payload != normalized_result:
+                raise APError("Reviewer runtime result file is not the canonical bound result.")
+            if _text(result_payload.get("verdict")) != _text(args.verdict):
+                raise APError(
+                    "Reviewer runtime verdict does not match the requested task-review verdict."
+                )
+            receipt = _read_json_object(receipt_path)
+            if not receipt:
+                raise APError("Reviewer runtime receipt is missing or invalid.")
+            expected_receipt = {
+                "task_id": task_id,
+                "reviewer": reviewer,
+                "diff_fingerprint": fingerprint,
+                "result_path": str(expected_result_path),
+                "status": "completed",
+                "verdict": _text(args.verdict),
+                "result_sha256": _review_result_file_sha256(result_path),
+            }
+            receipt_mismatches = [
+                field
+                for field, expected in expected_receipt.items()
+                if receipt.get(field) != expected
+            ]
+            if receipt_mismatches:
+                raise APError(
+                    "Reviewer runtime receipt does not bind the recorded result: "
+                    + ", ".join(receipt_mismatches)
+                )
+        deadline_at = _text(assigned_review.get("deadline_at"))
+        completed_at = _dt.datetime.now(_dt.timezone.utc)
+        if (
+            _text(assigned_review.get("runtime_state")) == "completed"
+            and _text(assigned_review.get("runtime_finished_at"))
+        ):
+            completed_at = _parse_iso_timestamp(
+                assigned_review.get("runtime_finished_at"),
+                "runtime_finished_at",
+            )
+        if deadline_at and completed_at > _parse_iso_timestamp(deadline_at, "deadline_at"):
+            raise APError(
+                "Review assignment deadline expired; the single review attempt is blocked."
+            )
+        review_state = {
             "verdict": args.verdict,
             "diff_base": _text(manifest.get("base_sha")),
             "diff_head": _resolve_commit(worktree, "HEAD"),
@@ -8775,7 +10035,16 @@ def cmd_task_review(args: argparse.Namespace) -> None:
             "reviewer": reviewer,
             "reviewed_at": _now_iso(),
             "reason": "",
+            "assignment_path": assignment_path,
+            "issued_at": _text(assigned_review.get("issued_at")),
+            "deadline_at": deadline_at,
+            "review_depth": _text(manifest.get("review_depth")),
+            "review_timeout_seconds": int(manifest.get("review_timeout_seconds") or 0),
         }
+        for field in _REVIEW_RUNTIME_FIELDS:
+            if field in assigned_review:
+                review_state[field] = assigned_review[field]
+        manifest["review"] = review_state
         _save_task_manifest(control_repo, manifest)
     print(f"[task-review] task={task_id} verdict={args.verdict} fingerprint={fingerprint}")
 
@@ -9862,12 +11131,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     s = sp.add_parser("wait-health")
     s.add_argument("--scope", choices=["runtime", "target", "prod"], default="runtime")
+    s.add_argument("--component", choices=["frontend", "backend"], default="backend")
+    s.add_argument("--path")
+    s.add_argument("--timeout-sec", type=int)
     s.set_defaults(func=cmd_wait_health)
 
     s = sp.add_parser("verify-jenkins")
+    s.add_argument("--component", choices=["all", "frontend", "backend"], default="all")
     s.set_defaults(func=cmd_verify_jenkins)
 
     s = sp.add_parser("verify-jenkins-build")
+    s.add_argument("--component", choices=["frontend", "backend"])
     s.add_argument("--git-ref")
     s.add_argument("--job-name")
     s.add_argument("--job-url")
@@ -9917,6 +11191,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--isolated", action="store_true")
     s.add_argument("--review-required", action="store_true")
+    s.add_argument("--review-depth", choices=["focused", "deep"])
     s.add_argument("--continue-direct", action="store_true")
     s.add_argument("--direct-claim")
     s.add_argument(
@@ -9943,6 +11218,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--review-required", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_task_scope_add)
+
+    s = sp.add_parser(
+        "review-assignment",
+        help="Generate and persist a deadline-bound reviewer assignment for a registered task",
+    )
+    s.add_argument("task_id")
+    s.add_argument("--reviewer", required=True)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_review_assignment)
+
+    s = sp.add_parser(
+        "review-run",
+        help="Run the independent Codex Reviewer under the assignment's fixed runtime deadline",
+    )
+    s.add_argument("task_id")
+    s.add_argument("--reviewer", required=True)
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--runner-command-json", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_review_run)
 
     s = sp.add_parser("task-submodule-sync")
     s.add_argument("task_id")

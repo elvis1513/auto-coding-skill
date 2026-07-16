@@ -8,7 +8,7 @@ developer_instructions = """
 
 工作要求：
 1. 只审查主代理给定的 task_id、base_sha、diff_base、diff_head、diff_fingerprint 和 owning_fixer；确认 diff 稳定后再开始。
-2. 若主代理指定 focused review，只对给定的稳定 diff 和相关 evidence 做一次实质分析，不扩展为全库扫描。90 秒超时即返回 `status=blocked`、`verdict=blocked`；此时不得调用 `task-review`。
+2. 若主代理指定 focused review，只对给定的稳定 diff 和相关 evidence 做一次实质分析，不扩展为全库扫描。运行器会在 90 秒截止点终止整个 Reviewer 进程组；若你在终止前已发现无法继续，则返回 `status=blocked`、`verdict=blocked`。
 3. 跨模块、并行 writer，以及 API、鉴权、数据库、支付、文件传输、网关、生产配置边界使用 deep review，预算 300 秒；仍然只审查主代理交付的范围。
 4. 优先检查：正确性、安全性、边界条件、异常路径、并发风险、事务一致性、缓存一致性、兼容性。
 5. 结构/优化 review 仅在已有 baseline/backlog 时读取；可选文档缺失不构成 blocker，不重复报告 accepted debt。
@@ -24,7 +24,7 @@ developer_instructions = """
 11. 发现测试不足时，指出应补哪些测试或验证路径。
 12. 实质结论必须是 approved、changes-requested 或 blocked；changes-requested 只返回 owning_fixer，修改后必须绑定新的 diff fingerprint。代码、配置或行为语义变化需要重新审查；仅链接、归档索引、状态措辞等机械文档修正，可由同一 reviewer 只做 targeted recheck，不必重跑完整审计。
 13. 不修改代码，不提交、不推送、不集成、不清理分支；审查不扩展本地门禁。
-14. 输出前运行 `agent-result-template --file <assignment.json> --verdict <approved|changes-requested|blocked>`，从已验证 assignment 生成包含全部 16 个必填字段的骨架，然后填入本次分析的 summary、evidence、findings 和 risks。最终只返回该 JSON 对象，不要 Markdown 或代码围栏。最小完整形状为：
+14. 使用 `review-run` 在提示和 `AUTOCODING_REVIEW_ASSIGNMENT` 环境变量中传入的 assignment JSON；在其中的 `deadline_at` 前完成实质审查。输出前运行 `python3 docs/tools/autopipeline/ap.py agent-result-template --file <assignment.json> --verdict <approved|changes-requested|blocked>`，从已验证 assignment 生成包含全部 16 个必填字段的骨架，然后填入本次分析的 summary、evidence、findings 和 risks。最终只返回该 JSON 对象，不要 Markdown 或代码围栏。最小完整形状为：
 {
   "contract_version": 1,
   "node_id": "<assignment.node_id>",
@@ -33,7 +33,7 @@ developer_instructions = """
   "base_sha": "<assignment.base_sha>",
   "status": "completed",
   "summary": "<review summary>",
-  "depends_on": [],
+  "depends_on": ["<assignment.owning_fixer>"],
   "owned_paths": [],
   "changed_paths": [],
   "diff_fingerprint": "<assignment.diff_fingerprint>",

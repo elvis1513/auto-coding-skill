@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.1 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.2 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -82,8 +82,13 @@ failure may continue in the same conversation/task without a second lifecycle.
 - Keep `reviewer` at `xhigh`: focused is one 90-second analysis; deep gets 300
   seconds for parallel/cross-module or sensitive boundaries. Timeout is `blocked`
   and is not sent to `task-review`.
-- Generate all 16 fields with `agent-result-template`; contract checking aggregates
-  errors, and JSON shape repair reuses the same analysis.
+- Run `python3 docs/tools/autopipeline/ap.py review-run <TASK> --reviewer <ID> --json`.
+  It launches a separate read-only Codex process without the lifecycle-owner identity,
+  stops its process group at the fixed deadline, and records only the assigned HEAD,
+  scope, identity, and fingerprint. `review-assignment` alone requires a different
+  deadline-capable host and cannot stop an in-app subagent.
+- `agent-result-template` supplies all 16 fields; contract checking aggregates errors,
+  and `review-run` safely normalizes presentation fields from the same analysis.
 - Review blocks only defects introduced or worsened in the promised scope.
   Adjacent existing issues are non-blocking follow-ups.
 - Semantic changes invalidate approval. Mechanical documentation-only corrections

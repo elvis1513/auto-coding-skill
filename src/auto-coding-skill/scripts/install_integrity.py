@@ -225,6 +225,7 @@ def build_manifest(skill_root: Path, agents_root: Path, version: str) -> dict[st
             ".agents/archive/**",
             ".agents/agents/* (except paths listed in entries)",
             "docs/project/**",
+            "docs/architecture/structure-standard.md",
             "docs/architecture/adr/[0-9]*.md",
             "docs/design/*.md",
             "docs/interfaces/*.md",

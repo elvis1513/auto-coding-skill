@@ -157,7 +157,6 @@ Only executed checks may be marked PASS.
 
 
 MANAGED_FRAMEWORK_DOCS = frozenset({
-    "docs/architecture/structure-standard.md",
     "docs/architecture/adr/_TEMPLATE-ADR.md",
     "docs/deployment/deploy-records/_TEMPLATE-DEPLOY-RECORD.md",
     "docs/design/_TEMPLATE-DD.md",

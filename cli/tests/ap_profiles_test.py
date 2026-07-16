@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import io
 import json
@@ -9,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -695,6 +697,118 @@ class AutoCodingProfileTests(unittest.TestCase):
                 self.assertEqual(next_owner, result["next_owner"])
                 ap._validate_orchestration_contract("result", result)
 
+    def test_reviewer_runtime_normalizes_presentation_fields_but_binds_identity(self) -> None:
+        assignment = self.reviewer_assignment()
+        result = ap._normalize_reviewer_runtime_result(
+            assignment,
+            {
+                "verdict": "approved",
+                "summary": "focused review complete",
+                "evidence": ["diff inspected"],
+            },
+        )
+        self.assertEqual("reviewer-1", result["node_id"])
+        self.assertEqual("a" * 64, result["diff_fingerprint"])
+        self.assertEqual(["fixer-1"], result["depends_on"])
+        self.assertEqual("focused review complete", result["summary"])
+
+        with self.assertRaisesRegex(APError, "does not match its assignment"):
+            ap._normalize_reviewer_runtime_result(
+                assignment,
+                {
+                    "verdict": "approved",
+                    "diff_fingerprint": "b" * 64,
+                },
+            )
+
+    def test_codex_reviewer_command_is_ephemeral_read_only_and_uses_managed_instructions(self) -> None:
+        repo, _ = self.make_repo()
+        assignment_path = repo / "assignment.json"
+        result_path = repo / "result.json"
+        with mock.patch.object(ap.shutil, "which", return_value="/usr/local/bin/codex"):
+            command = ap._codex_reviewer_command(repo, assignment_path, result_path)
+
+        self.assertEqual("/usr/local/bin/codex", command[0])
+        self.assertIn("--ephemeral", command)
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("read-only", command)
+        self.assertIn('model_reasoning_effort="xhigh"', command)
+        developer_override = next(
+            item for item in command if item.startswith("developer_instructions=")
+        )
+        tomllib.loads(developer_override)
+        self.assertEqual(str(result_path), command[command.index("-o") + 1])
+
+    def test_reviewer_process_timeout_terminates_its_process_group(self) -> None:
+        repo, _ = self.make_repo()
+        process = mock.MagicMock()
+        process.pid = 4321
+        process.poll.return_value = None
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd=["fake-reviewer"], timeout=0.01),
+            ("partial", "stopped"),
+        ]
+        with (
+            mock.patch.object(ap.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(ap.os, "killpg") as killpg,
+        ):
+            with self.assertRaises(ap._ReviewerRuntimeTimeout):
+                ap._run_supervised_reviewer_process(
+                    ["fake-reviewer", "; touch must-not-run"],
+                    cwd=repo,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout_seconds=0.01,
+                )
+
+        self.assertEqual(["fake-reviewer", "; touch must-not-run"], popen.call_args.args[0])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(mock.call(4321, ap.signal.SIGTERM), killpg.call_args)
+
+    def test_reviewer_assignment_timing_contract_and_fixed_budgets(self) -> None:
+        issued_at = "2026-07-16T00:00:00+00:00"
+        assignment = self.reviewer_assignment(
+            review_depth="focused",
+            timeout_seconds=90,
+            issued_at=issued_at,
+            deadline_at="2026-07-16T00:01:30+00:00",
+            scope_revision=1,
+        )
+        self.assertEqual(
+            assignment,
+            ap._validate_orchestration_contract("assignment", assignment),
+        )
+        self.assertEqual(("focused", 90), ap._normalized_task_review_policy(True))
+        self.assertEqual(
+            ("deep", 300),
+            ap._normalized_task_review_policy(True, "focused", "deep"),
+        )
+        self.assertEqual(("none", 0), ap._normalized_task_review_policy(False, "deep"))
+
+        invalid_contracts = [
+            self.reviewer_assignment(
+                review_depth="focused",
+                timeout_seconds=0,
+                issued_at=issued_at,
+                deadline_at="2026-07-16T00:01:30+00:00",
+            ),
+            self.reviewer_assignment(
+                review_depth="focused",
+                timeout_seconds=90,
+                issued_at="2026-07-16T00:00:00",
+                deadline_at="2026-07-16T00:01:30",
+            ),
+            self.reviewer_assignment(
+                review_depth="focused",
+                timeout_seconds=90,
+                issued_at=issued_at,
+                deadline_at="2026-07-16T00:01:00+00:00",
+            ),
+        ]
+        for payload in invalid_contracts:
+            with self.subTest(payload=payload):
+                with self.assertRaises(APError):
+                    ap._validate_orchestration_contract("assignment", payload)
+
     def test_reviewer_result_template_rejects_wrong_role_self_review_and_empty_fingerprint(self) -> None:
         invalid_assignments = [
             self.reviewer_assignment(role="explorer"),
@@ -831,6 +945,32 @@ class AutoCodingProfileTests(unittest.TestCase):
         with self.assertRaises(APError) as context:
             ap._final_gate_budget(cfg)
         self.assertIn("cannot exceed validation.max_total_seconds", str(context.exception))
+
+    def test_final_changed_scope_gate_runs_blocking_structure_check(self) -> None:
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "blocking",
+            "max_file_lines_warn": 0,
+            "max_file_lines_block": 1,
+            "max_function_lines_warn": 0,
+            "layer_rules": {"enabled": False},
+        }
+        cfg["optimization"] = {"require_baseline_for_global_review": False}
+        repo, _ = self.make_repo("src/too-large.py", cfg)
+        (repo / "src" / "too-large.py").write_text("one\ntwo\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(APError, "structure-check failed"):
+            ap.cmd_light_gate(
+                argparse.Namespace(
+                    repo=str(repo),
+                    scope="changed",
+                    profile="",
+                    mode="dev",
+                    base="",
+                    explain=False,
+                )
+            )
 
     def test_route_timeout_uses_smallest_matching_budget(self) -> None:
         cfg = base_config()
@@ -1450,6 +1590,231 @@ class AutoCodingProfileTests(unittest.TestCase):
         api_doc.write_text("# Existing API\n", encoding="utf-8")
         ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         ap.cmd_verify_api_docs(argparse.Namespace(repo=str(repo)))
+
+    def test_root_and_nested_package_json_are_high_risk_and_require_review(self) -> None:
+        repo, cfg = self.make_repo()
+        for path in ["package.json", "frontend/admin/package.json"]:
+            with self.subTest(path=path):
+                plan = self.plan(
+                    repo,
+                    cfg,
+                    planned_paths=[path],
+                    requested_task_kind="change",
+                )
+                self.assertEqual("high-risk", plan["profile"])
+                self.assertTrue(plan["review_required"])
+                self.assertIn("release_or_tooling", plan["categories"])
+
+    def test_explicit_full_structure_scope_inspects_clean_tracked_files(self) -> None:
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "advisory",
+            "max_file_lines_warn": 0,
+            "max_file_lines_block": 0,
+            "max_function_lines_warn": 0,
+            "layer_rules": {"enabled": False},
+        }
+        cfg["optimization"] = {"require_baseline_for_global_review": False}
+        repo, _ = self.make_repo("src/app.py", cfg)
+        run(repo, "git", "add", "-A")
+        run(repo, "git", "commit", "-qm", "add tracked structure fixture")
+
+        output = io.StringIO()
+        with mock.patch.object(ap, "_record_evidence"), contextlib.redirect_stdout(output):
+            ap.cmd_structure_check(
+                argparse.Namespace(repo=str(repo), scope="full", base="", json=True)
+            )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual("full", result["scope"])
+        self.assertGreaterEqual(result["inspected_files"], 1)
+
+    def test_verify_jenkins_accepts_access_schema_and_uses_selected_identity(self) -> None:
+        repo, cfg = self.make_repo()
+        (repo / "Jenkinsfile").write_text("pipeline {}\n", encoding="utf-8")
+
+        with mock.patch.object(ap, "_record_evidence"):
+            ap.cmd_verify_jenkins(argparse.Namespace(repo=str(repo), component="all"))
+
+        header = ap._jenkins_basic_auth_headers(cfg, component="backend")["Authorization"]
+        decoded = base64.b64decode(header.removeprefix("Basic ")).decode("utf-8")
+        self.assertEqual("back:back-pass", decoded)
+
+    def test_jenkins_component_is_ambiguous_with_two_access_endpoints(self) -> None:
+        cfg = base_config()
+        with self.assertRaisesRegex(APError, "Multiple access.jenkins endpoints"):
+            ap._resolve_jenkins_component(cfg)
+
+        cfg["access"]["jenkins"]["backend"] = dict(cfg["access"]["jenkins"]["frontend"])
+        self.assertEqual("frontend", ap._resolve_jenkins_component(cfg))
+
+    def test_verify_jenkins_build_uses_one_selected_access_component(self) -> None:
+        repo, _ = self.make_repo()
+        args = argparse.Namespace(
+            repo=str(repo),
+            component="backend",
+            git_ref="HEAD",
+            job_name=None,
+            job_url=None,
+            multibranch_root_job=None,
+            branch_name=None,
+            build_number=7,
+            max_builds=20,
+            timeout_sec=1,
+            poll_sec=1,
+            allow_no_deploy=True,
+        )
+        payload = {
+            "number": 7,
+            "result": "SUCCESS",
+            "building": False,
+            "description": "deployed",
+            "url": "https://jenkins-back.test/7/",
+        }
+        with (
+            mock.patch.object(ap, "_jenkins_api_get_json", return_value=payload) as api_get,
+            mock.patch.object(ap, "_record_evidence"),
+        ):
+            ap.cmd_verify_jenkins_build(args)
+
+        self.assertEqual("backend", api_get.call_args.kwargs["component"])
+        self.assertIn("https://jenkins-back.test/7/api/json", api_get.call_args.args[0])
+
+    def test_verify_jenkins_preserves_legacy_configuration(self) -> None:
+        cfg = base_config()
+        cfg["access"]["jenkins"] = {}
+        cfg["jenkins"] = {
+            "base_url": "https://legacy-jenkins.test",
+            "job_url": "https://legacy-jenkins.test/job/backend",
+            "trigger_branch": "dev",
+            "image_repository": "registry.test/project/backend",
+            "image_tag_strategy": "commit",
+            "deploy_env": "production",
+            "api_user": "legacy-user",
+            "api_password": "legacy-pass",
+        }
+        cfg["target_env"] = {
+            "health_base_url": "https://legacy-target.test",
+            "health_path": "/healthz",
+        }
+        repo, _ = self.make_repo(config=cfg)
+        (repo / "Jenkinsfile").write_text("pipeline {}\n", encoding="utf-8")
+
+        with mock.patch.object(ap, "_record_evidence"):
+            ap.cmd_verify_jenkins(argparse.Namespace(repo=str(repo), component="all"))
+
+        self.assertEqual("", ap._resolve_jenkins_component(cfg))
+        header = ap._jenkins_basic_auth_headers(cfg)["Authorization"]
+        decoded = base64.b64decode(header.removeprefix("Basic ")).decode("utf-8")
+        self.assertEqual("legacy-user:legacy-pass", decoded)
+
+    def test_jenkins_crumb_cache_is_scoped_by_identity(self) -> None:
+        cfg = base_config()
+        cfg["access"]["jenkins"]["frontend"].update(
+            {"url": "https://jenkins.test/job/frontend", "username": "front-user"}
+        )
+        cfg["access"]["jenkins"]["backend"].update(
+            {"url": "https://jenkins.test/job/backend", "username": "back-user"}
+        )
+
+        def response(crumb: str) -> mock.MagicMock:
+            value = mock.MagicMock()
+            value.__enter__.return_value.read.return_value = json.dumps(
+                {"crumbRequestField": "Jenkins-Crumb", "crumb": crumb}
+            ).encode("utf-8")
+            return value
+
+        ap._JENKINS_CRUMB_CACHE.clear()
+        self.addCleanup(ap._JENKINS_CRUMB_CACHE.clear)
+        with mock.patch.object(
+            ap.urllib.request,
+            "urlopen",
+            side_effect=[response("crumb-front"), response("crumb-back")],
+        ) as urlopen:
+            frontend = ap._jenkins_crumb_headers(cfg, component="frontend")
+            backend = ap._jenkins_crumb_headers(cfg, component="backend")
+
+        self.assertEqual({"Jenkins-Crumb": "crumb-front"}, frontend)
+        self.assertEqual({"Jenkins-Crumb": "crumb-back"}, backend)
+        self.assertEqual(2, urlopen.call_count)
+        self.assertEqual(2, len(ap._JENKINS_CRUMB_CACHE))
+
+    def test_verify_target_uses_access_project_urls_without_legacy_wait(self) -> None:
+        repo, _ = self.make_repo()
+        args = argparse.Namespace(
+            repo=str(repo),
+            backend_path=["/healthz"],
+            frontend_path=["/"],
+            backend_basic_auth=False,
+            frontend_basic_auth=False,
+        )
+        with (
+            mock.patch.object(ap, "_http_get", return_value=(200, "ok")) as http_get,
+            mock.patch.object(ap, "_wait_for_health_url") as wait_health,
+            mock.patch.object(ap, "_record_evidence"),
+        ):
+            ap.cmd_verify_target(args)
+
+        self.assertEqual(
+            ["https://project-back.test/healthz", "https://project-front.test/"],
+            [call.args[0] for call in http_get.call_args_list],
+        )
+        wait_health.assert_not_called()
+
+    def test_verify_target_missing_access_url_fails_before_network(self) -> None:
+        cfg = base_config()
+        cfg["access"]["project"]["backend"]["url"] = ""
+        repo, _ = self.make_repo(config=cfg)
+        args = argparse.Namespace(
+            repo=str(repo),
+            backend_path=["/healthz"],
+            frontend_path=None,
+            backend_basic_auth=False,
+            frontend_basic_auth=False,
+        )
+        with (
+            mock.patch.object(ap, "_http_get") as http_get,
+            mock.patch.object(ap, "http_get_status") as get_status,
+            mock.patch.object(ap.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(APError, "access.project.backend.url"):
+                ap.cmd_verify_target(args)
+
+        http_get.assert_not_called()
+        get_status.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_verify_target_preserves_legacy_endpoint_and_health_preflight(self) -> None:
+        cfg = base_config()
+        cfg["access"]["project"] = {}
+        cfg["jenkins"] = {"deploy_timeout_sec": 7}
+        cfg["target_env"] = {
+            "backend_base_url": "https://legacy-target.test/api",
+            "backend_username": "legacy-user",
+            "backend_password": "legacy-pass",
+            "health_base_url": "https://legacy-target.test",
+            "health_path": "/healthz",
+        }
+        repo, _ = self.make_repo(config=cfg)
+        args = argparse.Namespace(
+            repo=str(repo),
+            backend_path=["/ready"],
+            frontend_path=None,
+            backend_basic_auth=False,
+            frontend_basic_auth=False,
+        )
+        with (
+            mock.patch.object(ap, "_wait_for_health_url") as wait_health,
+            mock.patch.object(ap, "_http_get", return_value=(200, "ok")) as http_get,
+            mock.patch.object(ap, "_record_evidence"),
+        ):
+            ap.cmd_verify_target(args)
+
+        wait_health.assert_called_once_with(
+            "target", "https://legacy-target.test/healthz", 7
+        )
+        self.assertEqual("https://legacy-target.test/api/ready", http_get.call_args.args[0])
 
     def test_dev_closure_rejects_owner_acceptance_pass(self) -> None:
         with self.assertRaises(APError):

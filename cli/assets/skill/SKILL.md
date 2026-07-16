@@ -33,18 +33,15 @@ value exceeds coordination cost, and keep `forbidden` off absent user override.
 `dirty_paths`, and `active_writer`, and reclassify if state changes before writing.
 Same-owner claims conflict unless continuing the exact ID; `change_nature` never bypasses a rule or review.
 
-Use the registered lifecycle only when classification requires isolation or
-fingerprinted review, or when the user explicitly requests it:
+Use the registered lifecycle only when classification requires isolation/fingerprinted review or the user explicitly requests it:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
   --owned-path src [--isolated] [--review-required] [--continue-direct --direct-claim <ID>]
 # Before the first commit, expand an active task instead of restarting it:
 python3 docs/tools/autopipeline/ap.py task-scope-add T0001 --owned-path config/new-scope
-# For review-required work, obtain the current fingerprint and approve it:
-python3 docs/tools/autopipeline/ap.py task-status T0001 --json
-python3 docs/tools/autopipeline/ap.py task-review T0001 \
-  --verdict approved --diff-fingerprint <CURRENT_DIFF_FINGERPRINT> --reviewer <REVIEWER_ID>
+# Run a read-only Reviewer under its fixed deadline and record the bound result:
+python3 docs/tools/autopipeline/ap.py review-run T0001 --reviewer <REVIEWER_ID> --json
 python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
 # Isolated tasks only:
 python3 docs/tools/autopipeline/ap.py task-integrate T0001
@@ -55,11 +52,13 @@ Each parallel writer uses a task ID, worktree, lease, dependency SHAs, and disti
 with `agent-contract-check`; parallel fixers require reclassification with
 `--writers >1`.
 
-Use the existing `reviewer` Agent at `xhigh` and follow the plan: focused means one
-90-second analysis; deep gets 300 seconds for parallel/cross-module or sensitive
-boundaries. Timeout is `blocked` and is not sent to `task-review`. Generate all 16
-fields with `agent-result-template`; contract checking aggregates errors, and shape
-repair must reuse the same analysis.
+Use `reviewer` at `xhigh`: focused gets 90 seconds; parallel/cross-module or sensitive
+boundaries get 300. `review-run` creates the assignment, launches a separate read-only
+Codex process without the lifecycle-owner identity, terminates its process group at the
+deadline, and records only an exact HEAD/scope/fingerprint match. Timeout is `blocked`.
+`review-assignment` alone requires another deadline-capable host and cannot stop an
+in-app subagent. `agent-result-template` supplies all 16 fields; `review-run` safely
+normalizes presentation fields from the same analysis.
 
 ## Close with the bounded routed gate
 

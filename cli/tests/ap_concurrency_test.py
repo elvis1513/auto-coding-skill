@@ -6,7 +6,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -177,8 +179,17 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
 
     def approve_task(self, repo: Path, task_id: str) -> str:
-        status = self.ap(repo, "task-status", task_id, "--json")
-        fingerprint = json.loads(status.stdout)["tasks"][0]["current_diff_fingerprint"]
+        issued = json.loads(
+            self.ap(
+                repo,
+                "review-assignment",
+                task_id,
+                "--reviewer",
+                "test-reviewer",
+                "--json",
+            ).stdout
+        )
+        fingerprint = issued["assignment"]["diff_fingerprint"]
         self.ap(
             repo,
             "task-review",
@@ -386,6 +397,11 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("START-1", rendered_status)
         self.assertIn("codex/START-1", rendered_status)
         self.assertIn(str(worktree), rendered_status)
+        status_payload = json.loads(
+            self.ap(repo, "task-status", "START-1", "--json").stdout
+        )["tasks"][0]
+        self.assertFalse(status_payload["has_task_commits"])
+        self.assertFalse(status_payload["merged_into_target"])
 
         serialized_payloads = [json.dumps(item, sort_keys=True) for item in self.manifest_payloads(repo)]
         self.assertTrue(
@@ -433,6 +449,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assert_local_branch(repo, "codex/DIRECT-1", False)
         status = json.loads(self.ap(repo, "task-status", "DIRECT-1", "--json").stdout)["tasks"][0]
         self.assertEqual("direct", status["execution_mode"])
+        self.assertFalse(status["has_task_commits"])
+        self.assertFalse(status["merged_into_target"])
         self.assertFalse((repo / "docs" / "tasks" / "active" / "DIRECT-1.md").exists())
 
         (repo / "shared.txt").write_text("direct\n", encoding="utf-8")
@@ -851,6 +869,326 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn("writer lease holder", rejected.stdout + rejected.stderr)
+
+    def test_review_assignment_is_deadline_bound_and_idempotent(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-DEADLINE", "shared.txt")
+        (worktree / "shared.txt").write_text("review me\n", encoding="utf-8")
+
+        first = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-DEADLINE",
+                "--reviewer",
+                "reviewer-1",
+                "--json",
+            ).stdout
+        )
+        second = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-DEADLINE",
+                "--reviewer",
+                "reviewer-1",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(first, second)
+        assignment = first["assignment"]
+        self.assertEqual("focused", assignment["review_depth"])
+        self.assertEqual(90, assignment["timeout_seconds"])
+        self.assertEqual(1, assignment["scope_revision"])
+        self.assertTrue(Path(first["assignment_path"]).is_file())
+        issued = datetime.fromisoformat(assignment["issued_at"])
+        deadline = datetime.fromisoformat(assignment["deadline_at"])
+        self.assertEqual(90, int((deadline - issued).total_seconds()))
+
+    def test_review_run_supervises_separate_process_and_records_result_once(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-RUN", "shared.txt")
+        (worktree / "shared.txt").write_text("review me\n", encoding="utf-8")
+        fake_reviewer = root / "fake-reviewer.py"
+        fake_reviewer.write_text(
+            "import json, os, pathlib, sys\n"
+            "if os.environ.get('CODEX_THREAD_ID'):\n"
+            "    raise SystemExit(9)\n"
+            "assignment_path = pathlib.Path(os.environ['AUTOCODING_REVIEW_ASSIGNMENT'])\n"
+            "assignment = json.loads(assignment_path.read_text(encoding='utf-8'))\n"
+            "if int(os.environ['AUTOCODING_REVIEW_TIMEOUT_SECONDS']) not in (90, 300):\n"
+            "    raise SystemExit(10)\n"
+            "print(json.dumps({'verdict': 'approved', 'summary': 'runtime reviewed', "
+            "'evidence': ['assignment=' + assignment['task_id']]}))\n",
+            encoding="utf-8",
+        )
+        runner = json.dumps([sys.executable, str(fake_reviewer)])
+        completed = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-RUN",
+            "--reviewer",
+            "reviewer-runtime",
+            "--runner-command-json",
+            runner,
+            "--json",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual("approved", result["verdict"])
+        self.assertEqual("runtime reviewed", result["summary"])
+
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-RUN", "--json").stdout
+        )["tasks"][0]
+        review = status["review"]
+        self.assertEqual("approved", review["verdict"])
+        self.assertEqual("completed", review["runtime_state"])
+        self.assertEqual("reviewer-runtime", review["reviewer"])
+        self.assertEqual(0, review["runtime_exit_code"])
+        result_path = Path(review["runtime_result_path"])
+        receipt_path = Path(review["runtime_receipt_path"])
+        self.assertEqual(0o600, result_path.stat().st_mode & 0o777)
+        self.assertEqual(0o600, receipt_path.stat().st_mode & 0o777)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual("completed", receipt["status"])
+        self.assertRegex(receipt["result_sha256"], r"^[0-9a-f]{64}$")
+
+        repeated = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-RUN",
+            "--reviewer",
+            "reviewer-runtime",
+            "--runner-command-json",
+            runner,
+            check=False,
+        )
+        self.assertNotEqual(0, repeated.returncode)
+        self.assertIn("already complete", repeated.stdout + repeated.stderr)
+
+        tampered_payload = json.loads(result_path.read_text())
+        tampered_payload["summary"] = "tampered after review"
+        result_path.write_text(json.dumps(tampered_payload) + "\n", encoding="utf-8")
+        tampered = self.ap(
+            worktree,
+            "task-review",
+            "REVIEW-RUN",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--reviewer",
+            "reviewer-runtime",
+            check=False,
+        )
+        self.assertNotEqual(0, tampered.returncode)
+        self.assertIn("receipt does not bind", tampered.stdout + tampered.stderr)
+
+    def test_blocked_runtime_cannot_be_reassigned_or_overwritten_as_approved(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-BLOCKED", "shared.txt")
+        (worktree / "shared.txt").write_text("review is blocked\n", encoding="utf-8")
+        blocked_reviewer = root / "blocked-reviewer.py"
+        blocked_reviewer.write_text(
+            "import json\n"
+            "print(json.dumps({'verdict': 'blocked', 'summary': 'missing evidence'}))\n",
+            encoding="utf-8",
+        )
+        runner = json.dumps([sys.executable, str(blocked_reviewer)])
+        blocked = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-BLOCKED",
+            "--reviewer",
+            "reviewer-blocked",
+            "--runner-command-json",
+            runner,
+            check=False,
+        )
+        self.assertNotEqual(0, blocked.returncode)
+        self.assertIn("Reviewer returned blocked", blocked.stdout + blocked.stderr)
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-BLOCKED", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("blocked", status["review"]["verdict"])
+        self.assertEqual("blocked", status["review"]["runtime_state"])
+
+        reassigned = self.ap(
+            worktree,
+            "review-assignment",
+            "REVIEW-BLOCKED",
+            "--reviewer",
+            "reviewer-blocked",
+            check=False,
+        )
+        self.assertNotEqual(0, reassigned.returncode)
+        self.assertIn("already complete or consumed", reassigned.stdout + reassigned.stderr)
+        overwritten = self.ap(
+            worktree,
+            "task-review",
+            "REVIEW-BLOCKED",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--reviewer",
+            "reviewer-blocked",
+            check=False,
+        )
+        self.assertNotEqual(0, overwritten.returncode)
+        self.assertIn("runtime state=blocked", overwritten.stdout + overwritten.stderr)
+
+    def test_review_run_terminates_real_process_at_original_deadline(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-TIMEOUT", "shared.txt")
+        (worktree / "shared.txt").write_text("review me slowly\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-TIMEOUT",
+                "--reviewer",
+                "reviewer-timeout",
+                "--json",
+            ).stdout
+        )
+        deadline = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=2)
+        assignment = issued["assignment"]
+        assignment["deadline_at"] = deadline.isoformat()
+        assignment["issued_at"] = (deadline - timedelta(seconds=90)).isoformat()
+        assignment_path = Path(issued["assignment_path"])
+        assignment_path.write_text(json.dumps(assignment, indent=2) + "\n", encoding="utf-8")
+        manifest_path = self.registry_manifest_path(repo, "REVIEW-TIMEOUT")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["review"]["issued_at"] = assignment["issued_at"]
+        manifest["review"]["deadline_at"] = assignment["deadline_at"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        slow_reviewer = root / "slow-reviewer.py"
+        slow_reviewer.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        started = time.monotonic()
+        timed_out = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-TIMEOUT",
+            "--reviewer",
+            "reviewer-timeout",
+            "--runner-command-json",
+            json.dumps([sys.executable, str(slow_reviewer)]),
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(0, timed_out.returncode)
+        self.assertLess(elapsed, 6.0)
+        self.assertIn("timed out and was terminated", timed_out.stdout + timed_out.stderr)
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-TIMEOUT", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("blocked", status["review"]["verdict"])
+        self.assertEqual("timed-out", status["review"]["runtime_state"])
+        receipt = json.loads(Path(status["review"]["runtime_receipt_path"]).read_text())
+        self.assertEqual("timed-out", receipt["status"])
+
+    def test_task_review_requires_assignment_and_exact_head(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-HEAD", "shared.txt")
+        (worktree / "shared.txt").write_text("review me\n", encoding="utf-8")
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-HEAD", "--json").stdout
+        )["tasks"][0]
+        missing = self.ap(
+            worktree,
+            "task-review",
+            "REVIEW-HEAD",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--reviewer",
+            "reviewer-1",
+            check=False,
+        )
+        self.assertNotEqual(0, missing.returncode)
+        self.assertIn("must use review-assignment", missing.stdout + missing.stderr)
+
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-HEAD",
+                "--reviewer",
+                "reviewer-1",
+                "--json",
+            ).stdout
+        )["assignment"]
+        git(worktree, "add", "shared.txt")
+        git(worktree, "commit", "-qm", "manual task commit")
+        stale = self.ap(
+            worktree,
+            "task-review",
+            "REVIEW-HEAD",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            issued["diff_fingerprint"],
+            "--reviewer",
+            "reviewer-1",
+            check=False,
+        )
+        self.assertNotEqual(0, stale.returncode)
+        self.assertIn("HEAD is stale", stale.stdout + stale.stderr)
+
+    def test_expired_review_assignment_cannot_be_renewed_or_approved(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-EXPIRED", "shared.txt")
+        (worktree / "shared.txt").write_text("review me\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-EXPIRED",
+                "--reviewer",
+                "reviewer-1",
+                "--json",
+            ).stdout
+        )
+        assignment_path = Path(issued["assignment_path"])
+        assignment = issued["assignment"]
+        past_deadline = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=1)
+        assignment["deadline_at"] = past_deadline.isoformat()
+        assignment["issued_at"] = (past_deadline - timedelta(seconds=90)).isoformat()
+        assignment_path.write_text(json.dumps(assignment, indent=2) + "\n", encoding="utf-8")
+
+        manifest_path = self.registry_manifest_path(repo, "REVIEW-EXPIRED")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["review"]["issued_at"] = assignment["issued_at"]
+        manifest["review"]["deadline_at"] = assignment["deadline_at"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        renewed = self.ap(
+            worktree,
+            "review-assignment",
+            "REVIEW-EXPIRED",
+            "--reviewer",
+            "reviewer-1",
+            check=False,
+        )
+        self.assertNotEqual(0, renewed.returncode)
+        self.assertIn("timed out", renewed.stdout + renewed.stderr)
+        approved = self.ap(
+            worktree,
+            "task-review",
+            "REVIEW-EXPIRED",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            assignment["diff_fingerprint"],
+            "--reviewer",
+            "reviewer-1",
+            check=False,
+        )
+        self.assertNotEqual(0, approved.returncode)
+        self.assertIn("deadline expired", approved.stdout + approved.stderr)
 
     def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
         _, repo, _ = self.make_repo()

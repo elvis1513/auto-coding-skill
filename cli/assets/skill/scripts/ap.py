@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Iterator, Optional, List
 
 from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status, require_yaml
-from scaffold_templates import scaffold_groups, templates_for
+from install_integrity import verify_managed_install
+from scaffold_templates import MANAGED_FRAMEWORK_DOCS, scaffold_groups, templates_for
 
 
 _JENKINS_CRUMB_CACHE: dict[str, dict[str, str]] = {}
@@ -46,7 +47,7 @@ _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.8", "engineering": "4.1.8"},
+    "managed_versions": {"agents": "4.1.9", "engineering": "4.1.9"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -823,14 +824,6 @@ def _converged_engineering_document(repo: Path, template_path: Path) -> str:
     return f"---\n{dumped}\n---\n{template_body.lstrip()}"
 
 
-_MANAGED_FRAMEWORK_DOCS = {
-    "docs/architecture/structure-standard.md",
-    "docs/architecture/adr/_TEMPLATE-ADR.md",
-    "docs/deployment/deploy-records/_TEMPLATE-DEPLOY-RECORD.md",
-    "docs/design/_TEMPLATE-DD.md",
-    "docs/reviews/_TEMPLATE-REVIEW.md",
-}
-
 _PROJECT_ARTIFACT_PATTERNS = (
     "docs/architecture/*.md",
     "docs/architecture/adr/*.md",
@@ -906,7 +899,7 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
     for rel, canonical in sorted(templates_for("all").items()):
         target = repo / rel
         existing = target.read_text(encoding="utf-8") if target.exists() else ""
-        managed = rel in _MANAGED_FRAMEWORK_DOCS
+        managed = rel in MANAGED_FRAMEWORK_DOCS
         if existing and (not managed or existing == canonical):
             continue
         if existing:
@@ -967,8 +960,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.8":
-        workflow_cfg["skill_version"] = "4.1.8"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.9":
+        workflow_cfg["skill_version"] = "4.1.9"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1281,16 +1274,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.8\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.9\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.8.md"
+            archive = archive_dir / "AGENTS.pre-4.1.9.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.8-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.9-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -6316,6 +6309,22 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     runtime_enabled = any(str(runtime_cfg.get(key) or "").strip() for key in ["docker_compose_file", "docker_service", "health_base_url", "health_path"])
     if runtime_enabled and not str(runtime_cfg.get("docker_compose_file") or "").strip():
         validation_errors.append("runtime config is partially enabled but runtime.docker_compose_file is missing")
+
+    version_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", skill_version)
+    integrity_required = bool(
+        version_match
+        and tuple(int(part) for part in version_match.groups()) >= (4, 1, 9)
+    )
+    manifest_exists = (repo / ".agents" / "managed-install.json").is_file()
+    if integrity_required or manifest_exists:
+        integrity = verify_managed_install(
+            repo,
+            mode="project",
+            expected_version=skill_version or None,
+        )
+        validation_errors.extend(
+            f"install integrity: {issue}" for issue in integrity["errors"]
+        )
 
     missing.extend(validation_errors)
 

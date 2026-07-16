@@ -9,7 +9,7 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.8 makes `autocoding init` the idempotent install-and-upgrade entry:
+Version 4.1.9 makes `autocoding init` verify the bounded managed installation after every install or upgrade:
 it replaces every managed constraint, migrates only schema-approved project
 configuration, and converges `docs/` to one canonical directory framework. Version 4.1.7 made
 the Python runtime check, release verification, and tag publication environment
@@ -213,6 +213,15 @@ Init replaces the managed Skill, root `AGENTS.md`, managed agents, ENGINEERING
 schema/body, runtime launcher, and documentation framework. It preserves explicit
 model overrides and current values at supported project/access/concurrency/route
 fields. Removed content is archived outside active docs.
+
+## What changed in 4.1.9
+
+- Added a packaged managed-install manifest with path, version, content hash, and
+  executable-bit expectations for release-owned files.
+- Made `autocoding init` verify the written Skill, managed agents, root protocol,
+  launcher, managed ENGINEERING region, and canonical templates before success.
+- Made `doctor` recheck the local manifest and `status` compare it with the current
+  release while excluding project facts, durable records, custom agents, and archives.
 
 ## What changed in 4.1.8
 

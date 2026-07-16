@@ -144,6 +144,72 @@ function runtimePython(){
   return String(process.env.AUTOCODING_PYTHON || fallback).trim() || fallback;
 }
 
+function readInstallManifest(file){
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    die(`invalid managed install manifest ${file}: ${error.message}`);
+  }
+  if (manifest?.schema_version !== 1 || !/^\d+\.\d+\.\d+$/.test(String(manifest?.skill_version || ""))) {
+    die(`invalid managed install manifest schema/version: ${file}`);
+  }
+  if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.managed_namespaces)) {
+    die(`invalid managed install manifest entries/namespaces: ${file}`);
+  }
+  return manifest;
+}
+
+function installManifestTarget(root){
+  return path.join(root, ".agents", "managed-install.json");
+}
+
+function copyInstallManifest(assetManifest, root){
+  const target = installManifestTarget(root);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(assetManifest, target);
+  return target;
+}
+
+function applyManifestExecutableBits(root, manifest, mode){
+  if (process.platform === "win32") return;
+  const scopes = new Set(mode === "project" ? ["shared", "project"] : ["shared"]);
+  for (const entry of manifest.entries) {
+    if (!scopes.has(entry.scope) || typeof entry.path !== "string" || typeof entry.executable !== "boolean") continue;
+    const target = path.join(root, ...entry.path.split("/"));
+    if (!exists(target) || fs.lstatSync(target).isSymbolicLink()) continue;
+    const current = fs.statSync(target).mode & 0o777;
+    const desired = entry.executable ? (current | 0o111) : (current & ~0o111);
+    if (desired !== current) fs.chmodSync(target, desired);
+  }
+}
+
+function installIntegrityStatus(root, mode, expectedVersion){
+  const script = path.join(root, ".agents", "skills", "auto-coding-skill", "scripts", "install_integrity.py");
+  if (!exists(script)) {
+    return { ok: false, version: "", checked: 0, errors: ["managed integrity verifier is missing"] };
+  }
+  const result = spawnSync(
+    runtimePython(),
+    [script, "verify", "--repo", root, "--mode", mode, "--expected-version", expectedVersion, "--json"],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  try {
+    const parsed = JSON.parse(result.stdout || "{}");
+    if (typeof parsed.ok === "boolean" && Array.isArray(parsed.errors)) return parsed;
+  } catch {
+    // Fall through to a deterministic diagnostic below.
+  }
+  const detail = String(result.stderr || result.stdout || result.error?.message || "integrity verifier failed").trim();
+  return { ok: false, version: "", checked: 0, errors: [detail || "integrity verifier returned invalid output"] };
+}
+
+function requireInstallIntegrity(root, mode, expectedVersion){
+  const result = installIntegrityStatus(root, mode, expectedVersion);
+  if (!result.ok) die(`managed install integrity verification failed:\n- ${result.errors.join("\n- ")}`);
+  return result;
+}
+
 function runEngineeringConvergence(project, skillRoot, write){
   const script = path.join(skillRoot, "scripts", "ap.py");
   const command = [script, "--repo", project, "project-converge", "--json"];
@@ -160,7 +226,7 @@ function runEngineeringConvergence(project, skillRoot, write){
   }
 }
 function shouldSkip(name){
-  return name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
+  return name === "__pycache__" || name === ".DS_Store" || /\.py[cod]$/i.test(name);
 }
 
 function copyDir(src, dst){
@@ -1104,7 +1170,7 @@ function frontmatterScalarValue(raw){
   return value;
 }
 
-function projectStatus(project, assetSkill, assetAgents){
+function projectStatus(project, assetSkill, assetAgents, assetManifest, releaseManifest){
   const root = path.resolve(project);
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
   const agentsDir = path.join(root, ".agents", "agents");
@@ -1230,11 +1296,27 @@ function projectStatus(project, assetSkill, assetAgents){
     ? compareManagedAgents(assetAgents, agentsDir)
     : { diffs: [{ path: ".agents/agents", status: "missing" }], bindings: [] };
   const agentDiffs = agentStatus.diffs;
-  const ok = skillDiffs.length === 0 && agentDiffs.length === 0 && scriptDiffs.length === 0 && missingDocs.length === 0 && docsDiffs.length === 0 && missingConfigTokens.length === 0 && managedWorkflow.state === "current" && managedAgentsDocument.state === "current";
+  const installedManifest = installManifestTarget(root);
+  const installManifestDiffs = [];
+  if (!exists(installedManifest)) installManifestDiffs.push({ path: ".agents/managed-install.json", status: "missing" });
+  else if (!fs.readFileSync(assetManifest).equals(fs.readFileSync(installedManifest))) {
+    installManifestDiffs.push({ path: ".agents/managed-install.json", status: "stale" });
+  }
+  const installIntegrity = installIntegrityStatus(root, "project", releaseManifest.skill_version);
+  const ok = skillDiffs.length === 0
+    && agentDiffs.length === 0
+    && scriptDiffs.length === 0
+    && installManifestDiffs.length === 0
+    && installIntegrity.ok
+    && missingDocs.length === 0
+    && docsDiffs.length === 0
+    && missingConfigTokens.length === 0
+    && managedWorkflow.state === "current"
+    && managedAgentsDocument.state === "current";
   let next = "";
   if (!exists(skillDir) || !exists(agentsDir)) {
     next = "run autocoding init";
-  } else if (skillDiffs.length || agentDiffs.length) {
+  } else if (skillDiffs.length || agentDiffs.length || installManifestDiffs.length || !installIntegrity.ok) {
     next = "run autocoding init";
   } else if (engineeringMissing || managedWorkflow.state !== "current" || managedAgentsDocument.state !== "current" || scriptDiffs.length || missingDocs.length || docsDiffs.length) {
     next = "run autocoding init";
@@ -1252,6 +1334,8 @@ function projectStatus(project, assetSkill, assetAgents){
     agentDiffs,
     agentBindings: agentStatus.bindings,
     scriptDiffs,
+    installManifestDiffs,
+    installIntegrity,
     docsDiffs,
     missingDocs,
     missingConfigTokens,
@@ -1272,6 +1356,12 @@ function printProjectStatus(result){
       const detail = item.detail ? ` - ${item.detail}` : "";
       console.log(`[autocoding] ${label} ${item.status}: ${item.path}${detail}`);
     }
+  }
+  for (const item of result.installManifestDiffs || []) {
+    console.log(`[autocoding] manifest ${item.status}: ${item.path}`);
+  }
+  for (const issue of result.installIntegrity?.errors || []) {
+    console.log(`[autocoding] install integrity: ${issue}`);
   }
   for (const item of result.missingDocs) console.log(`[autocoding] doc missing: ${item}`);
   for (const item of result.docsDiffs || []) {
@@ -1297,15 +1387,17 @@ function engineeringPlanDetail(plan){
   return `managed workflow ${plan.state} -> ${plan.version}`;
 }
 
-function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels = false, components = "all", controlledPlans = null){
+function syncProject(project, assetSkill, assetAgents, assetManifest, releaseManifest, dryRun, resetAgentModels = false, components = "all", controlledPlans = null){
   const root = path.resolve(project);
   const actions = [];
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
   const skillOnly = components === "skill";
   actions.push({ action: dryRun ? "would-sync" : "sync", path: path.relative(root, skillDir) });
+  actions.push({ action: dryRun ? "would-sync" : "sync", path: ".agents/managed-install.json" });
   if (!dryRun) {
     rmrf(skillDir);
     copyDir(assetSkill, skillDir);
+    copyInstallManifest(assetManifest, root);
   }
   if (skillOnly) return { project: root, dryRun, components, actions };
 
@@ -1356,6 +1448,9 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
         detail: `managed agents ${agentsDocumentPlan.state} -> ${agentsDocumentPlan.version}`,
       });
     }
+    applyManifestExecutableBits(root, releaseManifest, "project");
+    const integrity = requireInstallIntegrity(root, "project", releaseManifest.skill_version);
+    actions.push({ action: "verify", path: ".agents/managed-install.json", detail: `${integrity.checked} managed files` });
   } else {
     for (const rel of CORE_DOCS) {
       if (!exists(path.join(root, "docs", rel))) actions.push({ action: "would-create", path: path.join("docs", rel) });
@@ -1399,7 +1494,7 @@ function syncProject(project, assetSkill, assetAgents, dryRun, resetAgentModels 
   };
 }
 
-function convergeProjectInstall(project, assetSkill, assetAgents, resetAgentModels){
+function convergeProjectInstall(project, assetSkill, assetAgents, assetManifest, releaseManifest, resetAgentModels){
   const root = path.resolve(project);
   const skillDir = path.join(root, ".agents", "skills", "auto-coding-skill");
   const agentsDir = path.join(root, ".agents", "agents");
@@ -1413,7 +1508,10 @@ function convergeProjectInstall(project, assetSkill, assetAgents, resetAgentMode
   copyDir(assetSkill, skillDir);
   actions.push({ action: "replace", path: path.relative(root, skillDir) });
 
-  syncManagedAgents(assetAgents, agentsDir, { resetModel: resetAgentModels, removeExtra: true });
+  copyInstallManifest(assetManifest, root);
+  actions.push({ action: "replace", path: ".agents/managed-install.json" });
+
+  syncManagedAgents(assetAgents, agentsDir, { resetModel: resetAgentModels });
   actions.push({ action: "sync", path: path.relative(root, agentsDir) });
 
   fs.mkdirSync(toolDir, { recursive: true });
@@ -1461,6 +1559,9 @@ function convergeProjectInstall(project, assetSkill, assetAgents, resetAgentMode
 
   const engineering = runEngineeringConvergence(root, skillDir, true);
   actions.push(...engineering.actions);
+  applyManifestExecutableBits(root, releaseManifest, "project");
+  const integrity = requireInstallIntegrity(root, "project", releaseManifest.skill_version);
+  actions.push({ action: "verify", path: ".agents/managed-install.json", detail: `${integrity.checked} managed files` });
   return { project: root, actions };
 }
 
@@ -1546,6 +1647,7 @@ Compatibility:
   const here = path.dirname(fileURLToPath(import.meta.url));
   const packagedAssetSkill = path.resolve(here, "..", "assets", "skill");
   const packagedAssetAgents = path.resolve(here, "..", "assets", "agents");
+  const assetManifest = path.resolve(here, "..", "assets", "managed-install.json");
   const sourceAssetSkill = path.resolve(here, "..", "..", "src", "auto-coding-skill");
   const sourceAssetAgents = path.resolve(here, "..", "..", "src", "agents");
   const useSourceAssets = exists(sourceAssetSkill) && exists(sourceAssetAgents);
@@ -1553,10 +1655,15 @@ Compatibility:
   const assetAgents = useSourceAssets ? sourceAssetAgents : packagedAssetAgents;
   if (!exists(assetSkill)) die(`missing assets at ${assetSkill}`);
   if (!exists(assetAgents)) die(`missing assets at ${assetAgents}`);
+  if (!exists(assetManifest)) die(`missing managed install manifest at ${assetManifest}`);
+  const releaseManifest = readInstallManifest(assetManifest);
+  if (releaseManifest.skill_version !== readPackageVersion()) {
+    die(`managed install manifest version ${releaseManifest.skill_version} does not match package ${readPackageVersion()}`);
+  }
 
   if (args.cmd === "status") {
     const projects = args.projects.length ? args.projects : [projectRoot()];
-    const results = projects.map(project => projectStatus(project, assetSkill, assetAgents));
+    const results = projects.map(project => projectStatus(project, assetSkill, assetAgents, assetManifest, releaseManifest));
     if (args.json) console.log(JSON.stringify({ version: readPackageVersion(), results }, null, 2));
     else {
       console.log(`[autocoding] version=${readPackageVersion()}`);
@@ -1588,6 +1695,8 @@ Compatibility:
         root,
         assetSkill,
         assetAgents,
+        assetManifest,
+        releaseManifest,
         args.dryRun,
         args.resetAgentModels,
         args.components,
@@ -1619,7 +1728,14 @@ Compatibility:
   const { skillDir, agentsDir, projectDir } = resolveInstallDirs(args.mode, args.dest);
   if (args.mode === "project") {
     assertNoRegisteredTasks([projectDir]);
-    const result = convergeProjectInstall(projectDir, assetSkill, assetAgents, args.resetAgentModels);
+    const result = convergeProjectInstall(
+      projectDir,
+      assetSkill,
+      assetAgents,
+      assetManifest,
+      releaseManifest,
+      args.resetAgentModels,
+    );
     console.log(`[autocoding] project=${result.project}`);
     for (const item of result.actions) {
       const detail = item.detail ? ` - ${item.detail}` : "";
@@ -1630,8 +1746,13 @@ Compatibility:
     rmrf(skillDir);
     copyDir(assetSkill, skillDir);
     syncManagedAgents(assetAgents, agentsDir, { resetModel: args.resetAgentModels });
+    copyInstallManifest(assetManifest, projectDir);
+    applyManifestExecutableBits(projectDir, releaseManifest, "global");
+    const integrity = requireInstallIntegrity(projectDir, "global", releaseManifest.skill_version);
     console.log(`[autocoding] installed skill to: ${skillDir}`);
     console.log(`[autocoding] installed agents to: ${agentsDir}`);
+    console.log(`[autocoding] installed manifest to: ${installManifestTarget(projectDir)}`);
+    console.log(`[autocoding] verified managed install files: ${integrity.checked}`);
   }
   console.log("[autocoding] done.");
 }

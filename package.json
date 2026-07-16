@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "4.1.8",
+  "version": "4.1.9",
   "description": "CLI installer for a delivery-first .agents workflow with adaptive Git isolation, routed changed-scope validation, risk-based review, push completion, and safe cleanup.",
   "type": "module",
   "bin": {
@@ -11,6 +11,7 @@
     "cli/tests",
     "cli/assets/skill",
     "cli/assets/agents",
+    "cli/assets/managed-install.json",
     "README.md",
     "LICENSE"
   ],
@@ -18,8 +19,8 @@
     "clean:cache": "find cli src -type d -name '__pycache__' -prune -exec rm -rf {} +",
     "prepack": "npm run clean:cache",
     "check:package": "npm run clean:cache && node cli/src/check-package.js",
-    "test": "node -c cli/src/index.js && node -c cli/src/sync-assets.js && node -c cli/tests/index.test.js && node cli/tests/index.test.js && python3 -c \"import ast, pathlib; files = ['cli/assets/skill/scripts/ap.py', 'cli/assets/skill/scripts/core.py', 'cli/assets/skill/scripts/http_checks.py', 'cli/assets/skill/scripts/scaffold_templates.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-asset-grammar-ok')\" && python3 -m py_compile cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py cli/assets/skill/scripts/scaffold_templates.py && python3 cli/tests/ap_profiles_test.py && python3 cli/tests/ap_concurrency_test.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('cli/assets/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('asset-agent-toml-ok')\" && find cli -type d -name '__pycache__' -prune -exec rm -rf {} +",
-    "test:src": "python3 -c \"import ast, pathlib; files = ['src/auto-coding-skill/scripts/ap.py', 'src/auto-coding-skill/scripts/core.py', 'src/auto-coding-skill/scripts/http_checks.py', 'src/auto-coding-skill/scripts/scaffold_templates.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-src-grammar-ok')\" && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py src/auto-coding-skill/scripts/scaffold_templates.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('src/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('src-agent-toml-ok')\" && find src -type d -name '__pycache__' -prune -exec rm -rf {} +",
+    "test": "node -c cli/src/index.js && node -c cli/src/sync-assets.js && node -c cli/tests/index.test.js && node cli/tests/index.test.js && python3 -c \"import ast, pathlib; files = ['cli/assets/skill/scripts/ap.py', 'cli/assets/skill/scripts/core.py', 'cli/assets/skill/scripts/http_checks.py', 'cli/assets/skill/scripts/install_integrity.py', 'cli/assets/skill/scripts/scaffold_templates.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-asset-grammar-ok')\" && python3 -m py_compile cli/assets/skill/scripts/ap.py cli/assets/skill/scripts/core.py cli/assets/skill/scripts/http_checks.py cli/assets/skill/scripts/install_integrity.py cli/assets/skill/scripts/scaffold_templates.py && python3 cli/tests/ap_profiles_test.py && python3 cli/tests/ap_concurrency_test.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('cli/assets/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('asset-agent-toml-ok')\" && find cli -type d -name '__pycache__' -prune -exec rm -rf {} +",
+    "test:src": "python3 -c \"import ast, pathlib; files = ['src/auto-coding-skill/scripts/ap.py', 'src/auto-coding-skill/scripts/core.py', 'src/auto-coding-skill/scripts/http_checks.py', 'src/auto-coding-skill/scripts/install_integrity.py', 'src/auto-coding-skill/scripts/scaffold_templates.py']; [ast.parse(pathlib.Path(rel).read_text(encoding='utf-8'), filename=rel, feature_version=(3, 11)) for rel in files]; print('python311-src-grammar-ok')\" && python3 -m py_compile src/auto-coding-skill/scripts/ap.py src/auto-coding-skill/scripts/core.py src/auto-coding-skill/scripts/http_checks.py src/auto-coding-skill/scripts/install_integrity.py src/auto-coding-skill/scripts/scaffold_templates.py && python3 -c \"import pathlib, tomllib; files = sorted(pathlib.Path('src/agents').glob('*.toml')); [tomllib.loads(path.read_text(encoding='utf-8')) for path in files]; print('src-agent-toml-ok')\" && find src -type d -name '__pycache__' -prune -exec rm -rf {} +",
     "check:assets": "node cli/src/sync-assets.js --check",
     "sync-assets": "node cli/src/sync-assets.js",
     "release:check": "npm run check:assets && npm run test:src && npm run test && npm run check:package"

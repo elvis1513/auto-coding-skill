@@ -30,6 +30,10 @@ const files = payload?.[0]?.files?.map(item => String(item.path || "")) || [];
 const forbidden = files.filter(file =>
   /(^|\/)__pycache__(\/|$)/.test(file) || /\.py[cod]$/i.test(file),
 );
+if (!files.includes("cli/assets/managed-install.json")) {
+  process.stderr.write("Managed install manifest is missing from the package\n");
+  process.exit(1);
+}
 if (forbidden.length > 0) {
   process.stderr.write(`Generated Python cache leaked into package:\n- ${forbidden.join("\n- ")}\n`);
   process.exit(1);

@@ -207,9 +207,9 @@ function testInitFullyConvergesExistingProject() {
   const converged = fs.readFileSync(engineering, "utf8");
   assert(converged.includes("preserved-project-secret"), "supported access values must survive init");
   assert(!converged.includes("legacy_extra") && !converged.includes("Run a full build every time"), "unknown fields and legacy workflow text must be removed");
-  assert(!exists(path.join(repo, ".agents", "agents", "custom.toml")), "extra agents must be removed");
+  assert(exists(path.join(repo, ".agents", "agents", "custom.toml")), "project-owned custom agents must survive init");
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt")), "extra Skill files must be removed");
-  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
+  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.9", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "structure-standard.md"), "utf8").startsWith("# Project Structure Standard"), "managed templates must be replaced");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md"), "utf8").includes("Keep me"), "numbered ADR artifacts must survive init");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "system-context.md"), "utf8").includes("Keep me"), "architecture artifacts must survive init");
@@ -286,9 +286,9 @@ function testMinimalInitConvergesWithinBudget() {
   const files = listProjectFiles(repo);
   const lines = files.reduce((total, file) => total + fs.readFileSync(file, "utf8").split(/\r?\n/).length, 0);
   assert(files.length <= 40, `minimal scaffold file budget exceeded: ${files.length}`);
-  // Deterministic direct-claim and orchestration-contract guards replace model-only
-  // assertions in 4.1.4; keep a measured ceiling without forcing opaque code.
-  assert(lines <= 11800, `minimal scaffold line budget exceeded: ${lines}`);
+  // The 4.1.9 integrity verifier is executable support code, not prompt context.
+  // Keep a measured ceiling while leaving the deterministic checks readable.
+  assert(lines <= 12200, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   assert(engineering.includes("profile: auto"), "engineering should enable adaptive profiles");
   assert(engineering.includes("isolation: adaptive"), "engineering should default to adaptive clean-branch/worktree isolation");
@@ -489,7 +489,7 @@ function testForcePreservesCustomAgentsAndModelOverrides() {
   const explorer = path.join(agentsDir, "explorer.toml");
   writeFile(explorer, fs.readFileSync(explorer, "utf8").replace(/^description\s*=.*$/m, '$&\nmodel = "vendor/override"'));
   run("node", [cli, "init", "--force"], { cwd: repo });
-  assert(!exists(custom), "init must remove agents outside the managed set");
+  assert(fs.readFileSync(custom, "utf8") === customText, "init must preserve agents outside the managed set");
   assert(fs.readFileSync(explorer, "utf8").includes('model = "vendor/override"'), "init --force should preserve explicit managed-agent model overrides");
 }
 
@@ -822,7 +822,7 @@ function testManagedEngineeringInitIsAuthoritativeAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.8 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.1\.9 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -836,21 +836,21 @@ function testManagedEngineeringInitIsAuthoritativeAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "4.1.8", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "4.1.9", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-update" && item.path === "docs/ENGINEERING.md"), "dry-run should plan the managed body update");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
   run("node", [cli, "init"], { cwd: repo });
   const updated = fs.readFileSync(engineering, "utf8");
   assert(!updated.includes("project note before") && !updated.includes("project note after"), "init must remove text outside the canonical ENGINEERING body");
-  assert(updated.includes("version=4.1.8"), "init should install the current managed workflow version");
+  assert(updated.includes("version=4.1.9"), "init should install the current managed workflow version");
   assert(updated.includes("The frontmatter contract is:"), "init should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "4.1.8", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "4.1.9", "status should expose the installed managed workflow version");
 
   const beforeSecondInit = fs.readFileSync(engineering, "utf8");
   run("node", [cli, "init"], { cwd: repo });
@@ -877,7 +877,7 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.find(item => item.path === "docs/ENGINEERING.md")?.detail.includes("preserved-custom"), "custom legacy action should be labeled preserved-custom");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=4.1.8"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=4.1.9"), "legacy migration should insert the current managed workflow");
   assert(migrated.includes(legacyNote), "legacy migration must preserve the complete existing body");
   const stable = fs.readFileSync(engineering, "utf8");
   run("node", [cli, "sync", "--projects", repo]);
@@ -977,7 +977,7 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=4.1.8"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=4.1.9"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -996,12 +996,12 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=4.1.8"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("managed-agents:start version=4.1.9"), "AGENTS migration should install the current managed block");
   assert(!migrated.includes("Preserve this repository-specific rule exactly."), "root AGENTS must contain no project-specific tail");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
   const canonical = fs.readFileSync(path.join(repoRoot, "cli", "assets", "skill", "data", "templates", "bridges", "AGENTS.md"), "utf8");
   assert(migrated === canonical, "root AGENTS must be byte-identical to the packaged canonical file");
-  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.8.md");
+  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.1.9.md");
   assert(fs.readFileSync(archive, "utf8").includes("Preserve this repository-specific rule exactly."), "previous AGENTS content must be archived once");
   const stable = fs.readFileSync(agents);
   run("node", [cli, "sync", "--projects", repo]);
@@ -1058,21 +1058,106 @@ function testEngineeringFrameworkRejectsAnyNonCanonicalWorkflowText() {
 
   run("node", [cli, "init"], { cwd: repo });
   assert(!fs.readFileSync(engineering, "utf8").includes("backend owns APIs"), "init must restore the canonical ENGINEERING body");
-  const archived = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "ENGINEERING.md");
+  const archived = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.9", "docs", "ENGINEERING.md");
   assert(fs.readFileSync(archived, "utf8").includes("backend owns APIs"), "removed project text should remain in non-authoritative history");
 }
 
+function testManagedInstallIntegrityIsBoundedAndRepairable() {
+  const repo = tmpdir("managed-integrity");
+  const initialized = run("node", [cli, "init"], { cwd: repo });
+  assert(initialized.stdout.includes("verify: .agents/managed-install.json"), "init must verify managed files before reporting success");
+  fillRequiredAccess(repo);
+
+  const manifestPath = path.join(repo, ".agents", "managed-install.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert(manifest.schema_version === 1 && manifest.skill_version === "4.1.9", "installed manifest must identify the release");
+  assert(manifest.entries.length > 0, "installed manifest must list managed files");
+  for (const entry of manifest.entries) {
+    assert(typeof entry.path === "string" && !path.isAbsolute(entry.path) && !entry.path.includes(".."), "manifest paths must be safe relative paths");
+    assert(/^[0-9a-f]{64}$/.test(entry.sha256), `${entry.path}: manifest hash must be sha256`);
+    assert(entry.version === "4.1.9" && typeof entry.executable === "boolean", `${entry.path}: version/executable metadata missing`);
+  }
+  assert(!manifest.managed_namespaces.some(item => item.path === ".agents" || item.path === "docs"), "manifest must not mirror entire project-owned trees");
+
+  const customAgent = path.join(repo, ".agents", "agents", "project-specialist.toml");
+  const archiveNote = path.join(repo, ".agents", "archive", "owner-note.md");
+  const adr = path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md");
+  writeFile(customAgent, 'name = "project-specialist"\ndescription = "project owned"\n');
+  writeFile(archiveNote, "historical\n");
+  writeFile(adr, "# ADR-0042\n\nProject owned.\n");
+  assertStatusOk(repo);
+  const launcher = path.join(repo, "docs", "tools", "autopipeline", "ap.py");
+  run("python3", [launcher, "--repo", repo, "doctor"]);
+
+  const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+  fs.appendFileSync(skill, "\nmanaged drift\n");
+  let doctor = run("python3", [launcher, "--repo", repo, "doctor"], { check: false });
+  assert(doctor.status !== 0 && `${doctor.stdout}\n${doctor.stderr}`.includes("SKILL.md: managed content drift"), "doctor must identify managed Skill drift");
+  run("node", [cli, "init"], { cwd: repo });
+
+  const extraSkill = path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt");
+  writeFile(extraSkill, "obsolete\n");
+  let status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  let parsed = JSON.parse(status.stdout).results[0];
+  assert(status.status !== 0 && parsed.installIntegrity.errors.some(item => item.includes("unexpected file in managed namespace")), "status must reject extras in the exact Skill namespace");
+  run("node", [cli, "init"], { cwd: repo });
+
+  const oldRuntime = path.join(repo, "docs", "tools", "autopipeline", "core.py");
+  writeFile(oldRuntime, "# obsolete project runtime copy\n");
+  status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  parsed = JSON.parse(status.stdout).results[0];
+  assert(status.status !== 0 && parsed.installIntegrity.errors.some(item => item.includes("docs/tools/autopipeline/core.py")), "launcher namespace extras must be drift");
+  run("node", [cli, "init"], { cwd: repo });
+  assert(!exists(oldRuntime), "init must clean obsolete files from the exact launcher namespace");
+
+  if (process.platform !== "win32") {
+    const core = path.join(repo, ".agents", "skills", "auto-coding-skill", "scripts", "core.py");
+    fs.chmodSync(core, fs.statSync(core).mode & ~0o111);
+    status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+    parsed = JSON.parse(status.stdout).results[0];
+    assert(status.status !== 0 && parsed.installIntegrity.errors.some(item => item.includes("core.py: executable bit drift")), "status must detect executable-bit drift");
+    run("node", [cli, "init"], { cwd: repo });
+    assert((fs.statSync(core).mode & 0o111) !== 0, "init must restore the declared executable bit");
+  }
+
+  const explorer = path.join(repo, ".agents", "agents", "explorer.toml");
+  writeFile(explorer, fs.readFileSync(explorer, "utf8").replace(/^description\s*=.*$/m, '$&\nmodel = "vendor/project-model"'));
+  assertStatusOk(repo);
+  writeFile(explorer, fs.readFileSync(explorer, "utf8").replace('model = "vendor/project-model"', "model = []"));
+  doctor = run("python3", [launcher, "--repo", repo, "doctor"], { check: false });
+  assert(doctor.status !== 0 && `${doctor.stdout}\n${doctor.stderr}`.includes("model must be a non-empty TOML string"), "doctor must reject invalid normalized-agent overrides");
+  run("node", [cli, "init"], { cwd: repo });
+
+  const staleManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  staleManifest.skill_version = "0.0.0";
+  writeFile(manifestPath, `${JSON.stringify(staleManifest)}\n`);
+  status = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
+  parsed = JSON.parse(status.stdout).results[0];
+  assert(status.status !== 0 && parsed.installManifestDiffs.some(item => item.status === "stale"), "status must compare the local manifest with the release manifest");
+  doctor = run("python3", [launcher, "--repo", repo, "doctor"], { check: false });
+  assert(doctor.status !== 0 && `${doctor.stdout}\n${doctor.stderr}`.includes("manifest version"), "doctor must reject a mismatched local manifest");
+  run("node", [cli, "init"], { cwd: repo });
+
+  assert(fs.readFileSync(customAgent, "utf8").includes("project owned"), "init must preserve project-owned custom agents");
+  assert(fs.readFileSync(archiveNote, "utf8") === "historical\n", "init must preserve archives untouched");
+  assert(fs.readFileSync(adr, "utf8").includes("Project owned"), "init must preserve project-owned documents");
+  assertStatusOk(repo);
+}
+
 function testReleaseVersionMarkersStayInSync() {
-  const expected = "4.1.8";
+  const expected = "4.1.9";
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
   const policy = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "workflow-migrations-v1.json"),
     "utf8",
   ));
-  assert(pkg.version === expected, "package version must match the 4.1.8 release");
+  assert(pkg.version === expected, "package version must match the 4.1.9 release");
   assert(lock.version === expected && lock.packages[""].version === expected, "package-lock versions must match");
   assert(policy.managed_versions.engineering === expected && policy.managed_versions.agents === expected, "managed workflow versions must match");
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "cli", "assets", "managed-install.json"), "utf8"));
+  assert(manifest.skill_version === expected && manifest.schema_version === 1, "managed install manifest version/schema must match");
+  assert(manifest.entries.every(entry => entry.version === expected && /^[0-9a-f]{64}$/.test(entry.sha256)), "managed install entries must carry release hashes and versions");
   const publishWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "npm-publish.yml"), "utf8");
   const runtimeRequirements = fs.readFileSync(path.join(repoRoot, "src", "auto-coding-skill", "requirements.txt"), "utf8");
   assert(publishWorkflow.includes("tags:\n      - \"v*\""), "npm publish must run from version tag pushes");
@@ -1141,6 +1226,7 @@ testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules();
 testUnknownWorkflowConflictFailsWholeBatchBeforeWrites();
 testEngineeringMarkerBoundaryIsNormalized();
 testEngineeringFrameworkRejectsAnyNonCanonicalWorkflowText();
+testManagedInstallIntegrityIsBoundedAndRepairable();
 testReleaseVersionMarkersStayInSync();
 testProtocolResponsibilitiesStaySeparated();
 

@@ -1,6 +1,6 @@
 ---
 workflow:
-  skill_version: "4.1.8"
+  skill_version: "4.1.9"
   mode: "dev"
   profile: "auto"
   completion: "push"
@@ -93,7 +93,7 @@ docs:
 
 # Engineering Configuration and Project Facts
 
-<!-- auto-coding-skill:managed-workflow:start version=4.1.8 -->
+<!-- auto-coding-skill:managed-workflow:start version=4.1.9 -->
 
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the exact-schema source for
@@ -113,7 +113,8 @@ The frontmatter contract is:
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.
 - `docs`: locations inside the managed documentation directory framework.
 
-Run `python3 docs/tools/autopipeline/ap.py doctor` after changing frontmatter.
+Run `python3 docs/tools/autopipeline/ap.py doctor` after changing frontmatter; it
+also performs the bounded local managed-install integrity check.
 Do not put competing delivery flows, agent roles, lifecycle rules, gate semantics,
 or completion rules outside this managed block.
 

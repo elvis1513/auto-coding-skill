@@ -85,4 +85,6 @@ and performs the complete install/upgrade: it replaces every managed constraint,
 preserves only schema-supported project values, installs the canonical docs
 directory framework and managed templates, and archives obsolete content outside
 active `docs/` while preserving valid architecture, ADR, interface, DD, review,
-and deploy-record artifacts in their designated directories.
+and deploy-record artifacts in their designated directories. It then verifies the
+packaged managed-install manifest; `doctor` cheaply rechecks the same declared
+paths without treating project-owned files or archives as a release mirror.

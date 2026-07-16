@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -7,12 +8,35 @@ const srcSkill = path.join(repoRoot, "src", "auto-coding-skill");
 const dstSkill = path.join(repoRoot, "cli", "assets", "skill");
 const srcAgents = path.join(repoRoot, "src", "agents");
 const dstAgents = path.join(repoRoot, "cli", "assets", "agents");
+const manifestDst = path.join(repoRoot, "cli", "assets", "managed-install.json");
 const checkOnly = process.argv.includes("--check");
+
+function generateManifest(){
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  const python = String(process.env.AUTOCODING_PYTHON || (process.platform === "win32" ? "python" : "python3")).trim();
+  const result = spawnSync(
+    python,
+    [
+      path.join(srcSkill, "scripts", "install_integrity.py"),
+      "generate",
+      "--skill-root", srcSkill,
+      "--agents-root", srcAgents,
+      "--version", pkg.version,
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || result.error?.message || "manifest generation failed").trim();
+    throw new Error(detail);
+  }
+  JSON.parse(result.stdout);
+  return result.stdout;
+}
 
 function exists(p){ try { fs.accessSync(p); return true; } catch { return false; } }
 function rmrf(p){ fs.rmSync(p, { recursive:true, force:true }); }
 function shouldSkip(name){
-  return name === "__pycache__" || name === ".DS_Store" || name.endsWith(".pyc");
+  return name === "__pycache__" || name === ".DS_Store" || /\.py[cod]$/i.test(name);
 }
 function copyDir(src, dst){
   fs.mkdirSync(dst, { recursive:true });
@@ -60,10 +84,13 @@ function compareDirs(src, dst, label){
 }
 
 if (checkOnly) {
+  const expectedManifest = generateManifest();
   const diffs = [
     ...compareDirs(srcSkill, dstSkill, "skill"),
     ...compareDirs(srcAgents, dstAgents, "agents"),
   ];
+  if (!exists(manifestDst)) diffs.push("manifest: missing cli/assets/managed-install.json");
+  else if (fs.readFileSync(manifestDst, "utf8") !== expectedManifest) diffs.push("manifest: stale cli/assets/managed-install.json");
   if (diffs.length > 0) {
     console.error("[sync-assets] assets are out of sync:");
     for (const diff of diffs) console.error(`- ${diff}`);
@@ -78,5 +105,7 @@ rmrf(dstSkill);
 copyDir(srcSkill, dstSkill);
 rmrf(dstAgents);
 copyDir(srcAgents, dstAgents);
+fs.writeFileSync(manifestDst, generateManifest());
 console.log("[sync-assets] updated cli/assets/skill from src/auto-coding-skill");
 console.log("[sync-assets] updated cli/assets/agents from src/agents");
+console.log("[sync-assets] updated cli/assets/managed-install.json");

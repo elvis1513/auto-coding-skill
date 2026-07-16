@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.8 -->
+<!-- auto-coding-skill:managed-agents:start version=4.1.9 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -118,6 +118,8 @@ failure may continue in the same conversation/task without a second lifecycle.
   templates. Put durable facts into the installed project files. Architecture,
   ADR, interface, DD, review, and deploy-record artifacts may use their designated
   directories; unrelated directories are archived outside active docs on upgrade.
+- The managed-install manifest owns only its declared files and exact namespaces.
+  Never treat the whole `.agents` or `docs` tree as a release-package mirror.
 - Ordinary work creates no taskbook, closure Markdown, evidence JSONL, active-task
   document, or design file. Machine coordination/evidence stays in Git
   common/local state and cannot change the reviewed diff.

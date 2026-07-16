@@ -24,6 +24,8 @@ def command(
     check: bool = True,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.setdefault("CODEX_THREAD_ID", "concurrency-test-owner")
     result = subprocess.run(
         list(args),
         cwd=cwd,
@@ -32,6 +34,7 @@ def command(
         input=input_text,
         capture_output=True,
         timeout=30,
+        env=env,
     )
     if check and result.returncode != 0:
         raise AssertionError(
@@ -187,6 +190,13 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "test-reviewer",
         )
         return fingerprint
+
+    def claim_direct(self, repo: Path, *owned_paths: str) -> str:
+        args: list[str] = ["classify", "--task-kind", "change", "--claim-direct", "--json"]
+        for path in owned_paths:
+            args.extend(["--planned-path", path])
+        payload = json.loads(self.ap(repo, *args).stdout)
+        return payload["direct_claim"]["id"]
 
     def commit_push(self, repo: Path, task_id: str, message: str) -> subprocess.CompletedProcess[str]:
         self.approve_task(repo, task_id)
@@ -446,6 +456,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_continue_direct_can_adopt_owned_changes_for_new_review_lifecycle(self) -> None:
         _, repo, remote = self.make_repo("adaptive", require_review=False)
+        claim = self.claim_direct(repo, "shared.txt")
         (repo / "shared.txt").write_text("continued direct\n", encoding="utf-8")
         started = self.ap(
             repo,
@@ -454,6 +465,8 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--owned-path",
             "shared.txt",
             "--continue-direct",
+            "--direct-claim",
+            claim,
             "--review-required",
         )
         self.assertIn("execution_mode=direct", started.stdout)
@@ -477,6 +490,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("execution_mode=direct", pushed.stdout)
         self.assertEqual("continued direct", git_output(remote, "show", "refs/heads/dev:shared.txt"))
 
+        claim = self.claim_direct(repo, "shared.txt")
         (repo / "shared.txt").write_text("owned again\n", encoding="utf-8")
         (repo / "unrelated.txt").write_text("unknown\n", encoding="utf-8")
         rejected = self.ap(
@@ -486,12 +500,51 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--owned-path",
             "shared.txt",
             "--continue-direct",
+            "--direct-claim",
+            claim,
             "--review-required",
             check=False,
         )
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn("unrelated.txt", rejected.stdout + rejected.stderr)
         self.assertFalse(self.registry_manifest_path(repo, "DIRECT-CONTINUE-BLOCKED").exists())
+
+    def test_reviewer_cannot_be_current_writer(self) -> None:
+        _, repo, _ = self.make_repo()
+        self.ap(
+            repo,
+            "task-start",
+            "SELF-REVIEW",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "src",
+            "--isolated",
+            "--review-required",
+            "--writer",
+            "self-reviewer",
+        )
+        worktree = self.task_worktree(repo, "SELF-REVIEW")
+        payload = worktree / "src" / "payload.txt"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text("changed\n", encoding="utf-8")
+        status = json.loads(
+            self.ap(worktree, "task-status", "SELF-REVIEW", "--json").stdout
+        )["tasks"][0]
+        rejected = self.ap(
+            worktree,
+            "task-review",
+            "SELF-REVIEW",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--reviewer",
+            "self-reviewer",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("writer lease holder", rejected.stdout + rejected.stderr)
 
     def test_schema_one_task_status_fails_closed_with_migration_recovery(self) -> None:
         _, repo, _ = self.make_repo()

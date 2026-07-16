@@ -13,33 +13,31 @@ Do not reconstruct or duplicate those rules from historical task documents.
 
 Normal delivery is:
 
-`analysis → decomposition → necessary design → development → one bounded final
-changed-scope gate → commit/push`.
+`analysis → decomposition → necessary design → development → bounded gate → commit/push`.
 
 ## Select the minimum mechanism set
 
-Read-only questions need no workflow command. Obvious clean serial edits and
-terminal ledger maintenance may follow root `AGENTS.md` directly. When task kind,
-impact, risk, or concurrency is unclear, run:
+Read-only questions need no workflow command. Clean serial edits and terminal
+maintenance may follow `AGENTS.md` directly. When impact or concurrency is unclear, run:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py classify --scope auto \
   --planned-path <PATH> --intent "<intent>" [--writers <N>] \
-  [--task-kind read_only|change|terminal_maintenance]
+  [--task-kind read_only|change|terminal_maintenance] [--claim-direct]
 ```
 
 Run `mechanism_plan.required`. The model may select
 `optional_when_beneficial` only when expected value exceeds coordination cost.
 Do not run `forbidden` mechanisms unless the user explicitly overrides the plan.
-Reclassify only after material change. For already-direct work, add `--continue-direct`
-with every task path and reuse it on `task-start` if needed; unknown dirt isolates.
+Reclassify before changing writer count. For uncertain direct work, create
+`--claim-direct` while clean; continuation requires its ID and exact paths.
 
 Use the registered lifecycle only when classification requires isolation or
 fingerprinted review, or when the user explicitly requests it:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
-  --owned-path src [--isolated] [--review-required] [--continue-direct] [--force-lifecycle]
+  --owned-path src [--isolated] [--review-required] [--continue-direct --direct-claim <ID>]
 # For review-required work, obtain the current fingerprint and approve it:
 python3 docs/tools/autopipeline/ap.py task-status T0001 --json
 python3 docs/tools/autopipeline/ap.py task-review T0001 \
@@ -49,9 +47,9 @@ python3 docs/tools/autopipeline/ap.py commit-push T0001 --msg "T0001: summary"
 python3 docs/tools/autopipeline/ap.py task-integrate T0001
 ```
 
-Each parallel writer uses a distinct task ID, registered worktree, writer lease,
-dependency SHAs, and non-overlapping `owned_paths`. The main agent alone runs the
-final gate, integrates, pushes, and cleans safely merged temporary branches.
+Each parallel writer uses a task ID, worktree, lease, dependency SHAs, and distinct
+`owned_paths`. Main integrates, gates, pushes, and cleans. Validate delegated JSON
+with `agent-contract-check`; parallel fixers require reclassification with `--writers >1`.
 
 ## Close with the bounded routed gate
 

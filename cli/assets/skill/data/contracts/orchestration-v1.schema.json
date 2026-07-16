@@ -459,6 +459,7 @@
         "intent_provided",
         "intent_categories",
         "intent_risk_candidates",
+        "high_confidence_intent_categories",
         "task_kind",
         "profile",
         "categories",
@@ -490,6 +491,9 @@
           "$ref": "#/$defs/stringArray"
         },
         "intent_risk_candidates": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "high_confidence_intent_categories": {
           "$ref": "#/$defs/stringArray"
         },
         "task_kind": {

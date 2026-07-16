@@ -51,7 +51,7 @@ _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.3", "engineering": "4.1.3"},
+    "managed_versions": {"agents": "4.1.4", "engineering": "4.1.4"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -178,13 +178,13 @@ def _evidence_log_path(repo: Path, cfg: dict) -> Path:
         return Path(repo, task_dir, f"{manifest['task_id']}.jsonl")
     if _bool_config(docs_cfg.get("track_evidence"), False) and _text(docs_cfg.get("evidence_log")):
         return Path(repo, _text(docs_cfg.get("evidence_log")))
-    return Path(repo, ".local/auto-coding-skill/evidence.jsonl")
+    return _task_state_root(repo) / "evidence.jsonl"
 
 
 def _gate_profile_path(repo: Path, cfg: dict) -> Path:
     gate_cfg = _gate_cfg(cfg)
-    rel = _text(gate_cfg.get("profile_log")) or ".local/auto-coding-skill/gate-profile.jsonl"
-    return Path(repo, rel)
+    rel = _text(gate_cfg.get("profile_log"))
+    return Path(repo, rel) if rel else _task_state_root(repo) / "gate-profile.jsonl"
 
 
 def _record_evidence(repo: Path, cfg: dict, event: str, status: str, payload: Optional[dict] = None) -> None:
@@ -638,8 +638,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.3":
-        workflow_cfg["skill_version"] = "4.1.3"
+    if _text(workflow_cfg.get("skill_version")) != "4.1.4":
+        workflow_cfg["skill_version"] = "4.1.4"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -952,16 +952,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.3\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.1.4\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.3.md"
+            archive = archive_dir / "AGENTS.pre-4.1.4.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.3-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.1.4-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -1662,6 +1662,7 @@ def _text(value: object) -> str:
 
 
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DIRECT_CLAIM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _concurrency_cfg(cfg: dict) -> dict:
@@ -1730,6 +1731,123 @@ def _task_state_root(repo: Path) -> Path:
 
 def _task_registry_path(repo: Path, task_id: str) -> Path:
     return _task_state_root(repo) / "tasks" / f"{_validate_task_id(task_id)}.json"
+
+
+def _direct_claim_path(repo: Path, claim_id: str) -> Path:
+    value = _text(claim_id)
+    if not _DIRECT_CLAIM_ID_RE.fullmatch(value):
+        raise APError("Direct claim ID must be a 32-character lowercase hexadecimal token.")
+    return _task_state_root(repo) / "direct-claims" / f"{value}.json"
+
+
+def _active_direct_claims(repo: Path) -> list[dict]:
+    root = _task_state_root(repo) / "direct-claims"
+    if not root.exists():
+        return []
+    active: list[dict] = []
+    for path in sorted(root.glob("*.json")):
+        payload = _read_json_object(path) or {}
+        worktree = Path(_text(payload.get("worktree_path"))).resolve()
+        valid_checkout = worktree.exists() and _text(payload.get("worktree_path"))
+        if valid_checkout:
+            try:
+                valid_checkout = bool(
+                    _text(payload.get("base_sha")) == _resolve_commit(worktree, "HEAD")
+                    and _text(payload.get("branch")) == _current_branch(worktree)
+                )
+            except APError:
+                valid_checkout = False
+        if (
+            int(payload.get("schema") or 0) != 1
+            or _text(payload.get("state")) != "active"
+            or not valid_checkout
+        ):
+            path.unlink(missing_ok=True)
+            continue
+        active.append(payload)
+    return active
+
+
+def _create_direct_claim(repo: Path, cfg: dict, owned_paths: list[str], owner: str) -> dict:
+    normalized = sorted({_normalize_owned_path(item) for item in owned_paths if _text(item)})
+    if not normalized:
+        raise APError("A direct claim requires at least one planned path.")
+    if not _text(owner):
+        raise APError("A direct claim requires --claim-owner or CODEX_THREAD_ID.")
+    if _task_isolation(cfg) != "adaptive":
+        raise APError("Direct claims are available only with concurrency.isolation=adaptive.")
+    if _working_tree_paths(repo):
+        raise APError("A direct claim must be created while the checkout is clean, before the first write.")
+    if _has_registered_active_task(repo):
+        raise APError("A registered active task already owns repository writes.")
+    branch = _current_branch(repo)
+    if not branch:
+        raise APError("A direct claim requires a named current branch.")
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with (
+        _repo_lock(repo, "integration", timeout_s=timeout_s),
+        _repo_lock(repo, "task-registry", timeout_s=timeout_s),
+        _repo_lock(repo, "direct-claim", timeout_s=timeout_s),
+    ):
+        if _working_tree_paths(repo):
+            raise APError("Checkout changed while acquiring the direct claim; isolate instead.")
+        if _has_registered_active_task(repo):
+            raise APError("A registered active task acquired repository writes.")
+        existing = _active_direct_claims(repo)
+        other = [item for item in existing if _text(item.get("owner")) != _text(owner)]
+        if other:
+            raise APError(
+                "Another direct writer already owns this checkout: "
+                + ", ".join(_text(item.get("owner")) for item in other)
+            )
+        for item in existing:
+            _direct_claim_path(repo, _text(item.get("claim_id"))).unlink(missing_ok=True)
+        claim_id = uuid.uuid4().hex
+        payload = {
+            "schema": 1,
+            "claim_id": claim_id,
+            "state": "active",
+            "owner": _text(owner),
+            "base_sha": _resolve_commit(repo, "HEAD"),
+            "branch": branch,
+            "worktree_path": str(repo.resolve()),
+            "owned_paths": normalized,
+            "created_at": _now_iso(),
+        }
+        _write_json_object(_direct_claim_path(repo, claim_id), payload)
+        return payload
+
+
+def _require_direct_claim(repo: Path, claim_id: str, planned_paths: list[str]) -> dict:
+    if not _text(claim_id):
+        raise APError(
+            "--continue-direct requires --direct-claim from a clean pre-write classify --claim-direct."
+        )
+    payload = _read_json_object(_direct_claim_path(repo, claim_id)) or {}
+    normalized = sorted({_normalize_owned_path(item) for item in planned_paths if _text(item)})
+    if int(payload.get("schema") or 0) != 1 or _text(payload.get("state")) != "active":
+        raise APError("Direct claim is missing, consumed, or invalid.")
+    if normalized != sorted(payload.get("owned_paths") or []):
+        raise APError("Continued direct paths must exactly match the clean pre-write direct claim.")
+    if _text(payload.get("base_sha")) != _resolve_commit(repo, "HEAD"):
+        raise APError("Direct claim base HEAD changed; use an isolated task instead.")
+    if _text(payload.get("branch")) != _current_branch(repo):
+        raise APError("Direct claim branch changed; use an isolated task instead.")
+    if Path(_text(payload.get("worktree_path"))).resolve() != repo.resolve():
+        raise APError("Direct claim belongs to another checkout.")
+    actor = _text(os.environ.get("CODEX_THREAD_ID"))
+    if actor and actor != _text(payload.get("owner")):
+        raise APError("Direct claim belongs to another writer.")
+    dirty = _working_tree_paths(repo)
+    outside = [path for path in dirty if not _path_is_owned(path, normalized)]
+    if outside:
+        raise APError("Changes outside the clean direct claim:\n- " + "\n- ".join(outside))
+    return payload
+
+
+def _consume_direct_claim(repo: Path, claim_id: str) -> None:
+    if _text(claim_id):
+        _direct_claim_path(repo, claim_id).unlink(missing_ok=True)
 
 
 def _has_registered_active_task(repo: Path) -> bool:
@@ -4425,7 +4543,12 @@ def _classify_paths(paths: list[str]) -> dict:
             categories.add("db")
         if any(token in lower for token in ["api", "controller", "handler", "route", "server"]):
             categories.add("api")
-        if words & {"auth", "authentication", "authorization", "permission", "permissions", "role", "roles", "tenant", "security"}:
+        if words & {
+            "auth", "authentication", "authorization", "permission", "permissions",
+            "role", "roles", "tenant", "security", "login", "session", "sessions",
+            "token", "tokens", "jwt", "oauth", "oidc", "sso", "password", "passwords",
+            "credential", "credentials",
+        }:
             categories.add("auth")
         if words & {"payment", "payments", "billing", "invoice", "invoices", "checkout"}:
             categories.add("payment")
@@ -4487,6 +4610,43 @@ def _classify_intent(intent: str) -> list[str]:
         for category, keywords in keyword_categories.items()
         if any(keyword in value for keyword in keywords)
     )
+
+
+def _high_confidence_intent_categories(intent: str) -> set[str]:
+    value = _text(intent).lower()
+    signals = {
+        "db": [
+            "migration", "schema", "ddl", "sql", "table structure", "database migration",
+            "数据迁移", "数据库迁移", "表结构", "数据库结构",
+        ],
+        "auth": [
+            "authorization", "permission", "security boundary", "token validation",
+            "session validation", "access control", "鉴权", "权限", "安全边界",
+            "令牌校验", "会话校验", "访问控制",
+        ],
+        "payment": [
+            "settlement", "refund", "charge", "transaction", "billing", "ledger",
+            "payment idempotency", "结算", "退款", "扣款", "交易", "账单", "资金", "支付幂等",
+        ],
+        "file_transfer": [
+            "upload validation", "download authorization", "file validation", "path traversal",
+            "上传校验", "下载权限", "文件校验", "路径穿越",
+        ],
+        "gateway": [
+            "gateway config", "ingress config", "nginx config", "reverse proxy config",
+            "网关配置", "入口配置", "反向代理配置",
+        ],
+        "prod_config": ["production config", "prod config", "生产配置"],
+        "release_or_tooling": [
+            "release pipeline", "deployment pipeline", "jenkins pipeline", "publish workflow",
+            "发布流程", "部署流水线", "构建流水线", "发布工作流",
+        ],
+    }
+    return {
+        category
+        for category, keywords in signals.items()
+        if any(keyword in value for keyword in keywords)
+    }
 
 
 def _resolve_task_kind(
@@ -4647,6 +4807,154 @@ def _agent_contract_shape() -> tuple[dict, list[str]]:
     )
 
 
+_ORCHESTRATION_SCHEMA_CACHE: Optional[dict] = None
+
+
+def _orchestration_schema() -> dict:
+    global _ORCHESTRATION_SCHEMA_CACHE
+    if _ORCHESTRATION_SCHEMA_CACHE is None:
+        path = Path(__file__).resolve().parents[1] / _AGENT_CONTRACT_SCHEMA
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise APError(f"Cannot load orchestration contract schema: {path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise APError(f"Orchestration contract schema must be an object: {path}")
+        _ORCHESTRATION_SCHEMA_CACHE = payload
+    return _ORCHESTRATION_SCHEMA_CACHE
+
+
+def _contract_ref(root: dict, ref: str) -> dict:
+    if not ref.startswith("#/"):
+        raise APError(f"Unsupported orchestration contract reference: {ref}")
+    current: object = root
+    for token in ref[2:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or token not in current:
+            raise APError(f"Broken orchestration contract reference: {ref}")
+        current = current[token]
+    if not isinstance(current, dict):
+        raise APError(f"Orchestration contract reference is not an object: {ref}")
+    return current
+
+
+def _contract_type_matches(value: object, expected: str) -> bool:
+    return {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }.get(expected, False)
+
+
+def _contract_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    return left == right
+
+
+def _validate_contract_fragment(fragment: dict, value: object, root: dict, path: str) -> None:
+    if "$ref" in fragment:
+        _validate_contract_fragment(_contract_ref(root, _text(fragment["$ref"])), value, root, path)
+
+    expected_types = fragment.get("type")
+    if expected_types is not None:
+        choices = expected_types if isinstance(expected_types, list) else [expected_types]
+        if not all(isinstance(item, str) for item in choices) or not any(
+            _contract_type_matches(value, item) for item in choices
+        ):
+            raise APError(f"Contract validation failed at {path}: expected type {choices}.")
+
+    if "const" in fragment and not _contract_equal(value, fragment["const"]):
+        raise APError(f"Contract validation failed at {path}: expected constant {fragment['const']!r}.")
+    if "enum" in fragment and not any(_contract_equal(value, item) for item in fragment["enum"]):
+        raise APError(f"Contract validation failed at {path}: value is outside the allowed enum.")
+
+    if isinstance(value, str):
+        if len(value) < int(fragment.get("minLength") or 0):
+            raise APError(f"Contract validation failed at {path}: string is too short.")
+        pattern = fragment.get("pattern")
+        if pattern and not re.search(str(pattern), value):
+            raise APError(f"Contract validation failed at {path}: string does not match {pattern!r}.")
+
+    if isinstance(value, list):
+        if "maxItems" in fragment and len(value) > int(fragment["maxItems"]):
+            raise APError(f"Contract validation failed at {path}: too many array items.")
+        item_schema = fragment.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                _validate_contract_fragment(item_schema, item, root, f"{path}[{index}]")
+
+    if isinstance(value, dict):
+        required = fragment.get("required") or []
+        missing = [item for item in required if item not in value]
+        if missing:
+            raise APError(
+                f"Contract validation failed at {path}: missing " + ", ".join(sorted(missing)) + "."
+            )
+        properties = fragment.get("properties") or {}
+        if fragment.get("additionalProperties") is False:
+            unexpected = sorted(set(value) - set(properties))
+            if unexpected:
+                raise APError(
+                    f"Contract validation failed at {path}: unexpected " + ", ".join(unexpected) + "."
+                )
+        for key, child in properties.items():
+            if key in value and isinstance(child, dict):
+                _validate_contract_fragment(child, value[key], root, f"{path}.{key}")
+
+    condition = fragment.get("if")
+    if isinstance(condition, dict):
+        try:
+            _validate_contract_fragment(condition, value, root, path)
+        except APError:
+            pass
+        else:
+            then = fragment.get("then")
+            if isinstance(then, dict):
+                _validate_contract_fragment(then, value, root, path)
+
+    for child in fragment.get("allOf") or []:
+        if isinstance(child, dict):
+            _validate_contract_fragment(child, value, root, path)
+
+
+def _validate_orchestration_contract(kind: str, payload: dict) -> dict:
+    definitions = {
+        "assignment": "agentAssignment",
+        "result": "agentResult",
+        "agentPlan": "agentPlan",
+        "classify": "classifyResult",
+    }
+    definition = definitions.get(kind)
+    if not definition:
+        raise APError(f"Unknown orchestration contract kind: {kind}")
+    root = _orchestration_schema()
+    _validate_contract_fragment(root["$defs"][definition], payload, root, "$")
+
+    role = _text(payload.get("role"))
+    if kind == "assignment" and role == "reviewer":
+        if _text(payload.get("node_id")) == _text(payload.get("owning_fixer")):
+            raise APError("Reviewer assignment node_id must differ from owning_fixer.")
+    if kind == "result":
+        if role == "fixer":
+            owned = [_normalize_owned_path(item) for item in payload.get("owned_paths") or []]
+            outside = [
+                path
+                for path in payload.get("changed_paths") or []
+                if not _path_is_owned(path, owned)
+            ]
+            if outside:
+                raise APError("Fixer result changed_paths exceed owned_paths: " + ", ".join(outside))
+        if role == "reviewer" and _text(payload.get("verdict")) in {"approved", "changes-requested"}:
+            if not re.fullmatch(r"[0-9a-f]{64}", _text(payload.get("diff_fingerprint"))):
+                raise APError("Reviewer result must bind its verdict to a non-empty diff fingerprint.")
+    return payload
+
+
 def _validate_agent_plan(plan: dict) -> dict:
     required = {
         "contract_version",
@@ -4660,18 +4968,9 @@ def _validate_agent_plan(plan: dict) -> dict:
         "optional_roles",
     }
     missing = sorted(required - set(plan))
-    if missing or plan.get("contract_version") != _AGENT_CONTRACT_VERSION:
-        raise APError("Invalid agent plan contract: " + (", ".join(missing) or "version"))
-    if plan.get("contract_schema") != _AGENT_CONTRACT_SCHEMA:
-        raise APError("Invalid agent plan schema path.")
-    if plan.get("strategy") not in {"main-only", "orchestrated-subagents"}:
-        raise APError("Invalid agent plan strategy.")
-    if not all(
-        isinstance(stage, dict)
-        and {"id", "mode", "roles", "depends_on"} <= set(stage)
-        for stage in plan.get("stages") or []
-    ):
-        raise APError("Invalid agent plan stage contract.")
+    if missing:
+        raise APError("Invalid agent plan contract: " + ", ".join(missing))
+    _validate_orchestration_contract("agentPlan", plan)
     return plan
 
 
@@ -4794,8 +5093,6 @@ def _mechanism_plan(
             required.append("task_lifecycle")
         if parallel_writers > 1:
             required.append("parallel_fixers")
-        else:
-            optional.append("parallel_fixers")
         if review_required:
             required.append("independent_review")
         else:
@@ -4815,7 +5112,8 @@ def _mechanism_plan(
         "lifecycle_required": "task_lifecycle" in ordered,
         "rule": (
             "run required mechanisms; select optional mechanisms only when expected value exceeds "
-            "coordination cost; do not run forbidden mechanisms unless the user explicitly overrides"
+            "coordination cost; reclassify before changing writer count; do not run forbidden "
+            "mechanisms unless the user explicitly overrides"
         ),
     }
 
@@ -4834,6 +5132,7 @@ def _resolve_execution_plan(
     parallel_writers: int = 1,
     requested_task_kind: str = "",
     continue_direct: bool = False,
+    direct_claim_id: str = "",
 ) -> dict:
     impact = _impact_summary(
         cfg,
@@ -4851,6 +5150,7 @@ def _resolve_execution_plan(
     path_classification = _classify_paths(classification_inputs)
     path_categories = set(path_classification["categories"])
     intent_categories = _classify_intent(intent)
+    high_confidence_intent_categories = _high_confidence_intent_categories(intent)
     merged_categories = path_categories | set(intent_categories)
     classification = _classification_for_categories(merged_categories, len(classification_inputs))
     categories = set(classification["categories"])
@@ -4901,8 +5201,10 @@ def _resolve_execution_plan(
         "release_or_tooling",
     }
     default_high_path_categories: set[str] = set()
+    path_category_sets: list[set[str]] = []
     for path in classification_inputs:
         per_path = set(_classify_paths([path])["categories"])
+        path_category_sets.append(per_path)
         default_high_path_categories.update(
             per_path & {"db", "gateway", "prod_config", "release_or_tooling"}
         )
@@ -4911,6 +5213,13 @@ def _resolve_execution_plan(
                 per_path & {"auth", "payment", "file_transfer"}
             )
     intent_risk_candidates = sorted(set(intent_categories) & high_categories)
+    all_planned_code_paths_are_ui = bool(path_category_sets) and all(
+        "ui" in per_path or per_path <= {"docs", "test"}
+        for per_path in path_category_sets
+    )
+    default_high_intent_categories = set(high_confidence_intent_categories)
+    if all_planned_code_paths_are_ui:
+        default_high_intent_categories.difference_update({"auth", "payment", "file_transfer"})
     high_signals: list[str] = []
     if task_kind == "change" and default_high_path_categories and not docs_or_tests_only:
         high_signals.append(
@@ -4918,6 +5227,10 @@ def _resolve_execution_plan(
         )
     if task_kind == "change" and "high-risk" in rule_profiles:
         high_signals.append("matched gate rule with profile=high-risk")
+    if task_kind == "change" and default_high_intent_categories and not docs_or_tests_only:
+        high_signals.append(
+            "high-confidence risk intent: " + ", ".join(sorted(default_high_intent_categories))
+        )
     if high_signals:
         detected_profile = "high-risk"
         profile_reasons.extend(high_signals)
@@ -4981,14 +5294,28 @@ def _resolve_execution_plan(
     dirty_outside_plan = [
         path for path in dirty_paths if not _path_is_owned(path, normalized_planned_paths)
     ] if normalized_planned_paths else list(dirty_paths)
-    active_writer = _has_registered_active_task(repo)
+    registered_active_writer = _has_registered_active_task(repo)
     configured_isolation = _task_isolation(cfg)
     if continue_direct and task_kind != "change":
         raise APError("--continue-direct is valid only for task-kind=change")
     if continue_direct and not normalized_planned_paths:
         raise APError("--continue-direct requires every current task path via --planned-path")
+    direct_claim = (
+        _require_direct_claim(repo, direct_claim_id, normalized_planned_paths)
+        if continue_direct
+        else {}
+    )
+    runtime_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+    other_direct_claims = [
+        item
+        for item in _active_direct_claims(repo)
+        if _text(item.get("claim_id")) != _text(direct_claim_id)
+        and (not runtime_actor or _text(item.get("owner")) != runtime_actor)
+    ]
+    active_writer = bool(registered_active_writer or other_direct_claims)
     continued_direct = bool(
         continue_direct
+        and direct_claim
         and configured_isolation == "adaptive"
         and writer_count == 1
         and not active_writer
@@ -5046,6 +5373,7 @@ def _resolve_execution_plan(
         "task_kind": task_kind,
         "intent_categories": intent_categories,
         "intent_risk_candidates": intent_risk_candidates,
+        "high_confidence_intent_categories": sorted(high_confidence_intent_categories),
         "reasons": execution_reasons,
         "configured_profile": configured_profile,
         "requested_profile": requested_profile_value or None,
@@ -5100,6 +5428,11 @@ def cmd_classify(args: argparse.Namespace) -> None:
             intent_parts.append(path.read_text(encoding="utf-8"))
         except OSError as exc:
             raise APError(f"Cannot read --intent-file: {path}: {exc}") from exc
+    claim_direct = bool(getattr(args, "claim_direct", False))
+    continue_direct = bool(getattr(args, "continue_direct", False))
+    direct_claim_id = _text(getattr(args, "direct_claim", ""))
+    if claim_direct and continue_direct:
+        raise APError("--claim-direct and --continue-direct are mutually exclusive.")
     plan = _resolve_execution_plan(
         cfg,
         repo,
@@ -5111,8 +5444,19 @@ def cmd_classify(args: argparse.Namespace) -> None:
         intent="\n".join(part for part in intent_parts if part),
         parallel_writers=int(getattr(args, "writers", 1) or 1),
         requested_task_kind=_text(getattr(args, "task_kind", "")),
-        continue_direct=bool(getattr(args, "continue_direct", False)),
+        continue_direct=continue_direct,
+        direct_claim_id=_text(getattr(args, "direct_claim", "")),
     )
+    direct_claim: dict = {}
+    if claim_direct:
+        if plan["task_kind"] != "change" or plan["execution_mode"] != "direct":
+            raise APError("--claim-direct requires a clean adaptive single-writer change plan.")
+        direct_claim = _create_direct_claim(
+            repo,
+            cfg,
+            list(plan.get("planned_files") or []),
+            _actor_id(args, "claim_owner"),
+        )
     risk = {"micro": "P3", "standard": "P2", "high-risk": "P1"}[plan["profile"]]
     commands: list[str] = []
     if plan["needs_dd"]:
@@ -5121,6 +5465,15 @@ def cmd_classify(args: argparse.Namespace) -> None:
         **plan,
         "risk": risk,
         "recommended_commands": commands,
+        "direct_claim": (
+            {
+                "id": _text(direct_claim.get("claim_id")),
+                "base_sha": _text(direct_claim.get("base_sha")),
+                "owned_paths": list(direct_claim.get("owned_paths") or []),
+            }
+            if direct_claim
+            else None
+        ),
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -5152,6 +5505,8 @@ def cmd_classify(args: argparse.Namespace) -> None:
             "[classify] forbidden="
             + (", ".join(result["mechanism_plan"]["forbidden"]) or "(none)")
         )
+        if direct_claim:
+            print(f"[classify] direct_claim={direct_claim['claim_id']}")
         for stage in result["agent_plan"]["stages"]:
             print(
                 "[classify] agent_stage="
@@ -5163,6 +5518,39 @@ def cmd_classify(args: argparse.Namespace) -> None:
         for command in commands:
             print(f"[classify] command: {command}")
     _record_evidence(repo, cfg, "classify", "pass", result)
+
+
+def cmd_agent_contract_check(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    raw = _text(getattr(args, "payload", ""))
+    source = _text(getattr(args, "file", ""))
+    if source:
+        if source == "-":
+            raw = sys.stdin.read(1048577)
+        else:
+            path = Path(source)
+            if not path.is_absolute():
+                path = repo / path
+            try:
+                if path.stat().st_size > 1048576:
+                    raise APError("Agent contract payload is limited to 1 MiB.")
+                raw = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise APError(f"Cannot read agent contract payload: {path}: {exc}") from exc
+    if len(raw.encode("utf-8")) > 1048576:
+        raise APError("Agent contract payload is limited to 1 MiB.")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise APError(f"Agent contract payload is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise APError("Agent contract payload must be a JSON object.")
+    _validate_orchestration_contract(args.kind, payload)
+    result = {"valid": True, "kind": args.kind}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"[agent-contract-check] OK kind={args.kind}")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -6846,6 +7234,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "writer as its own task ID; use --writers only with classify for planning."
         )
     continue_direct = bool(getattr(args, "continue_direct", False))
+    direct_claim_id = _text(getattr(args, "direct_claim", ""))
     explicit_lifecycle = bool(
         getattr(args, "isolated", False)
         or getattr(args, "review_required", False)
@@ -6859,6 +7248,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         parallel_writers=writer_count,
         requested_task_kind="change",
         continue_direct=continue_direct,
+        direct_claim_id=direct_claim_id,
     )
     if continue_direct and preflight_plan["execution_mode"] != "direct":
         detail = ", ".join(preflight_plan["dirty_outside_plan"]) or "policy or active-writer conflict"
@@ -6889,6 +7279,16 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         _repo_lock(repo, "integration", timeout_s=timeout_s),
         _repo_lock(repo, "task-registry", timeout_s=timeout_s),
     ):
+        for claim in _active_direct_claims(repo):
+            if _text(claim.get("claim_id")) == direct_claim_id:
+                continue
+            claim_paths = list(claim.get("owned_paths") or [])
+            if _owned_paths_overlap(owned_paths, claim_paths):
+                raise APError(
+                    "Owned paths overlap an active direct claim held by "
+                    f"{_text(claim.get('owner')) or '(unknown)'}: "
+                    + ", ".join(claim_paths)
+                )
         if _read_json_object(_task_registry_path(repo, task_id)):
             raise APError(f"Task is already registered: {task_id}")
 
@@ -6938,6 +7338,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             parallel_writers=writer_count,
             requested_task_kind="change",
             continue_direct=continue_direct,
+            direct_claim_id=direct_claim_id,
         )
         if not plan["mechanism_plan"]["lifecycle_required"] and not explicit_lifecycle:
             raise APError(
@@ -7019,6 +7420,7 @@ def cmd_task_start(args: argparse.Namespace) -> None:
                 "common_submodule_config": {},
             }
             _save_task_manifest(repo, manifest)
+            _consume_direct_claim(repo, direct_claim_id)
             print(f"[task-start] task={task_id}")
             print("[task-start] execution_mode=direct")
             print(f"[task-start] branch={current_branch}")
@@ -7240,6 +7642,9 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                 raise APError("Independent review requires an explicit --reviewer identity.")
             if reviewer == _text(manifest.get("owner")):
                 raise APError("Independent reviewer identity must differ from the task lifecycle owner.")
+            writer = _text((manifest.get("writer_lease") or {}).get("holder"))
+            if reviewer == writer:
+                raise APError("Independent reviewer identity must differ from the current writer lease holder.")
         manifest["review"] = {
             "verdict": args.verdict,
             "diff_base": _text(manifest.get("base_sha")),
@@ -8195,10 +8600,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--intent")
     s.add_argument("--intent-file")
     s.add_argument("--task-kind", choices=sorted(_REQUESTED_TASK_KINDS), default="auto")
+    s.add_argument("--claim-direct", action="store_true")
+    s.add_argument("--claim-owner")
     s.add_argument("--continue-direct", action="store_true")
+    s.add_argument("--direct-claim")
     s.add_argument("--writers", type=int, default=1)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_classify)
+
+    s = sp.add_parser("agent-contract-check")
+    s.add_argument("--kind", choices=["assignment", "result", "agentPlan", "classify"], required=True)
+    source = s.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file")
+    source.add_argument("--payload")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_agent_contract_check)
 
     s = sp.add_parser("validation-map-check")
     s.add_argument("--base")
@@ -8305,6 +8721,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--isolated", action="store_true")
     s.add_argument("--review-required", action="store_true")
     s.add_argument("--continue-direct", action="store_true")
+    s.add_argument("--direct-claim")
     s.add_argument(
         "--force-lifecycle",
         action="store_true",

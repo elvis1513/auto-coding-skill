@@ -9,8 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.3 closes classification bypasses and keeps current-task changes direct
-without weakening dirty-workspace isolation. Version 4.1.2 made mechanisms required,
+Version 4.1.4 makes direct continuation provably pre-write, closes self-review and
+risk-classification gaps, validates Agent contracts, and makes tag publication
+idempotent. Version 4.1.3 closed classification bypasses. Version 4.1.2 made mechanisms required,
 model-selectable when beneficial, or forbidden for the current task. Version
 4.1.1 consolidated the 4.x delivery-first workflow into one canonical
 repository contract. Version 4.0 replaced the 3.x governance-first defaults with progressive
@@ -208,6 +209,19 @@ values, custom role agents, explicit model overrides, optional documents, and
 project-specific facts outside the managed ENGINEERING block. Root `AGENTS.md` is
 replaced as a whole; its previous content is archived under
 `docs/archive/workflow/` as historical, non-authoritative context.
+
+## What changed in 4.1.4
+
+- Added clean pre-write direct claims so broad paths cannot adopt unknown existing
+  dirt after development starts.
+- Prevented the current writer lease holder from approving its own diff and added
+  executable assignment/result contract validation.
+- Escalated high-confidence database, authorization, settlement, gateway, and
+  production intents while keeping ordinary UI work lightweight.
+- Made mechanism plans dependency-closed: parallel fixers require reclassification
+  with multiple writers and therefore require isolated worktrees.
+- Published from matching `v*` tags with idempotent npm registry checks and a final
+  registry verification.
 
 ## What changed in 4.1.3
 

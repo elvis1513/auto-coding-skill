@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.3 -->
+<!-- auto-coding-skill:managed-agents:start version=4.1.4 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -51,8 +51,8 @@ failure may continue in the same conversation/task without a second lifecycle.
 
 ## Git and parallel work
 
-- One writer in a clean checkout works directly without a lifecycle. On
-  reclassification, `--continue-direct` requires every dirty path to be declared.
+- One writer in a clean checkout works directly. If review may be needed, create a
+  claim before the first write; continuation requires that claim and exact paths.
 - Existing unrelated changes, another writer, or configured mandatory isolation
   requires a registered task branch/worktree.
 - Every delegated fixer or parallel writer owns a task ID/worktree, writer lease,
@@ -60,8 +60,7 @@ failure may continue in the same conversation/task without a second lifecycle.
 - Never let multiple writing agents share a checkout. Never restore, reset, stash,
   clean, overwrite, or commit unknown changes.
 - No diff means no commit, push, or temporary branch.
-- The main agent integrates in dependency order and removes only clean, safely
-  merged temporary worktrees and branches.
+- Main integrates in dependency order and removes only clean, merged temporary state.
 - Do not sync or upgrade while any registered task is active.
 
 ## Design, agents, and review
@@ -73,6 +72,8 @@ failure may continue in the same conversation/task without a second lifecycle.
   or key user-flow decisions.
 - Use read-only explorer/docs/browser agents only for independent questions.
 - Use parallel fixers only for bounded, dependency-free, non-overlapping units.
+- Reclassify before parallel fixers; single-writer plans grant no implicit writes.
+- Validate delegated assignment/result JSON with `agent-contract-check` before use.
 - Require fingerprinted review only for path/rule-confirmed high-risk,
   contract-crossing, parallel, or configured work; intent words are candidates only.
 - Review blocks only defects introduced or worsened in the promised scope.

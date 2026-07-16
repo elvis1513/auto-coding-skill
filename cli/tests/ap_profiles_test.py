@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -277,7 +278,9 @@ class AutoCodingProfileTests(unittest.TestCase):
         )
         self.assertFalse(plan["mechanism_plan"]["lifecycle_required"])
         self.assertIn("read_only_subagents", plan["mechanism_plan"]["optional_when_beneficial"])
+        self.assertNotIn("parallel_fixers", plan["mechanism_plan"]["optional_when_beneficial"])
         self.assertIn("task_lifecycle", plan["mechanism_plan"]["forbidden"])
+        self.assertIn("parallel_fixers", plan["mechanism_plan"]["forbidden"])
 
     def test_intent_only_classifies_read_only_change_and_terminal_work(self) -> None:
         repo, cfg = self.make_repo()
@@ -360,6 +363,12 @@ class AutoCodingProfileTests(unittest.TestCase):
 
     def test_continue_direct_accepts_only_declared_current_task_dirt(self) -> None:
         repo, cfg = self.make_repo()
+        claim = ap._create_direct_claim(
+            repo,
+            cfg,
+            ["src/widget.py"],
+            os.environ.get("CODEX_THREAD_ID") or "profile-test-owner",
+        )
         target = repo / "src" / "widget.py"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("task change\n", encoding="utf-8")
@@ -371,20 +380,32 @@ class AutoCodingProfileTests(unittest.TestCase):
             cfg,
             planned_paths=["src/widget.py"],
             continue_direct=True,
+            direct_claim_id=claim["claim_id"],
         )
         self.assertEqual("direct", continued["execution_mode"])
         self.assertTrue(continued["continued_direct"])
         self.assertEqual([], continued["dirty_outside_plan"])
 
         (repo / "unrelated.txt").write_text("other writer\n", encoding="utf-8")
-        blocked = self.plan(
-            repo,
-            cfg,
-            planned_paths=["src/widget.py"],
-            continue_direct=True,
-        )
-        self.assertEqual("isolated", blocked["execution_mode"])
-        self.assertEqual(["unrelated.txt"], blocked["dirty_outside_plan"])
+        with self.assertRaises(APError) as context:
+            self.plan(
+                repo,
+                cfg,
+                planned_paths=["src/widget.py"],
+                continue_direct=True,
+                direct_claim_id=claim["claim_id"],
+            )
+        self.assertIn("outside the clean direct claim", str(context.exception))
+
+    def test_continue_direct_requires_a_clean_pre_write_claim(self) -> None:
+        repo, cfg = self.make_repo()
+        (repo / "unknown.txt").write_text("pre-existing user change\n", encoding="utf-8")
+        with self.assertRaises(APError) as context:
+            ap._create_direct_claim(repo, cfg, ["."], "profile-test-owner")
+        self.assertIn("before the first write", str(context.exception))
+        with self.assertRaises(APError) as context:
+            self.plan(repo, cfg, planned_paths=["."], continue_direct=True)
+        self.assertIn("requires --direct-claim", str(context.exception))
 
     def test_risk_intent_is_candidate_while_paths_and_rules_control_escalation(self) -> None:
         repo, cfg = self.make_repo()
@@ -419,6 +440,38 @@ class AutoCodingProfileTests(unittest.TestCase):
         order = self.plan(repo, cfg, planned_paths=["backend/orders/sort_order.py"])
         self.assertNotIn("payment", order["categories"])
 
+    def test_high_confidence_intent_and_backend_login_escalate_without_ui_false_positive(self) -> None:
+        repo, cfg = self.make_repo()
+        for intent, category in [
+            ("修改数据库迁移", "db"),
+            ("修改后端鉴权权限", "auth"),
+            ("修改支付结算逻辑", "payment"),
+            ("修改生产网关配置", "gateway"),
+        ]:
+            with self.subTest(intent=intent):
+                plan = self.plan(repo, cfg, intent=intent)
+                self.assertEqual("high-risk", plan["profile"])
+                self.assertTrue(plan["review_required"])
+                self.assertIn(category, plan["high_confidence_intent_categories"])
+
+        backend_login = self.plan(
+            repo,
+            cfg,
+            planned_paths=["backend/login_handler.go"],
+            intent="修复登录处理",
+        )
+        self.assertEqual("high-risk", backend_login["profile"])
+        self.assertTrue(backend_login["review_required"])
+
+        login_ui = self.plan(
+            repo,
+            cfg,
+            planned_paths=["frontend/LoginPage.tsx"],
+            intent="修复登录页面跳转",
+        )
+        self.assertEqual("standard", login_ui["profile"])
+        self.assertFalse(login_ui["review_required"])
+
     def test_generated_agent_strategies_match_contract_schema(self) -> None:
         schema = json.loads(
             (REPO_ROOT / "src" / "auto-coding-skill" / "data" / "contracts" / "orchestration-v1.schema.json")
@@ -434,6 +487,50 @@ class AutoCodingProfileTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 plan = self.plan(repo, cfg, **kwargs)
                 self.assertIn(plan["agent_plan"]["strategy"], allowed)
+                ap._validate_orchestration_contract("classify", plan)
+
+    def test_agent_assignment_and_result_contracts_are_machine_enforced(self) -> None:
+        fingerprint = "a" * 64
+        assignment = {
+            "contract_version": 1,
+            "node_id": "reviewer-1",
+            "task_id": "T001",
+            "role": "reviewer",
+            "base_sha": "HEAD",
+            "scope": "review owned diff",
+            "depends_on": [],
+            "acceptance": ["review current fingerprint"],
+            "diff_base": "HEAD~1",
+            "diff_head": "HEAD",
+            "diff_fingerprint": fingerprint,
+            "owning_fixer": "fixer-1",
+        }
+        ap._validate_orchestration_contract("assignment", assignment)
+        self_review = dict(assignment, node_id="fixer-1")
+        with self.assertRaises(APError):
+            ap._validate_orchestration_contract("assignment", self_review)
+
+        result = {
+            "contract_version": 1,
+            "node_id": "reviewer-1",
+            "role": "reviewer",
+            "task_id": "T001",
+            "base_sha": "HEAD~1",
+            "status": "completed",
+            "summary": "reviewed",
+            "depends_on": [],
+            "owned_paths": [],
+            "changed_paths": [],
+            "diff_fingerprint": fingerprint,
+            "evidence": ["diff reviewed"],
+            "findings": [],
+            "verdict": "approved",
+            "risks": [],
+            "next_owner": "main",
+        }
+        ap._validate_orchestration_contract("result", result)
+        with self.assertRaises(APError):
+            ap._validate_orchestration_contract("result", dict(result, diff_fingerprint=""))
 
     def test_validation_routes_collect_all_commands_and_reject_unmapped_code(self) -> None:
         repo, cfg = self.make_repo()

@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "4.2.3",
+  "version": "4.2.4",
   "description": "CLI installer for a delivery-first .agents workflow with adaptive Git isolation, routed changed-scope validation, risk-based review, push completion, and safe cleanup.",
   "type": "module",
   "bin": {

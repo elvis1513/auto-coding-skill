@@ -1695,6 +1695,188 @@ class AutoCodingProfileTests(unittest.TestCase):
                 6,
             ),
             (
+                "typed-arrow-factory.ts",
+                [
+                    "const factory = (): (x: string) => { value: string } => {",
+                    "  const build = (value: string) => ({ value });",
+                    "  return build;",
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                4,
+            ),
+            (
+                "typed-generic-arrow-factory.ts",
+                [
+                    "const factory = (): <T>(x: T) => { value: T } => {",
+                    "  const build = <T>(value: T) => ({ value });",
+                    "  return build;",
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                4,
+            ),
+            (
+                "typed-constrained-generic-arrow.ts",
+                [
+                    "const factory = <T extends (x: string) => { value: string }>(cb: T): void => {",
+                    "  void cb;",
+                    "  return;",
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                4,
+            ),
+            (
+                "typed-defaulted-generic-arrow.ts",
+                [
+                    "const factory = <T = () => { value: string }>(cb?: T): void => {",
+                    "  void cb;",
+                    "  return;",
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                4,
+            ),
+            (
+                "typed-function.ts",
+                [
+                    "export async function listBudgetRanges(",
+                    "  scope: string,",
+                    "): Promise<BudgetRange[]> {",
+                    "  return request(scope);",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "typed-literal-function.ts",
+                [
+                    "export function buildValue(): {",
+                    "  value: string;",
+                    "} {",
+                    "  return { value: 'ready' };",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "typed-generic-constraint.ts",
+                [
+                    "export function constrained<T extends { kind: string }>(",
+                    "  value: T,",
+                    "): T {",
+                    "  return value;",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "typed-function-return.ts",
+                [
+                    "export function makeFactory(): (x: string) => { value: string } {",
+                    "  return value => ({ value });",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "typed-generic-function-return.ts",
+                [
+                    "export function makeGenericFactory(): <T>(x: T) => { value: T } {",
+                    "  return value => ({ value });",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "typed-conditional-return.ts",
+                [
+                    "export function choose<T>(",
+                    "  value: T,",
+                    "): T extends { kind: string } ? { matched: T } : { matched: never } {",
+                    "  return { matched: value } as never;",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "typed-keyof-return.ts",
+                [
+                    "export function key(): keyof { ready: boolean } {",
+                    "  return 'ready';",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "typed-predicate-return.ts",
+                [
+                    "export function isReady(value: unknown): value is { ready: true } {",
+                    "  return Boolean(value);",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "typed-multiline-generic-return.ts",
+                [
+                    "export function load(): Promise<",
+                    "  { value: string }",
+                    "> {",
+                    "  return Promise.resolve({ value: 'ready' });",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "typed-multiline-union-return.ts",
+                [
+                    "export function union():",
+                    "  | { kind: 'a' }",
+                    "  | { kind: 'b' }",
+                    "{",
+                    "  return { kind: 'a' };",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                6,
+            ),
+            (
+                "typed-commented-return.ts",
+                [
+                    "export function commented(): /* result */ { value: string } {",
+                    "  return { value: 'ready' };",
+                    "}",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
                 "same-indent-plus.ts",
                 [
                     "const sum = value => value",
@@ -1745,6 +1927,28 @@ class AutoCodingProfileTests(unittest.TestCase):
     def test_python_inline_suite_does_not_absorb_top_level_code(self) -> None:
         lines = ["def ready(): return True"] + [f"top_level_{index} = {index}" for index in range(200)]
         self.assertEqual([], ap._function_size_warnings("inline.py", lines, 120))
+
+    def test_multiline_arrow_declaration_has_one_size_finding(self) -> None:
+        lines = [
+            "const multi = (",
+            "  value: string,",
+            ") => {",
+            *[f"  const value_{index} = value;" for index in range(10)],
+            "};",
+        ]
+        warnings = ap._function_size_warnings("multi.ts", lines, 5)
+        self.assertEqual(1, len(warnings), warnings)
+        self.assertIn("multi.ts:1", warnings[0])
+
+    def test_same_line_fallback_uses_longest_callback(self) -> None:
+        lines = [
+            "consume(first => {}, second => {",
+            *[f"  const value_{index} = second;" for index in range(10)],
+            "});",
+        ]
+        warnings = ap._function_size_warnings("callbacks.ts", lines, 5)
+        self.assertEqual(1, len(warnings), warnings)
+        self.assertIn("callbacks.ts:1", warnings[0])
 
     def test_function_ranges_ignore_type_braces_regex_literals_and_prior_assignments(self) -> None:
         long_body = [f"  value_{index} := {index}" for index in range(130)]

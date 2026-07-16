@@ -85,7 +85,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.3", "engineering": "4.2.3"},
+    "managed_versions": {"agents": "4.2.4", "engineering": "4.2.4"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -1148,8 +1148,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.3":
-        workflow_cfg["skill_version"] = "4.2.3"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.4":
+        workflow_cfg["skill_version"] = "4.2.4"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1462,16 +1462,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.3\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.4\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.3.md"
+            archive = archive_dir / "AGENTS.pre-4.2.4.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.3-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.4-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -4445,18 +4445,20 @@ def _python_function_ranges(
     return sorted(ranges)
 
 
-def _find_arrow_line(
+def _find_arrow_locations(
     lines: list[str],
     start: int,
     deadline: Optional[float],
-) -> Optional[int]:
-    """Find a declaration's top-level arrow, ignoring arrows inside parameters."""
+) -> list[tuple[int, int]]:
+    """Find a declaration's top-level arrow candidates with exact columns."""
     state = "code"
     escaped = False
     regex_char_class = False
     paren_depth = 0
     bracket_depth = 0
     brace_depth = 0
+    angle_depth = 0
+    locations: list[tuple[int, int]] = []
     indent = len(lines[start]) - len(lines[start].lstrip())
     limit = min(len(lines), start + 200)
     equals = lines[start].find("=")
@@ -4467,8 +4469,10 @@ def _find_arrow_line(
         if line_index > start:
             stripped = line.strip()
             current_indent = len(line) - len(line.lstrip())
-            if stripped and current_indent <= indent and not (paren_depth or bracket_depth or brace_depth):
-                return None
+            if stripped and current_indent <= indent and not (
+                paren_depth or bracket_depth or brace_depth or angle_depth
+            ):
+                return locations
         char_index = equals + 1 if line_index == start and equals >= 0 else 0
         while char_index < len(line):
             char = line[char_index]
@@ -4526,25 +4530,32 @@ def _find_arrow_line(
                 bracket_depth += 1
             elif char == "]":
                 bracket_depth = max(0, bracket_depth - 1)
+            elif char == "<" and not (paren_depth or bracket_depth or brace_depth):
+                angle_depth += 1
+            elif char == ">" and angle_depth and not (paren_depth or bracket_depth or brace_depth):
+                angle_depth -= 1
             elif char == "{":
                 brace_depth += 1
             elif char == "}":
                 brace_depth = max(0, brace_depth - 1)
-            elif char == "=" and next_char == ">" and not (paren_depth or bracket_depth or brace_depth):
-                return line_index
-            elif char == ";" and not (paren_depth or bracket_depth or brace_depth):
-                return None
+            elif char == "=" and next_char == ">":
+                if not (paren_depth or bracket_depth or brace_depth or angle_depth):
+                    locations.append((line_index, char_index))
+                char_index += 2
+                continue
+            elif char == ";" and not (paren_depth or bracket_depth or brace_depth or angle_depth):
+                return locations
             char_index += 1
         if line_index > start:
             stripped = line.strip()
             current_indent = len(line) - len(line.lstrip())
-            if stripped and current_indent <= indent and not (paren_depth or bracket_depth or brace_depth):
-                return None
-    return None
+            if stripped and current_indent <= indent and not (paren_depth or bracket_depth or brace_depth or angle_depth):
+                return locations
+    return locations
 
 
-def _arrow_body_kind(lines: list[str], arrow_line: int) -> str:
-    arrow_column = lines[arrow_line].find("=>")
+def _arrow_body_kind(lines: list[str], arrow_location: tuple[int, int]) -> str:
+    arrow_line, arrow_column = arrow_location
     for line_index in range(arrow_line, min(len(lines), arrow_line + 20)):
         text = lines[line_index][arrow_column + 2 :] if line_index == arrow_line else lines[line_index]
         stripped = text.strip()
@@ -4556,10 +4567,7 @@ def _arrow_body_kind(lines: list[str], arrow_line: int) -> str:
 
 def _looks_like_return_type_brace(line: str, index: int) -> bool:
     prefix = line[:index].rstrip()
-    if re.search(r"\b(?:struct|interface)\s*$", prefix):
-        return True
-    close_paren = prefix.rfind(")")
-    return close_paren >= 0 and ":" in prefix[close_paren + 1 :]
+    return bool(re.search(r"\b(?:struct|interface)\s*$", prefix))
 
 
 def _brace_function_end(
@@ -4567,7 +4575,8 @@ def _brace_function_end(
     start: int,
     threshold: int,
     deadline: Optional[float],
-    arrow_line: Optional[int] = None,
+    arrow_location: Optional[tuple[int, int]] = None,
+    suffix: str = "",
 ) -> Optional[tuple[int, bool]]:
     depth = 0
     opened = False
@@ -4577,7 +4586,13 @@ def _brace_function_end(
     paren_depth = 0
     bracket_depth = 0
     type_brace_depth = 0
-    arrow_seen = arrow_line is None
+    arrow_seen = arrow_location is None
+    typescript_declaration = arrow_location is None and suffix in {".ts", ".tsx"}
+    ts_phase = "before_params"
+    ts_pre_angle_depth = ts_pre_brace_depth = 0
+    ts_type_angle_depth = ts_type_paren_depth = ts_type_bracket_depth = 0
+    ts_type_brace_depth = 0
+    ts_type_expects_operand = True
     limit = min(len(lines), start + threshold + 1)
 
     for line_index in range(start, limit):
@@ -4643,9 +4658,106 @@ def _brace_function_end(
                 char_index += 1
                 continue
             if char == "=" and next_char == ">":
-                if arrow_line is not None and line_index == arrow_line:
+                if arrow_location == (line_index, char_index):
                     arrow_seen = True
+                if typescript_declaration and ts_phase == "return_type":
+                    ts_type_expects_operand = True
                 char_index += 2
+                continue
+            if typescript_declaration and not opened:
+                if char in {"'", '"', "`"}:
+                    state = {"'": "single_quote", '"': "double_quote", "`": "backtick"}[char]
+                    escaped = False
+                    if ts_phase == "return_type":
+                        ts_type_expects_operand = False
+                    char_index += 1
+                    continue
+                if ts_phase == "before_params":
+                    if ts_pre_brace_depth > 0:
+                        if char == "{":
+                            ts_pre_brace_depth += 1
+                        elif char == "}":
+                            ts_pre_brace_depth -= 1
+                    elif char == "<":
+                        ts_pre_angle_depth += 1
+                    elif char == ">":
+                        ts_pre_angle_depth = max(0, ts_pre_angle_depth - 1)
+                    elif char == "{":
+                        ts_pre_brace_depth = 1
+                    elif char == "(" and ts_pre_angle_depth == 0:
+                        ts_phase = "params"
+                        paren_depth = 1
+                elif ts_phase == "params":
+                    if char == "(":
+                        paren_depth += 1
+                    elif char == ")":
+                        paren_depth = max(0, paren_depth - 1)
+                        if paren_depth == 0:
+                            ts_phase = "after_params"
+                elif ts_phase == "after_params":
+                    if char == ":":
+                        ts_phase = "return_type"
+                        ts_type_expects_operand = True
+                    elif char == "{":
+                        opened = True
+                        depth = 1
+                    elif char == ";":
+                        return None
+                elif ts_type_brace_depth > 0:
+                    if char == "{":
+                        ts_type_brace_depth += 1
+                    elif char == "}":
+                        ts_type_brace_depth -= 1
+                        if ts_type_brace_depth == 0:
+                            ts_type_expects_operand = False
+                elif char == "{":
+                    if (
+                        ts_type_angle_depth
+                        or ts_type_paren_depth
+                        or ts_type_bracket_depth
+                        or ts_type_expects_operand
+                    ):
+                        ts_type_brace_depth = 1
+                        ts_type_expects_operand = False
+                    else:
+                        opened = True
+                        depth = 1
+                elif char == "<":
+                    ts_type_angle_depth += 1
+                    ts_type_expects_operand = True
+                elif char == ">":
+                    ts_type_angle_depth = max(0, ts_type_angle_depth - 1)
+                    ts_type_expects_operand = False
+                elif char == "(":
+                    ts_type_paren_depth += 1
+                    ts_type_expects_operand = True
+                elif char == ")":
+                    ts_type_paren_depth = max(0, ts_type_paren_depth - 1)
+                    ts_type_expects_operand = False
+                elif char == "[":
+                    ts_type_bracket_depth += 1
+                    ts_type_expects_operand = True
+                elif char == "]":
+                    ts_type_bracket_depth = max(0, ts_type_bracket_depth - 1)
+                    ts_type_expects_operand = False
+                elif char in "|&?:,.=":
+                    ts_type_expects_operand = True
+                elif char.isalpha() or char in {"_", "$"}:
+                    word_match = re.match(r"[A-Za-z_$][\w$]*", line[char_index:])
+                    word = word_match.group(0) if word_match else char
+                    ts_type_expects_operand = word in {
+                        "abstract", "asserts", "extends", "in", "infer", "is",
+                        "keyof", "new", "readonly", "typeof", "unique",
+                    }
+                    char_index += len(word)
+                    continue
+                elif char.isdigit():
+                    ts_type_expects_operand = False
+                elif char == ";" and not (
+                    ts_type_angle_depth or ts_type_paren_depth or ts_type_bracket_depth
+                ):
+                    return None
+                char_index += 1
                 continue
             if char == "'":
                 state = "single_quote"
@@ -4669,14 +4781,14 @@ def _brace_function_end(
                     if not arrow_seen:
                         char_index += 1
                         continue
-                    if arrow_line is None and (paren_depth > 0 or bracket_depth > 0):
+                    if arrow_location is None and (paren_depth > 0 or bracket_depth > 0):
                         char_index += 1
                         continue
                     if type_brace_depth > 0:
                         type_brace_depth += 1
                         char_index += 1
                         continue
-                    if arrow_line is None and _looks_like_return_type_brace(line, char_index):
+                    if arrow_location is None and _looks_like_return_type_brace(line, char_index):
                         type_brace_depth = 1
                         char_index += 1
                         continue
@@ -4706,7 +4818,7 @@ _JSX_TAG_RE = re.compile(r"</?>|</?[A-Za-z][A-Za-z0-9_.:-]*(?:\s[^<>]*?)?/?>")
 def _expression_arrow_end(
     lines: list[str],
     start: int,
-    arrow_line: int,
+    arrow_location: tuple[int, int],
     threshold: int,
     deadline: Optional[float],
     suffix: str,
@@ -4720,7 +4832,7 @@ def _expression_arrow_end(
     jsx_mode = False
     jsx_depth = 0
     saw_jsx_tag = False
-    arrow_column = lines[arrow_line].find("=>")
+    arrow_line, arrow_column = arrow_location
 
     for line_index in range(arrow_line, limit):
         if (line_index - arrow_line) % 32 == 0:
@@ -4848,37 +4960,51 @@ def _function_size_warnings(
     if suffix == ".py":
         ranges = _python_function_ranges(lines, threshold, deadline)
     else:
-        candidates: dict[int, Optional[int]] = {}
+        candidates: dict[int, list[Optional[tuple[int, int]]]] = {}
+        claimed_arrow_lines: set[int] = set()
         for index, line in enumerate(lines):
             if index % 256 == 0:
                 _ensure_structure_deadline(deadline)
             if _ARROW_DECLARATION_RE.search(line):
-                arrow_line = _find_arrow_line(lines, index, deadline)
-                if arrow_line is not None:
-                    candidates[index] = arrow_line
+                arrow_locations = _find_arrow_locations(lines, index, deadline)
+                if arrow_locations:
+                    candidates[index] = list(arrow_locations)
+                    claimed_arrow_lines.update(location[0] for location in arrow_locations)
                     continue
-            if _ARROW_FUNCTION_BODY_RE.search(line):
-                candidates[index] = index
-            elif Path(path).name == "Jenkinsfile":
+            if Path(path).name == "Jenkinsfile":
                 if re.match(r"^\s*def\s+[A-Za-z_]\w*\s*\(", line):
-                    candidates[index] = None
+                    candidates[index] = [None]
             elif _FUNCTION_START_RE.search(line):
-                candidates[index] = None
+                candidates[index] = [None]
+            elif index not in claimed_arrow_lines:
+                arrow_matches = list(_ARROW_FUNCTION_BODY_RE.finditer(line))
+                if arrow_matches:
+                    candidates[index] = [(index, match.start()) for match in arrow_matches]
 
         ranges = []
-        for start, arrow_line in sorted(candidates.items()):
+        for start, arrow_locations in sorted(candidates.items()):
             _ensure_structure_deadline(deadline)
-            if arrow_line is not None and _arrow_body_kind(lines, arrow_line) == "expression":
-                end, truncated = _expression_arrow_end(
-                    lines, start, arrow_line, threshold, deadline, suffix
+            candidate_ranges: list[tuple[int, bool]] = []
+            for arrow_location in arrow_locations:
+                if arrow_location is not None and _arrow_body_kind(lines, arrow_location) == "expression":
+                    candidate_ranges.append(
+                        _expression_arrow_end(
+                            lines, start, arrow_location, threshold, deadline, suffix
+                        )
+                    )
+                    continue
+                result = _brace_function_end(
+                    lines,
+                    start,
+                    threshold,
+                    deadline,
+                    arrow_location=arrow_location,
+                    suffix=suffix,
                 )
-                ranges.append((start, end, truncated))
-                continue
-            result = _brace_function_end(
-                lines, start, threshold, deadline, arrow_line=arrow_line
-            )
-            if result is not None:
-                end, truncated = result
+                if result is not None:
+                    candidate_ranges.append(result)
+            if candidate_ranges:
+                end, truncated = max(candidate_ranges, key=lambda item: (item[0], item[1]))
                 ranges.append((start, end, truncated))
 
     warnings: list[str] = []

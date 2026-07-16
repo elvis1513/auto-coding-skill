@@ -9,7 +9,8 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.2.3 restores an explicit opt-in strict size-warning policy without
+Version 4.2.4 fixes TypeScript function-body detection after an explicit return
+type. Version 4.2.3 restores an explicit opt-in strict size-warning policy without
 changing the default, makes semicolon-terminated Java/Kotlin imports visible to
 project layer rules, and hardens function-range detection. Version 4.2.2 preserves
 project-owned risk and structure policy during upgrades, restores explicit full
@@ -288,6 +289,13 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.4
+
+- Fixed TypeScript/TSX named and arrow function ranges across generic constraints,
+  predicates, conditional/object/function return types, and multiple same-line
+  arrows. Exact arrow locations are evaluated with bounded longest-range selection,
+  so type arrows neither truncate real bodies nor create duplicate findings.
 
 ## What changed in 4.2.3
 

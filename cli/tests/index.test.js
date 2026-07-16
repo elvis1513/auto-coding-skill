@@ -186,6 +186,8 @@ function testInitFullyConvergesExistingProject() {
     .replace("concurrency:\n", "legacy_extra:\n  forbidden: true\n\nconcurrency:\n")
     .replace("# Project Facts", "# Obsolete workflow rules\n\nRun a full build every time.\n\n# Project Facts"));
   writeFile(path.join(repo, "docs", "legacy", "old-taskbook.md"), "historical\n");
+  writeFile(path.join(repo, "docs", "architecture", "adr", "ADR-0042-project-choice.md"), "# ADR-0042\n\nKeep me.\n");
+  writeFile(path.join(repo, "docs", "architecture", "structure-standard.md"), "# stale managed template\n");
   writeFile(path.join(repo, ".agents", "agents", "custom.toml"), 'name = "custom"\n');
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt"), "obsolete\n");
 
@@ -193,19 +195,22 @@ function testInitFullyConvergesExistingProject() {
   const installedDocs = listProjectFiles(path.join(repo, "docs"))
     .map(file => path.relative(repo, file).split(path.sep).join("/"))
     .sort();
-  assert(JSON.stringify(installedDocs) === JSON.stringify(exactDocs), `docs must converge exactly: ${installedDocs.join(", ")}`);
+  const expectedInstalledDocs = [...exactDocs, "docs/architecture/adr/ADR-0042-project-choice.md"].sort();
+  assert(JSON.stringify(installedDocs) === JSON.stringify(expectedInstalledDocs), `docs framework must converge while preserving valid artifacts: ${installedDocs.join(", ")}`);
   const converged = fs.readFileSync(engineering, "utf8");
   assert(converged.includes("preserved-project-secret"), "supported access values must survive init");
   assert(!converged.includes("legacy_extra") && !converged.includes("Run a full build every time"), "unknown fields and legacy workflow text must be removed");
   assert(!exists(path.join(repo, ".agents", "agents", "custom.toml")), "extra agents must be removed");
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt")), "extra Skill files must be removed");
   assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.1.8", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
+  assert(fs.readFileSync(path.join(repo, "docs", "architecture", "structure-standard.md"), "utf8").startsWith("# Project Structure Standard"), "managed templates must be replaced");
+  assert(fs.readFileSync(path.join(repo, "docs", "architecture", "adr", "ADR-0042-project-choice.md"), "utf8").includes("Keep me"), "valid ADR artifacts must survive init");
 
   run("node", [cli, "init"], { cwd: repo });
   const secondDocs = listProjectFiles(path.join(repo, "docs"))
     .map(file => path.relative(repo, file).split(path.sep).join("/"))
     .sort();
-  assert(JSON.stringify(secondDocs) === JSON.stringify(exactDocs), "repeated init must stay idempotent");
+  assert(JSON.stringify(secondDocs) === JSON.stringify(expectedInstalledDocs), "repeated init must stay idempotent");
 }
 
 function testInitRejectsMissingPythonRuntimeBeforeWrites() {
@@ -582,11 +587,11 @@ function testOptionalDocsAndLegacyToolsDoNotCauseDrift() {
   writeFile(path.join(repo, "docs", "tools", "autopipeline", "http_checks.py"), "# legacy copy\n");
   fillRequiredAccess(repo);
   const drift = run("node", [cli, "status", "--projects", repo, "--json"], { check: false });
-  assert(drift.status !== 0, "modified or extra docs must be reported as drift");
+  assert(drift.status !== 0, "extra runtime copies must be reported as drift");
   run("node", [cli, "init"], { cwd: repo });
   assert(!exists(path.join(repo, "docs", "tools", "autopipeline", "core.py")), "legacy runtime copy must be removed");
   assert(!exists(path.join(repo, "docs", "tools", "autopipeline", "http_checks.py")), "legacy HTTP copy must be removed");
-  assert(fs.readFileSync(path.join(repo, "docs", "interfaces", "api.md"), "utf8").startsWith("# API Contract"), "managed docs must be restored to the current template");
+  assert(fs.readFileSync(path.join(repo, "docs", "interfaces", "api.md"), "utf8") === "# Existing API\n", "mutable project docs must survive init");
   assertStatusOk(repo);
 }
 

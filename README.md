@@ -11,7 +11,7 @@ cost; read-only work and obvious small clean-checkout changes normally stay dire
 
 Version 4.1.8 makes `autocoding init` the idempotent install-and-upgrade entry:
 it replaces every managed constraint, migrates only schema-approved project
-configuration, and converges `docs/` to one exact framework. Version 4.1.7 made
+configuration, and converges `docs/` to one canonical directory framework. Version 4.1.7 made
 the Python runtime check, release verification, and tag publication environment
 reproducible while removing the unnecessary `requests` dependency. Version 4.1.4
 made direct continuation provably pre-write, closed self-review and
@@ -44,8 +44,9 @@ AGENTS.md (fully managed canonical repository contract)
 
 `autocoding init` also installs the exact shared documentation tree under
 `docs/{architecture,bugs,deployment,design,interfaces,project,reviews,testing}`.
-Files outside the canonical tree are archived under `.agents/archive/` and
-removed from active `docs/`. Re-running init is the complete upgrade operation;
+Managed templates are replaced, mutable project docs and valid ADR/DD/review/deploy
+records or domain API documents are preserved, and unrelated directories are archived under
+`.agents/archive/`. Re-running init is the complete upgrade operation;
 `sync` and project-local `upgrade` are compatibility commands, not required steps.
 
 Fill the project/Jenkins/GitLab/Nexus URL, username, and password fields under
@@ -219,8 +220,9 @@ fields. Removed content is archived outside active docs.
   separate sync/upgrade chain or `--force`.
 - Rebuilt ENGINEERING from the current schema, preserving only supported project
   values and removing unknown legacy fields and competing workflow text.
-- Made the generated docs file/directory set exact and identical across projects;
-  prior or extra content is archived under `.agents/archive/` before removal.
+- Made the generated docs directory topology and managed templates identical
+  across projects while preserving mutable project docs and valid durable records;
+  obsolete paths are archived under `.agents/archive/` before removal.
 - Made root AGENTS, managed agents, the Skill copy, and the project launcher fully
   converge during init.
 

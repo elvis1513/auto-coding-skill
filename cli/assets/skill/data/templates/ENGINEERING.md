@@ -111,7 +111,7 @@ The frontmatter contract is:
 - `risk`: project-specific signals that increase design/review depth but never
   expand the automatic local gate.
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.
-- `docs`: locations inside the exact managed documentation framework.
+- `docs`: locations inside the managed documentation directory framework.
 
 Run `python3 docs/tools/autopipeline/ap.py doctor` after changing frontmatter.
 Do not put competing delivery flows, agent roles, lifecycle rules, gate semantics,

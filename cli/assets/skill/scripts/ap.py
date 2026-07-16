@@ -823,6 +823,27 @@ def _converged_engineering_document(repo: Path, template_path: Path) -> str:
     return f"---\n{dumped}\n---\n{template_body.lstrip()}"
 
 
+_MANAGED_FRAMEWORK_DOCS = {
+    "docs/architecture/structure-standard.md",
+    "docs/architecture/adr/_TEMPLATE-ADR.md",
+    "docs/deployment/deploy-records/_TEMPLATE-DEPLOY-RECORD.md",
+    "docs/design/_TEMPLATE-DD.md",
+    "docs/reviews/_TEMPLATE-REVIEW.md",
+}
+
+_PROJECT_ARTIFACT_PATTERNS = (
+    "docs/architecture/adr/ADR-*.md",
+    "docs/deployment/deploy-records/*.md",
+    "docs/design/*.md",
+    "docs/interfaces/api-*.md",
+    "docs/reviews/*.md",
+)
+
+
+def _is_allowed_project_doc(rel: Path) -> bool:
+    return any(rel.match(pattern) for pattern in _PROJECT_ARTIFACT_PATTERNS)
+
+
 def cmd_project_converge(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
@@ -884,10 +905,11 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
     for rel, canonical in sorted(templates_for("all").items()):
         target = repo / rel
         existing = target.read_text(encoding="utf-8") if target.exists() else ""
-        if existing == canonical:
+        managed = rel in _MANAGED_FRAMEWORK_DOCS
+        if existing and (not managed or existing == canonical):
             continue
         if existing:
-            archive_previous(target, existing, "previous generated documentation")
+            archive_previous(target, existing, "previous managed documentation template")
         actions.append({"action": "create" if not existing else "replace", "path": rel})
         if args.write:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -904,7 +926,7 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
             if not candidate.is_file() and not candidate.is_symlink():
                 continue
             rel = candidate.relative_to(repo)
-            if rel in allowed_docs:
+            if rel in allowed_docs or _is_allowed_project_doc(rel):
                 continue
             archive_extra(candidate, "removed from the exact docs framework")
             actions.append({"action": "delete", "path": rel.as_posix()})

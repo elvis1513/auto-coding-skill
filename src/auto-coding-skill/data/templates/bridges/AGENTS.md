@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.2 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.3 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -111,10 +111,10 @@ failure may continue in the same conversation/task without a second lifecycle.
   `light-gate` first. A strict Git-local PASS receipt may be reused only while the
   content/index, base, scope, route/command plan, and writer lease still match.
   Unregistered clean serial work runs `light-gate` before normal Git closure.
-- The final gate defaults to 120 seconds per command and 180 seconds total. A
-  project may raise either budget for a measured affected-scope check, and may set
-  a smaller `timeout_seconds` on an individual route. A timeout should narrow the
-  route; never expand or retry it as a full gate.
+- Final gate budgets are 120 seconds per command and 180 total; projects may raise
+  measured budgets or set smaller route timeouts. Timeouts narrow, never expand,
+  scope. Size warnings block only with `structure.enforcement: blocking` and
+  `structure.block_warnings: true` (default `false`).
 - Do not proactively install dependencies. Only after the selected route fails
   because a repository-locked dependency is absent may it be restored once and
   only that route retried.

@@ -74,11 +74,10 @@ an exact Git-local PASS only while content, base, scope, routes, commands, and
 lease match. Matching manual passes are reusable; changed state is not.
 
 Every changed code/config path must map to a real project command. The runtime
-de-duplicates commands and enforces route, command, and total budgets. Defaults
-are 120 seconds per command and 180 total; projects may raise them for a measured
-affected-scope check. Timeouts should narrow the route, never trigger a full build.
-Focused test/fix/retest loops remain allowed before the final gate. Commands inherit
-the caller's PATH in non-login Bash; declare activation in the configured command.
+de-duplicates commands and enforces 120-second command and 180-second total
+budgets; measured routes may override them. Timeouts narrow, never expand, scope.
+Focused test/fix/retest remains allowed; commands inherit PATH in non-login Bash.
+Size warnings block only with `structure.enforcement: blocking` and `structure.block_warnings: true` (default `false`).
 
 Run full regression, Docker, Jenkins, deployment, browser/device writes, or target
 acceptance only as an explicit diagnostic. A requested just-pushed failure

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import contextlib
 import hashlib
@@ -84,7 +85,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.2", "engineering": "4.2.2"},
+    "managed_versions": {"agents": "4.2.3", "engineering": "4.2.3"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -989,7 +990,11 @@ def _converged_engineering_document(repo: Path, template_path: Path) -> str:
         value = current_structure.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             converged["structure"][key] = value
-    for key in ("require_reuse_search", "block_new_responsibility_in_large_file"):
+    for key in (
+        "require_reuse_search",
+        "block_new_responsibility_in_large_file",
+        "block_warnings",
+    ):
         value = current_structure.get(key)
         if isinstance(value, bool):
             converged["structure"][key] = value
@@ -1143,8 +1148,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.2":
-        workflow_cfg["skill_version"] = "4.2.2"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.3":
+        workflow_cfg["skill_version"] = "4.2.3"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1457,16 +1462,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.2\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.3\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.2.md"
+            archive = archive_dir / "AGENTS.pre-4.2.3.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.2-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.3-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -4138,16 +4143,27 @@ _TEXT_SOURCE_FILENAMES = {
     "tsconfig.json",
 }
 _FUNCTION_START_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:async\s+)?(?:def|function|func)\s+[A-Za-z_][\w]*\b"
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:def|function)\s+[A-Za-z_][\w]*\b"
+    r"|^\s*func\s+(?:\([^)]*\)\s*)?[A-Za-z_][\w]*\b"
     r"|^\s*(?:public|private|protected|static|final|async|\s)+\s*[\w<>\[\], ?]+\s+[A-Za-z_]\w*\s*\([^;]*\)\s*\{"
-    r"|^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_]\w*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"
+    r"|^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_]\w*\s*=\s*(?:async\s+)?"
+    r"(?:\([^)]*\)|[A-Za-z_]\w*)\s*(?::\s*[^=]+)?=>"
 )
+_ARROW_DECLARATION_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_]\w*\s*=\s*(?:async\s+)?"
+)
+_ARROW_FUNCTION_BODY_RE = re.compile(r"=>\s*(?::\s*[^=]+)?\{")
 _IMPORT_PATTERNS = [
     re.compile(r"^\s*import\s+(?:.+?\s+from\s+)?[\"']([^\"']+)[\"']"),
     re.compile(r"\brequire\(\s*[\"']([^\"']+)[\"']\s*\)"),
     re.compile(r"\bimport\(\s*[\"']([^\"']+)[\"']\s*\)"),
     re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b"),
-    re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)(?:\s+as\s+\w+)?\s*$"),
+    re.compile(
+        r"^\s*import\s+(?:static\s+)?"
+        r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\.\*)?)"
+        r"(?:\s+as\s+[A-Za-z_]\w*)?\s*;?\s*"
+        r"(?://.*|/\*.*)?$"
+    ),
     re.compile(r"^\s*import\s+[\"']([^\"']+)[\"']\s*$"),
     re.compile(r"^\s*[\"']([^\"']+/[^\"']*)[\"']\s*$"),
 ]
@@ -4349,19 +4365,531 @@ def _added_lines_by_path(repo: Path, base_ref: str = "") -> dict[str, int]:
     return added
 
 
-def _function_size_warnings(path: str, lines: list[str], threshold: int) -> list[str]:
+def _ensure_structure_deadline(deadline: Optional[float]) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise APError("Final changed-scope gate timed out during structure check.")
+
+
+def _looks_like_regex_start(line: str, index: int) -> bool:
+    prefix = line[:index].rstrip()
+    if not prefix:
+        return True
+    if prefix.endswith(("=", "(", "[", "{", ",", ":", ";", "!", "?", "=>")):
+        return True
+    return bool(re.search(r"\b(?:return|case|throw|yield)\s*$", prefix))
+
+
+def _python_function_end(
+    lines: list[str],
+    start: int,
+    threshold: int,
+    deadline: Optional[float],
+) -> tuple[int, bool]:
+    """Best-effort range for temporarily invalid Python during an edit."""
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    limit = min(len(lines), start + threshold + 1)
+    body_start: Optional[int] = None
+    for index in range(start, limit):
+        if (index - start) % 32 == 0:
+            _ensure_structure_deadline(deadline)
+        header = re.search(r"\)\s*(?:->\s*.*?)?\s*:", lines[index])
+        if not header:
+            continue
+        tail = lines[index][header.end() :].strip()
+        if tail and not tail.startswith("#"):
+            return index + 1, False
+        body_start = index + 1
+        break
+    if body_start is None:
+        return limit, limit < len(lines)
+
+    end = body_start
+    for index in range(body_start, limit):
+        if (index - body_start) % 32 == 0:
+            _ensure_structure_deadline(deadline)
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current_indent = len(lines[index]) - len(lines[index].lstrip())
+        if current_indent <= indent:
+            return end, False
+        end = index + 1
+    return limit if limit < len(lines) else end, limit < len(lines)
+
+
+def _python_function_ranges(
+    lines: list[str],
+    threshold: int,
+    deadline: Optional[float],
+) -> list[tuple[int, int, bool]]:
+    _ensure_structure_deadline(deadline)
+    try:
+        tree = ast.parse("\n".join(lines))
+    except (SyntaxError, ValueError):
+        ranges = []
+        for start, line in enumerate(lines):
+            if not re.match(r"^\s*(?:async\s+)?def\s+[A-Za-z_]\w*\b", line):
+                continue
+            end, truncated = _python_function_end(lines, start, threshold, deadline)
+            ranges.append((start, end, truncated))
+        return ranges
+
+    _ensure_structure_deadline(deadline)
+    ranges = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        start = max(0, int(node.lineno) - 1)
+        end = int(getattr(node, "end_lineno", 0) or node.lineno)
+        ranges.append((start, end, False))
+    return sorted(ranges)
+
+
+def _find_arrow_line(
+    lines: list[str],
+    start: int,
+    deadline: Optional[float],
+) -> Optional[int]:
+    """Find a declaration's top-level arrow, ignoring arrows inside parameters."""
+    state = "code"
+    escaped = False
+    regex_char_class = False
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    limit = min(len(lines), start + 200)
+    equals = lines[start].find("=")
+    for line_index in range(start, limit):
+        if (line_index - start) % 32 == 0:
+            _ensure_structure_deadline(deadline)
+        line = lines[line_index]
+        if line_index > start:
+            stripped = line.strip()
+            current_indent = len(line) - len(line.lstrip())
+            if stripped and current_indent <= indent and not (paren_depth or bracket_depth or brace_depth):
+                return None
+        char_index = equals + 1 if line_index == start and equals >= 0 else 0
+        while char_index < len(line):
+            char = line[char_index]
+            next_char = line[char_index + 1] if char_index + 1 < len(line) else ""
+            if state == "block_comment":
+                if char == "*" and next_char == "/":
+                    state = "code"
+                    char_index += 2
+                    continue
+                char_index += 1
+                continue
+            if state == "regex":
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "[":
+                    regex_char_class = True
+                elif char == "]":
+                    regex_char_class = False
+                elif char == "/" and not regex_char_class:
+                    state = "code"
+                char_index += 1
+                continue
+            if state in {"single_quote", "double_quote", "backtick"}:
+                quote = {"single_quote": "'", "double_quote": '"', "backtick": "`"}[state]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    state = "code"
+                char_index += 1
+                continue
+            if char == "/" and next_char == "/":
+                break
+            if char == "/" and next_char == "*":
+                state = "block_comment"
+                char_index += 2
+                continue
+            if char == "/" and _looks_like_regex_start(line, char_index):
+                state = "regex"
+                regex_char_class = False
+                escaped = False
+                char_index += 1
+                continue
+            if char in {"'", '"', "`"}:
+                state = {"'": "single_quote", '"': "double_quote", "`": "backtick"}[char]
+                escaped = False
+            elif char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth = max(0, paren_depth - 1)
+            elif char == "[":
+                bracket_depth += 1
+            elif char == "]":
+                bracket_depth = max(0, bracket_depth - 1)
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth = max(0, brace_depth - 1)
+            elif char == "=" and next_char == ">" and not (paren_depth or bracket_depth or brace_depth):
+                return line_index
+            elif char == ";" and not (paren_depth or bracket_depth or brace_depth):
+                return None
+            char_index += 1
+        if line_index > start:
+            stripped = line.strip()
+            current_indent = len(line) - len(line.lstrip())
+            if stripped and current_indent <= indent and not (paren_depth or bracket_depth or brace_depth):
+                return None
+    return None
+
+
+def _arrow_body_kind(lines: list[str], arrow_line: int) -> str:
+    arrow_column = lines[arrow_line].find("=>")
+    for line_index in range(arrow_line, min(len(lines), arrow_line + 20)):
+        text = lines[line_index][arrow_column + 2 :] if line_index == arrow_line else lines[line_index]
+        stripped = text.strip()
+        if not stripped or stripped.startswith(("//", "/*", "*")):
+            continue
+        return "block" if stripped.startswith("{") else "expression"
+    return "expression"
+
+
+def _looks_like_return_type_brace(line: str, index: int) -> bool:
+    prefix = line[:index].rstrip()
+    if re.search(r"\b(?:struct|interface)\s*$", prefix):
+        return True
+    close_paren = prefix.rfind(")")
+    return close_paren >= 0 and ":" in prefix[close_paren + 1 :]
+
+
+def _brace_function_end(
+    lines: list[str],
+    start: int,
+    threshold: int,
+    deadline: Optional[float],
+    arrow_line: Optional[int] = None,
+) -> Optional[tuple[int, bool]]:
+    depth = 0
+    opened = False
+    state = "code"
+    escaped = False
+    regex_char_class = False
+    paren_depth = 0
+    bracket_depth = 0
+    type_brace_depth = 0
+    arrow_seen = arrow_line is None
+    limit = min(len(lines), start + threshold + 1)
+
+    for line_index in range(start, limit):
+        if (line_index - start) % 32 == 0:
+            _ensure_structure_deadline(deadline)
+        line = lines[line_index]
+        char_index = 0
+        while char_index < len(line):
+            char = line[char_index]
+            next_char = line[char_index + 1] if char_index + 1 < len(line) else ""
+
+            if state == "block_comment":
+                if char == "*" and next_char == "/":
+                    state = "code"
+                    char_index += 2
+                    continue
+                char_index += 1
+                continue
+            if state == "regex":
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "[":
+                    regex_char_class = True
+                elif char == "]":
+                    regex_char_class = False
+                elif char == "/" and not regex_char_class:
+                    state = "code"
+                char_index += 1
+                continue
+            if state in {"single_quote", "double_quote"}:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif (state == "single_quote" and char == "'") or (
+                    state == "double_quote" and char == '"'
+                ):
+                    state = "code"
+                char_index += 1
+                continue
+            if state == "backtick":
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "`":
+                    state = "code"
+                char_index += 1
+                continue
+
+            if char == "/" and next_char == "/":
+                break
+            if char == "/" and next_char == "*":
+                state = "block_comment"
+                char_index += 2
+                continue
+            if char == "/" and _looks_like_regex_start(line, char_index):
+                state = "regex"
+                regex_char_class = False
+                escaped = False
+                char_index += 1
+                continue
+            if char == "=" and next_char == ">":
+                if arrow_line is not None and line_index == arrow_line:
+                    arrow_seen = True
+                char_index += 2
+                continue
+            if char == "'":
+                state = "single_quote"
+                escaped = False
+            elif char == '"':
+                state = "double_quote"
+                escaped = False
+            elif char == "`":
+                state = "backtick"
+                escaped = False
+            elif not opened and char == "(":
+                paren_depth += 1
+            elif not opened and char == ")":
+                paren_depth = max(0, paren_depth - 1)
+            elif not opened and char == "[":
+                bracket_depth += 1
+            elif not opened and char == "]":
+                bracket_depth = max(0, bracket_depth - 1)
+            elif char == "{":
+                if not opened:
+                    if not arrow_seen:
+                        char_index += 1
+                        continue
+                    if arrow_line is None and (paren_depth > 0 or bracket_depth > 0):
+                        char_index += 1
+                        continue
+                    if type_brace_depth > 0:
+                        type_brace_depth += 1
+                        char_index += 1
+                        continue
+                    if arrow_line is None and _looks_like_return_type_brace(line, char_index):
+                        type_brace_depth = 1
+                        char_index += 1
+                        continue
+                opened = True
+                depth += 1
+            elif char == "}" and not opened and type_brace_depth > 0:
+                type_brace_depth -= 1
+            elif char == "}" and opened:
+                depth -= 1
+                if depth == 0:
+                    return line_index + 1, False
+            char_index += 1
+    if limit < len(lines):
+        return limit, True
+    return None
+
+
+_EXPRESSION_CONTINUATION_SUFFIXES = (
+    "?", ":", ".", ",", "+", "-", "*", "/", "%", "&&", "||", "??", "=>",
+)
+_EXPRESSION_CONTINUATION_PREFIXES = (
+    ".", "?.", "+", "-", "*", "/", "%", "&&", "||", "??", "?", ":", ",",
+)
+_JSX_TAG_RE = re.compile(r"</?>|</?[A-Za-z][A-Za-z0-9_.:-]*(?:\s[^<>]*?)?/?>")
+
+
+def _expression_arrow_end(
+    lines: list[str],
+    start: int,
+    arrow_line: int,
+    threshold: int,
+    deadline: Optional[float],
+    suffix: str,
+) -> tuple[int, bool]:
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    limit = min(len(lines), start + threshold + 1)
+    state = "code"
+    escaped = False
+    regex_char_class = False
+    paren_depth = bracket_depth = brace_depth = 0
+    jsx_mode = False
+    jsx_depth = 0
+    saw_jsx_tag = False
+    arrow_column = lines[arrow_line].find("=>")
+
+    for line_index in range(arrow_line, limit):
+        if (line_index - arrow_line) % 32 == 0:
+            _ensure_structure_deadline(deadline)
+        line = lines[line_index]
+        char_index = arrow_column + 2 if line_index == arrow_line else 0
+        visible: list[str] = []
+        top_level_semicolon = False
+        while char_index < len(line):
+            char = line[char_index]
+            next_char = line[char_index + 1] if char_index + 1 < len(line) else ""
+            if state == "block_comment":
+                if char == "*" and next_char == "/":
+                    state = "code"
+                    char_index += 2
+                    continue
+                char_index += 1
+                continue
+            if state == "regex":
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == "[":
+                    regex_char_class = True
+                elif char == "]":
+                    regex_char_class = False
+                elif char == "/" and not regex_char_class:
+                    state = "code"
+                char_index += 1
+                continue
+            if state in {"single_quote", "double_quote", "backtick"}:
+                quote = {"single_quote": "'", "double_quote": '"', "backtick": "`"}[state]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    state = "code"
+                char_index += 1
+                continue
+            if char == "/" and next_char == "/":
+                break
+            if char == "/" and next_char == "*":
+                state = "block_comment"
+                char_index += 2
+                continue
+            if char == "/" and _looks_like_regex_start(line, char_index):
+                state = "regex"
+                regex_char_class = False
+                escaped = False
+                visible.append(" ")
+                char_index += 1
+                continue
+            if char in {"'", '"', "`"}:
+                state = {"'": "single_quote", '"': "double_quote", "`": "backtick"}[char]
+                escaped = False
+                visible.append(" ")
+            else:
+                visible.append(char)
+                if char == "(":
+                    paren_depth += 1
+                elif char == ")":
+                    paren_depth = max(0, paren_depth - 1)
+                elif char == "[":
+                    bracket_depth += 1
+                elif char == "]":
+                    bracket_depth = max(0, bracket_depth - 1)
+                elif char == "{":
+                    brace_depth += 1
+                elif char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                elif char == ";" and not (paren_depth or bracket_depth or brace_depth):
+                    top_level_semicolon = True
+            char_index += 1
+
+        code = "".join(visible).strip()
+        if suffix in {".jsx", ".tsx"} and not jsx_mode and code.startswith("<") and not code.startswith(("<=", "<<")):
+            jsx_mode = True
+        if jsx_mode:
+            for match in _JSX_TAG_RE.finditer(code):
+                token = match.group(0)
+                saw_jsx_tag = True
+                if token.startswith("</"):
+                    jsx_depth = max(0, jsx_depth - 1)
+                elif token not in {"</>"} and not token.endswith("/>"):
+                    jsx_depth += 1
+
+        if paren_depth or bracket_depth or brace_depth or jsx_depth > 0:
+            continue
+        if top_level_semicolon:
+            return line_index + 1, False
+        if jsx_mode and saw_jsx_tag:
+            return line_index + 1, False
+
+        next_index = line_index + 1
+        while next_index < len(lines) and not lines[next_index].strip():
+            next_index += 1
+        if next_index >= len(lines):
+            return line_index + 1, False
+        next_text = lines[next_index].strip()
+        next_indent = len(lines[next_index]) - len(lines[next_index].lstrip())
+        if code.endswith(_EXPRESSION_CONTINUATION_SUFFIXES):
+            continue
+        if next_indent > indent:
+            continue
+        if next_text.startswith(_EXPRESSION_CONTINUATION_PREFIXES):
+            continue
+        if jsx_mode and next_text.startswith(("</", ">")):
+            continue
+        return line_index + 1, False
+
+    return limit, limit < len(lines)
+
+
+def _function_size_warnings(
+    path: str,
+    lines: list[str],
+    threshold: int,
+    deadline: Optional[float] = None,
+) -> list[str]:
     if threshold <= 0:
         return []
-    starts: list[int] = []
-    for index, line in enumerate(lines):
-        if _FUNCTION_START_RE.search(line):
-            starts.append(index)
+    suffix = Path(path).suffix.lower()
+    if suffix == ".py":
+        ranges = _python_function_ranges(lines, threshold, deadline)
+    else:
+        candidates: dict[int, Optional[int]] = {}
+        for index, line in enumerate(lines):
+            if index % 256 == 0:
+                _ensure_structure_deadline(deadline)
+            if _ARROW_DECLARATION_RE.search(line):
+                arrow_line = _find_arrow_line(lines, index, deadline)
+                if arrow_line is not None:
+                    candidates[index] = arrow_line
+                    continue
+            if _ARROW_FUNCTION_BODY_RE.search(line):
+                candidates[index] = index
+            elif Path(path).name == "Jenkinsfile":
+                if re.match(r"^\s*def\s+[A-Za-z_]\w*\s*\(", line):
+                    candidates[index] = None
+            elif _FUNCTION_START_RE.search(line):
+                candidates[index] = None
+
+        ranges = []
+        for start, arrow_line in sorted(candidates.items()):
+            _ensure_structure_deadline(deadline)
+            if arrow_line is not None and _arrow_body_kind(lines, arrow_line) == "expression":
+                end, truncated = _expression_arrow_end(
+                    lines, start, arrow_line, threshold, deadline, suffix
+                )
+                ranges.append((start, end, truncated))
+                continue
+            result = _brace_function_end(
+                lines, start, threshold, deadline, arrow_line=arrow_line
+            )
+            if result is not None:
+                end, truncated = result
+                ranges.append((start, end, truncated))
+
     warnings: list[str] = []
-    for pos, start in enumerate(starts):
-        end = starts[pos + 1] if pos + 1 < len(starts) else len(lines)
+    for start, end, truncated in ranges:
         size = end - start
-        if size > threshold:
-            warnings.append(f"{path}:{start + 1} function-like block has {size} lines (warn>{threshold})")
+        if size <= threshold:
+            continue
+        qualifier = "at least " if truncated else ""
+        warnings.append(
+            f"{path}:{start + 1} function-like block has {qualifier}{size} lines (warn>{threshold})"
+        )
     return warnings
 
 
@@ -5013,6 +5541,7 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     cfg = _load_cfg(repo)
     requested_scope = str(getattr(args, "scope", "") or "").strip().lower()
     base_ref = str(getattr(args, "base", "") or "")
+    deadline = getattr(args, "deadline", None)
     selected_scope = _select_structure_scope(cfg, repo, requested_scope, base_ref)
 
     structure_cfg = _structure_cfg(cfg)
@@ -5025,6 +5554,9 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     warn_function_lines = _int_config(structure_cfg.get("max_function_lines_warn"), 120)
     max_added_to_large = _int_config(structure_cfg.get("max_added_lines_to_large_file"), 80)
     block_large_growth = _bool_config(structure_cfg.get("block_new_responsibility_in_large_file"), True)
+    block_warnings = enforcement == "blocking" and _bool_config(
+        structure_cfg.get("block_warnings"), False
+    )
     layer_cfg = _layer_rules_config(structure_cfg)
     block_layer_violations = _bool_config(layer_cfg.get("block"), True)
 
@@ -5036,12 +5568,14 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     inspected = 0
 
     for path in paths:
+        _ensure_structure_deadline(deadline)
         lines = _read_text_lines(repo, path)
         if lines is None:
             continue
         inspected += 1
         line_count = len(lines)
         accepted_debt = _is_structure_accepted_debt(path, structure_cfg)
+        block_path_size_warnings = block_warnings and not accepted_debt
         if block_file_lines > 0 and line_count > block_file_lines:
             message = f"{path} has {line_count} lines (block>{block_file_lines}); split responsibilities before adding more work"
             if accepted_debt:
@@ -5049,7 +5583,11 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
             else:
                 blocking.append(message)
         elif warn_file_lines > 0 and line_count > warn_file_lines:
-            warnings.append(f"{path} has {line_count} lines (warn>{warn_file_lines}); prefer extraction before extending it")
+            message = (
+                f"{path} has {line_count} lines (warn>{warn_file_lines}); "
+                "prefer extraction before extending it"
+            )
+            (blocking if block_path_size_warnings else warnings).append(message)
 
         added_lines = added_by_path.get(path, 0)
         if (
@@ -5065,8 +5603,15 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
                 "extract a module/helper or document why this is intentionally co-located"
             )
 
-        warnings.extend(_function_size_warnings(path, lines, warn_function_lines))
+        function_warnings = _function_size_warnings(
+            path,
+            lines,
+            warn_function_lines,
+            deadline=deadline,
+        )
+        (blocking if block_path_size_warnings else warnings).extend(function_warnings)
         boundary_issues = _structure_boundary_issues(path, lines, structure_cfg)
+        _ensure_structure_deadline(deadline)
         if block_layer_violations:
             blocking.extend(boundary_issues)
         else:
@@ -5091,6 +5636,7 @@ def cmd_structure_check(args: argparse.Namespace) -> None:
     result = {
         "scope": selected_scope,
         "enforcement": enforcement,
+        "block_warnings": block_warnings,
         "inspected_files": inspected,
         "blocking": blocking,
         "warnings": warnings,
@@ -5136,6 +5682,7 @@ def _run_structure_check_for_gate(
             scope=selected_scope,
             base=base_ref,
             json=False,
+            deadline=deadline,
         )
     )
     return ["structure_check"]
@@ -7293,6 +7840,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     enforcement = _text(structure_cfg.get("enforcement")).lower()
     if enforcement and enforcement not in {"advisory", "blocking"}:
         validation_errors.append("structure.enforcement must be advisory or blocking")
+    raw_block_warnings = structure_cfg.get("block_warnings")
+    if "block_warnings" in structure_cfg and not isinstance(raw_block_warnings, bool):
+        validation_errors.append("structure.block_warnings must be a boolean")
+    elif raw_block_warnings is True and enforcement != "blocking":
+        advisories.append(
+            "structure.block_warnings has no effect unless structure.enforcement=blocking"
+        )
     gate_cfg = _gate_cfg(cfg)
     if "full_on" in gate_cfg:
         validation_errors.append("gate.full_on is legacy automatic full escalation; run ap.py upgrade")

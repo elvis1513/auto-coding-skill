@@ -9,10 +9,13 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.2.2 preserves project-owned risk and structure policy during upgrades,
-restores explicit full and final changed-scope structure enforcement, makes
-Reviewer assignments deadline-bound and directly executable, fixes task merge
-status semantics, and updates Jenkins/target diagnostics for the current
+Version 4.2.3 restores an explicit opt-in strict size-warning policy without
+changing the default, makes semicolon-terminated Java/Kotlin imports visible to
+project layer rules, and hardens function-range detection. Version 4.2.2 preserves
+project-owned risk and structure policy during upgrades, restores explicit full
+and final changed-scope structure enforcement, makes Reviewer assignments
+deadline-bound and directly executable, fixes task merge status semantics, and
+updates Jenkins/target diagnostics for the current
 `access.*` schema while retaining legacy fallback. Version 4.2.1 makes
 dirty/concurrent classification fail closed, bounds focused
 review latency, provides a complete Reviewer result template, preserves the
@@ -209,6 +212,10 @@ reuses that final gate. Run `light-gate` manually only for unregistered normal G
 closure or when explicitly requesting a fresh diagnostic pass. When project
 `structure.enabled` is true, the same final gate also runs the changed-scope
 structure check; `structure.enforcement: blocking` makes new violations fail.
+File/function size thresholds remain warnings by default. They are promoted to
+blocking findings only when a project sets both `structure.enforcement: blocking`
+and `structure.block_warnings: true`; the template default is `false`, so existing
+project behavior does not change merely by upgrading.
 
 The recommended final closure defaults are 120 seconds per command and 180
 seconds total. Projects may raise them for measured affected-scope checks or set
@@ -281,6 +288,18 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.3
+
+- Added the explicit `structure.block_warnings` policy with a default of `false`.
+  File/function size threshold findings become blocking only when the project also
+  sets `structure.enforcement: blocking`; advisory and default configurations keep
+  their existing warning-only behavior.
+- Recognized semicolon-terminated Java and Kotlin imports during structure checks,
+  so project-configured forbidden-import layer rules can enforce JVM boundaries.
+- Hardened function-range detection for Go receivers, Python suites, brace bodies,
+  and block/expression arrow functions. Scans are threshold-bounded, honor the
+  final Gate deadline, and ignore braces in comments and string literals.
 
 ## What changed in 4.2.2
 

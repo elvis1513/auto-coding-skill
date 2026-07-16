@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -1395,6 +1396,413 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.write_config(repo, cfg)
         with self.assertRaises(APError):
             ap.cmd_structure_check(args)
+
+    def test_structure_block_warnings_matrix(self) -> None:
+        cases = [
+            ("blocking", True, True),
+            ("blocking", False, False),
+            ("advisory", True, False),
+        ]
+        for enforcement, configured_block_warnings, should_block in cases:
+            with self.subTest(
+                enforcement=enforcement,
+                block_warnings=configured_block_warnings,
+            ):
+                cfg = base_config()
+                cfg["structure"] = {
+                    "enabled": True,
+                    "enforcement": enforcement,
+                    "block_warnings": configured_block_warnings,
+                    "max_file_lines_warn": 4,
+                    "max_file_lines_block": 50,
+                    "max_function_lines_warn": 4,
+                    "max_added_lines_to_large_file": 50,
+                    "layer_rules": {"enabled": False},
+                }
+                cfg["optimization"] = {"require_baseline_for_global_review": False}
+                repo, _ = self.make_repo("src/large.py", cfg)
+                (repo / "src" / "large.py").write_text(
+                    "def oversized():\n"
+                    "    value = 1\n"
+                    "    value += 1\n"
+                    "    value += 1\n"
+                    "    return value\n"
+                    "tail = 1\n",
+                    encoding="utf-8",
+                )
+                output = io.StringIO()
+                args = argparse.Namespace(
+                    repo=str(repo), scope="changed", base="", json=True
+                )
+                with mock.patch.object(ap, "_record_evidence"), contextlib.redirect_stdout(output):
+                    if should_block:
+                        with self.assertRaisesRegex(APError, "2 blocking issue"):
+                            ap.cmd_structure_check(args)
+                    else:
+                        ap.cmd_structure_check(args)
+
+                result = json.loads(output.getvalue())
+                self.assertIs(should_block, result["block_warnings"])
+                if should_block:
+                    self.assertEqual(2, len(result["blocking"]))
+                else:
+                    self.assertEqual([], result["blocking"])
+                    self.assertEqual(2, len(result["warnings"]))
+
+    def test_structure_block_warnings_keeps_accepted_debt_size_findings_advisory(self) -> None:
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "blocking",
+            "block_warnings": True,
+            "max_file_lines_warn": 4,
+            "max_file_lines_block": 50,
+            "max_function_lines_warn": 4,
+            "max_added_lines_to_large_file": 50,
+            "accepted_debt_paths": ["src/accepted.py"],
+            "layer_rules": {"enabled": False},
+        }
+        cfg["optimization"] = {"require_baseline_for_global_review": False}
+        repo, _ = self.make_repo("src/accepted.py", cfg)
+        (repo / "src" / "accepted.py").write_text(
+            "def accepted_debt():\n"
+            "    value = 1\n"
+            "    value += 1\n"
+            "    value += 1\n"
+            "    return value\n"
+            "tail = 1\n",
+            encoding="utf-8",
+        )
+        output = io.StringIO()
+        with mock.patch.object(ap, "_record_evidence"), contextlib.redirect_stdout(output):
+            ap.cmd_structure_check(
+                argparse.Namespace(
+                    repo=str(repo), scope="changed", base="", json=True
+                )
+            )
+
+        result = json.loads(output.getvalue())
+        self.assertIs(True, result["block_warnings"])
+        self.assertEqual([], result["blocking"])
+        self.assertEqual(2, len(result["warnings"]))
+
+    def test_changed_scope_light_gate_blocks_promoted_structure_warnings(self) -> None:
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "blocking",
+            "block_warnings": True,
+            "max_file_lines_warn": 3,
+            "max_file_lines_block": 50,
+            "max_function_lines_warn": 0,
+            "max_added_lines_to_large_file": 50,
+            "layer_rules": {"enabled": False},
+        }
+        cfg["optimization"] = {"require_baseline_for_global_review": False}
+        repo, _ = self.make_repo("src/warn-only.py", cfg)
+        (repo / "src" / "warn-only.py").write_text(
+            "one\ntwo\nthree\nfour\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(ap, "_record_evidence"):
+            with self.assertRaisesRegex(APError, "structure-check failed"):
+                ap.cmd_light_gate(
+                    argparse.Namespace(
+                        repo=str(repo),
+                        scope="changed",
+                        profile="",
+                        mode="dev",
+                        base="",
+                        explain=False,
+                    )
+                )
+
+    def test_doctor_validates_structure_block_warnings_type_and_advises_on_no_effect(self) -> None:
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "blocking",
+            "block_warnings": "true",
+        }
+        repo, _ = self.make_repo(config=cfg)
+        with self.assertRaisesRegex(
+            APError,
+            "structure.block_warnings must be a boolean",
+        ):
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "advisory",
+            "block_warnings": True,
+        }
+        repo, _ = self.make_repo(config=cfg)
+        output = io.StringIO()
+        with mock.patch.object(ap, "_record_evidence"), contextlib.redirect_stdout(output):
+            ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
+        self.assertIn(
+            "structure.block_warnings has no effect unless structure.enforcement=blocking",
+            output.getvalue(),
+        )
+        self.assertIn("[doctor] OK", output.getvalue())
+
+    def test_java_and_kotlin_semicolon_imports_trigger_layer_rules(self) -> None:
+        structure_cfg = {
+            "layer_rules": {
+                "enabled": True,
+                "block": True,
+                "rules": [
+                    {
+                        "name": "domain",
+                        "paths": ["src/domain/**"],
+                        "forbidden_imports": ["**/infrastructure/**"],
+                    }
+                ],
+            }
+        }
+        for suffix in ["java", "kt"]:
+            for import_line in [
+                "import com.example.infrastructure.SecretStore;",
+                "import com.example.infrastructure.SecretStore; // boundary",
+                "import com.example.infrastructure.SecretStore; /* boundary */",
+                "import com.example.infrastructure.SecretStore; /* boundary",
+                "import com.example.infrastructure.SecretStore; /* boundary */ // trailing",
+            ]:
+                with self.subTest(suffix=suffix, import_line=import_line):
+                    path = f"src/domain/Order.{suffix}"
+                    issues = ap._structure_boundary_issues(
+                        path,
+                        [
+                            "package com.example.domain;",
+                            import_line,
+                            "",
+                            "class Order {}",
+                        ],
+                        structure_cfg,
+                    )
+                    self.assertEqual(1, len(issues))
+                    self.assertIn("layer 'domain'", issues[0])
+                    self.assertIn("com.example.infrastructure.SecretStore", issues[0])
+
+    def test_function_ranges_follow_language_syntax(self) -> None:
+        fixtures = [
+            (
+                "repository.go",
+                [
+                    "package sample",
+                    "",
+                    "func (r *Repository) Find() error {",
+                    "    if r == nil {",
+                    "        return nil",
+                    "    }",
+                    "    return nil",
+                    "}",
+                    "",
+                    "var after = 1",
+                ],
+                3,
+                6,
+            ),
+            (
+                "normalize.py",
+                [
+                    "def normalize(value):",
+                    "    if value:",
+                    "        return value",
+                    "    return None",
+                    "after = 1",
+                ],
+                1,
+                4,
+            ),
+            (
+                "block-arrow.ts",
+                [
+                    "const block = () => {",
+                    '  const literal = "}";',
+                    "  // } inside a comment is not the function end",
+                    "  if (literal) {",
+                    "    return literal;",
+                    "  }",
+                    '  return "";',
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                8,
+            ),
+            (
+                "expression-arrow.ts",
+                [
+                    "const expression = value =>",
+                    "  value",
+                    "    .trim()",
+                    "    .toLowerCase();",
+                    "const after = 1;",
+                ],
+                1,
+                4,
+            ),
+            (
+                "parenthesized-arrow.ts",
+                [
+                    "const expression = value => (",
+                    "  value",
+                    "    .trim()",
+                    "    .toLowerCase()",
+                    ");",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+            (
+                "conditional-arrow.ts",
+                [
+                    "const choose = value => value ?",
+                    "  first :",
+                    "  second;",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "view-arrow.tsx",
+                [
+                    "const View = () => <section>",
+                    "  <span>value</span>",
+                    "</section>;",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "multiline-params.ts",
+                [
+                    "const multi = (",
+                    "  value: string,",
+                    "  count: number,",
+                    ") => {",
+                    "  return value.repeat(count);",
+                    "};",
+                    "const after = 1;",
+                ],
+                1,
+                6,
+            ),
+            (
+                "same-indent-plus.ts",
+                [
+                    "const sum = value => value",
+                    "+ increment",
+                    "+ extra;",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "same-indent-chain.ts",
+                [
+                    "const normalized = value => value",
+                    ".trim()",
+                    ".toLowerCase();",
+                    "const after = 1;",
+                ],
+                1,
+                3,
+            ),
+            (
+                "conditional-jsx.tsx",
+                [
+                    "const Choice = value => (",
+                    "  value ?",
+                    "    <Accept /> :",
+                    "    <Reject />",
+                    ");",
+                    "const after = 1;",
+                ],
+                1,
+                5,
+            ),
+        ]
+        trailing_top_level_lines = [f"top_level_{index} = {index}" for index in range(20)]
+        for path, lines, start_line, expected_size in fixtures:
+            with self.subTest(path=path):
+                warnings = ap._function_size_warnings(
+                    path,
+                    lines + trailing_top_level_lines,
+                    expected_size - 1,
+                )
+                self.assertEqual(1, len(warnings))
+                self.assertIn(f"{path}:{start_line}", warnings[0])
+                self.assertIn(f"has {expected_size} lines", warnings[0])
+
+    def test_python_inline_suite_does_not_absorb_top_level_code(self) -> None:
+        lines = ["def ready(): return True"] + [f"top_level_{index} = {index}" for index in range(200)]
+        self.assertEqual([], ap._function_size_warnings("inline.py", lines, 120))
+
+    def test_function_ranges_ignore_type_braces_regex_literals_and_prior_assignments(self) -> None:
+        long_body = [f"  value_{index} := {index}" for index in range(130)]
+        go_lines = [
+            "package sample",
+            "func build() struct {",
+            "  Value string",
+            "} {",
+            *long_body,
+            "  return struct { Value string }{}",
+            "}",
+        ]
+        self.assertEqual(1, len(ap._function_size_warnings("builder.go", go_lines, 120)))
+
+        js_lines = [
+            "const block = () => {",
+            "  const matcher = /}/;",
+            *[f"  const value_{index} = {index};" for index in range(130)],
+            "};",
+        ]
+        self.assertEqual(1, len(ap._function_size_warnings("regex.js", js_lines, 120)))
+
+        separate_declarations = [
+            'const label = "ready"',
+            "const block = () => {",
+            "  return label;",
+            "};",
+        ]
+        self.assertEqual([], ap._function_size_warnings("separate.ts", separate_declarations, 3))
+
+    def test_function_range_scan_is_bounded_and_gate_deadline_is_enforced(self) -> None:
+        depth = 4000
+        lines = [f"function nested_{index}() {{" for index in range(depth)]
+        lines.extend("}" for _ in range(depth))
+        started = time.perf_counter()
+        warnings = ap._function_size_warnings("nested.js", lines, 10)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(depth - 5, len(warnings))
+        self.assertLess(elapsed, 3.0, f"function scan must stay threshold-bounded, got {elapsed:.3f}s")
+
+        cfg = base_config()
+        cfg["structure"] = {
+            "enabled": True,
+            "enforcement": "blocking",
+            "max_function_lines_warn": 10,
+            "layer_rules": {"enabled": False},
+        }
+        cfg["optimization"] = {"require_baseline_for_global_review": False}
+        repo, _ = self.make_repo("src/app.js", cfg)
+        with self.assertRaisesRegex(APError, "timed out during structure check"):
+            ap._run_structure_check_for_gate(
+                repo,
+                cfg,
+                "changed",
+                "",
+                deadline=time.monotonic() - 1,
+                command_timeout_s=30,
+            )
 
     def test_structure_scan_excludes_non_authoritative_agent_history_and_metadata(self) -> None:
         repo, _ = self.make_repo()

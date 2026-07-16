@@ -706,9 +706,9 @@ class AutoCodingProfileTests(unittest.TestCase):
     def test_legacy_rule_commands_never_run_in_automatic_gate(self) -> None:
         cfg = base_config()
         repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
-        quick_marker = repo / "quick-ran"
-        full_marker = repo / "full-ran"
-        build_marker = repo / "build-ran"
+        quick_marker = repo.parent / "quick-ran"
+        full_marker = repo.parent / "full-ran"
+        build_marker = repo.parent / "build-ran"
         cfg["commands"] = {
             "gate_changed": f"touch {quick_marker}",
             "gate_full": f"touch {full_marker}",

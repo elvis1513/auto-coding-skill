@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.1.9 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.0 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -58,6 +58,10 @@ failure may continue in the same conversation/task without a second lifecycle.
   requires a registered task branch/worktree.
 - Every delegated fixer or parallel writer owns a task ID/worktree, writer lease,
   non-overlapping `owned_paths`, and prerequisite commit SHAs.
+- Before its first commit, an active task may add explicit paths with
+  `task-scope-add`; the command checks leases/conflicts, only raises risk, and
+  invalidates prior review and final-gate state. Never restart a no-diff task just
+  to enlarge its declared scope.
 - Never let multiple writing agents share a checkout. Never restore, reset, stash,
   clean, overwrite, or commit unknown changes.
 - No diff means no commit, push, or temporary branch.
@@ -95,6 +99,10 @@ failure may continue in the same conversation/task without a second lifecycle.
   validation.
 - Focused tests may run and rerun during development. Run one final routed gate
   after the diff is stable.
+- For registered tasks, `commit-push` owns that final gate; do not run a separate
+  `light-gate` first. A strict Git-local PASS receipt may be reused only while the
+  content/index, base, scope, route/command plan, and writer lease still match.
+  Unregistered clean serial work runs `light-gate` before normal Git closure.
 - The final gate defaults to 120 seconds per command and 180 seconds total. A
   project may raise either budget for a measured affected-scope check, and may set
   a smaller `timeout_seconds` on an individual route. A timeout should narrow the

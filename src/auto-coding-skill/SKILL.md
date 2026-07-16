@@ -39,6 +39,8 @@ fingerprinted review, or when the user explicitly requests it:
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
   --owned-path src [--isolated] [--review-required] [--continue-direct --direct-claim <ID>]
+# Before the first commit, expand an active task instead of restarting it:
+python3 docs/tools/autopipeline/ap.py task-scope-add T0001 --owned-path config/new-scope
 # For review-required work, obtain the current fingerprint and approve it:
 python3 docs/tools/autopipeline/ap.py task-status T0001 --json
 python3 docs/tools/autopipeline/ap.py task-review T0001 \
@@ -54,10 +56,16 @@ with `agent-contract-check`; parallel fixers require reclassification with `--wr
 
 ## Close with the bounded routed gate
 
+For unregistered clean serial work, run the final gate and then use normal Git:
+
 ```bash
 python3 docs/tools/autopipeline/ap.py validation-map-check --path <PATH>
 python3 docs/tools/autopipeline/ap.py light-gate --scope changed --explain
 ```
+
+For a registered task, call only `commit-push`: it owns the final gate and reuses
+an exact Git-local PASS only while content, base, scope, routes, commands, and
+lease match. Matching manual passes are reusable; changed state is not.
 
 Every changed code/config path must map to a real project command. The runtime
 de-duplicates commands and enforces route, command, and total budgets. Defaults
@@ -71,9 +79,9 @@ diagnosis continues in the same task without inventing another lifecycle.
 
 ## Keep state and upgrades safe
 
-Machine task state, leases, fingerprints, and gate evidence stay in Git local
-state. Ordinary work creates no taskbook, closure, evidence JSONL, active-task,
-or design artifact. Terminal ledger reconciliation validates and commits once.
+Machine task state, leases, fingerprints, and gate evidence stay Git-local.
+Ordinary work creates no taskbook, closure, evidence JSONL, active-task, or
+design artifact. Terminal ledger reconciliation validates and commits once.
 
 ```bash
 autocoding init

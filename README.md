@@ -9,7 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.1.9 makes `autocoding init` verify the bounded managed installation after every install or upgrade:
+Version 4.2.0 makes registered closure resilient to normal Git staging, reuses
+an exact successful final gate, and lets an active task expand scope safely
+before its first commit. Version 4.1.9 makes `autocoding init` verify the bounded managed installation after every install or upgrade:
 it replaces every managed constraint, migrates only schema-approved project
 configuration, and converges `docs/` to one canonical directory framework. Version 4.1.7 made
 the Python runtime check, release verification, and tag publication environment
@@ -88,14 +90,16 @@ Clean serial work proceeds directly on the current branch with normal Git; it do
 not create machine lifecycle state. Use `task-start` only when classification
 requires isolation/review or the user explicitly requests lifecycle tracking:
 
-When a direct task materially changes scope after writing, reclassify with
-`--continue-direct` and repeat every current task `--planned-path`. Undeclared
-dirty paths, another writer, or mandatory isolation still selects a worktree. If
-the new plan requires review lifecycle, reuse `--continue-direct` on `task-start`.
+If a registered task discovers another path before its first commit, expand it
+with `task-scope-add` instead of finishing and restarting. Expansion is explicit,
+lease/conflict checked, risk-monotonic, and invalidates old review/gate state.
+Unregistered direct work should reclassify before writing outside its clean claim.
 
 ```bash
 python3 docs/tools/autopipeline/ap.py task-start T0001 \
   --owned-path backend/internal/orders --force-lifecycle
+python3 docs/tools/autopipeline/ap.py task-scope-add T0001 \
+  --owned-path config/orders
 python3 docs/tools/autopipeline/ap.py commit-push T0001 \
   --msg "T0001: fix order retry"
 ```
@@ -175,6 +179,10 @@ closure gate is limited to one stable-diff run. Full regression, Docker, builds,
 Jenkins, deployment, API verification, and target checks remain explicit
 diagnostics outside normal closure.
 
+Registered tasks call `commit-push` directly because it performs or strictly
+reuses that final gate. Run `light-gate` manually only for unregistered normal Git
+closure or when explicitly requesting a fresh diagnostic pass.
+
 The recommended final closure defaults are 120 seconds per command and 180
 seconds total. Projects may raise them for measured affected-scope checks or set
 a smaller `timeout_seconds` on a route. A timeout calls for a narrower route and
@@ -213,6 +221,18 @@ Init replaces the managed Skill, root `AGENTS.md`, managed agents, ENGINEERING
 schema/body, runtime launcher, and documentation framework. It preserves explicit
 model overrides and current values at supported project/access/concurrency/route
 fields. Removed content is archived outside active docs.
+
+## What changed in 4.2.0
+
+- Made `commit-push` preserve already staged deletions and mixed index/worktree
+  state, and made ownership/validation see both ends of a rename.
+- Added an exact per-worktree final-gate PASS receipt. Registered `commit-push`
+  reuses it only when content, index, base, scope, validation plan, command hashes,
+  and writer lease still match; staging or push retries no longer rerun a stable gate.
+- Added `task-scope-add` for conflict-checked, monotonic scope expansion before the
+  first commit. Expansion raises risk when necessary and invalidates review/gate state.
+- Clarified that registered tasks call `commit-push` directly; standalone
+  `light-gate` is for unregistered Git closure or an explicit fresh diagnostic.
 
 ## What changed in 4.1.9
 

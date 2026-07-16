@@ -360,6 +360,23 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         hook.chmod(0o755)
         return hook
 
+    def update_config(self, repo: Path, update) -> None:
+        engineering = repo / "docs" / "ENGINEERING.md"
+        raw = engineering.read_text(encoding="utf-8")
+        _, frontmatter, body = raw.split("---", 2)
+        config = yaml.safe_load(frontmatter)
+        update(config)
+        engineering.write_text(
+            "---\n"
+            + yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+            + "---"
+            + body,
+            encoding="utf-8",
+        )
+        git(repo, "add", "docs/ENGINEERING.md")
+        git(repo, "commit", "-qm", "update test workflow config")
+        git(repo, "push", "-q", "origin", "dev")
+
     def test_task_start_creates_external_worktree_manifest_and_status(self) -> None:
         _, repo, _ = self.make_repo()
         worktree = self.start_task(repo, "START-1")
@@ -430,6 +447,294 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("NOOP", noop.stdout)
         self.assertEqual(before, git_output(repo, "rev-parse", "HEAD"))
         self.assertFalse(self.registry_manifest_path(repo, "DIRECT-NOOP").exists())
+
+    def test_commit_push_accepts_already_staged_deletion(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "STAGED-DELETE", "shared.txt")
+        (worktree / "shared.txt").unlink()
+        git(worktree, "add", "-A", "--", "shared.txt")
+        self.approve_task(worktree, "STAGED-DELETE")
+
+        result = self.ap(
+            worktree,
+            "commit-push",
+            "STAGED-DELETE",
+            "--msg",
+            "STAGED-DELETE: remove shared file",
+        )
+
+        self.assertIn("commit-push", result.stdout)
+        self.assertNotEqual(
+            0,
+            git(
+                remote,
+                "cat-file",
+                "-e",
+                "refs/heads/codex/STAGED-DELETE:shared.txt",
+                check=False,
+            ).returncode,
+        )
+        self.assertEqual("", git_output(worktree, "status", "--short"))
+
+    def test_staged_rename_requires_ownership_of_both_paths(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "RENAME-DENY", "renamed.txt")
+        git(worktree, "mv", "shared.txt", "renamed.txt")
+        status = json.loads(self.ap(worktree, "task-status", "RENAME-DENY", "--json").stdout)
+        fingerprint = status["tasks"][0]["current_diff_fingerprint"]
+
+        denied = self.ap(
+            worktree,
+            "task-review",
+            "RENAME-DENY",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            fingerprint,
+            "--reviewer",
+            "test-reviewer",
+            check=False,
+        )
+
+        self.assertNotEqual(0, denied.returncode)
+        self.assertIn("shared.txt", denied.stdout + denied.stderr)
+        self.assert_remote_branch(remote, "codex/RENAME-DENY", False)
+
+        _, allowed_repo, allowed_remote = self.make_repo()
+        started = self.ap(
+            allowed_repo,
+            "task-start",
+            "RENAME-ALLOW",
+            "--base",
+            "origin/dev",
+            "--owned-path",
+            "shared.txt",
+            "--owned-path",
+            "renamed.txt",
+            "--isolated",
+            "--review-required",
+        )
+        self.assertIn("RENAME-ALLOW", started.stdout)
+        allowed_worktree = self.task_worktree(allowed_repo, "RENAME-ALLOW")
+        git(allowed_worktree, "mv", "shared.txt", "renamed.txt")
+        self.commit_push(allowed_worktree, "RENAME-ALLOW", "RENAME-ALLOW: rename shared file")
+        self.assertEqual(
+            "baseline",
+            git_output(allowed_remote, "show", "refs/heads/codex/RENAME-ALLOW:renamed.txt"),
+        )
+        self.assertNotEqual(
+            0,
+            git(
+                allowed_remote,
+                "cat-file",
+                "-e",
+                "refs/heads/codex/RENAME-ALLOW:shared.txt",
+                check=False,
+            ).returncode,
+        )
+
+    def test_commit_push_stages_mixed_index_and_worktree_state(self) -> None:
+        _, repo, remote = self.make_repo()
+        worktree = self.start_task(repo, "MIXED-STAGE")
+        (worktree / "shared.txt").write_text("staged-v1\n", encoding="utf-8")
+        git(worktree, "add", "shared.txt")
+        (worktree / "shared.txt").write_text("worktree-v2\n", encoding="utf-8")
+        (worktree / "new-file.txt").write_text("new\n", encoding="utf-8")
+
+        self.commit_push(worktree, "MIXED-STAGE", "MIXED-STAGE: commit final task state")
+
+        ref = "refs/heads/codex/MIXED-STAGE"
+        self.assertEqual("worktree-v2", git_output(remote, "show", f"{ref}:shared.txt"))
+        self.assertEqual("new", git_output(remote, "show", f"{ref}:new-file.txt"))
+
+    def test_final_gate_receipt_reuses_manual_pass_and_commit_retry(self) -> None:
+        root, repo, remote = self.make_repo()
+        gate_count = root / "gate-count"
+        self.update_config(
+            repo,
+            lambda config: config["commands"].update(
+                {"gate_changed": f"printf x >> {gate_count}"}
+            ),
+        )
+        worktree = self.start_task(repo, "GATE-REUSE", "shared.txt")
+        (worktree / "shared.txt").write_text("validated\n", encoding="utf-8")
+        self.ap(worktree, "light-gate", "--scope", "changed")
+        self.assertEqual("x", gate_count.read_text(encoding="utf-8"))
+        self.approve_task(worktree, "GATE-REUSE")
+        common_dir = Path(git_output(worktree, "rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = (worktree / common_dir).resolve()
+        fail_once = common_dir / "precommit-failed-once"
+        self.install_hook(
+            repo,
+            "pre-commit",
+            f'if [ ! -f "{fail_once}" ]; then touch "{fail_once}"; exit 1; fi\n',
+        )
+
+        first = self.ap(
+            worktree,
+            "commit-push",
+            "GATE-REUSE",
+            "--msg",
+            "GATE-REUSE: validated change",
+            check=False,
+        )
+        self.assertNotEqual(0, first.returncode)
+        self.assertIn("REUSED", first.stdout + first.stderr)
+        second = self.ap(
+            worktree,
+            "commit-push",
+            "GATE-REUSE",
+            "--msg",
+            "GATE-REUSE: validated change",
+        )
+        self.assertIn("REUSED", second.stdout + second.stderr)
+        self.assertEqual("x", gate_count.read_text(encoding="utf-8"))
+        self.assertEqual(
+            "validated",
+            git_output(remote, "show", "refs/heads/codex/GATE-REUSE:shared.txt"),
+        )
+
+    def test_final_gate_receipt_invalidates_when_content_changes(self) -> None:
+        root, repo, _ = self.make_repo()
+        gate_count = root / "gate-count-invalidated"
+        self.update_config(
+            repo,
+            lambda config: config["commands"].update(
+                {"gate_changed": f"printf x >> {gate_count}"}
+            ),
+        )
+        worktree = self.start_task(repo, "GATE-INVALIDATE", "shared.txt")
+        (worktree / "shared.txt").write_text("first\n", encoding="utf-8")
+        self.ap(worktree, "light-gate", "--scope", "changed")
+        (worktree / "shared.txt").write_text("second\n", encoding="utf-8")
+        self.approve_task(worktree, "GATE-INVALIDATE")
+
+        result = self.ap(
+            worktree,
+            "commit-push",
+            "GATE-INVALIDATE",
+            "--msg",
+            "GATE-INVALIDATE: use current content",
+        )
+
+        self.assertNotIn("REUSED", result.stdout + result.stderr)
+        self.assertEqual("xx", gate_count.read_text(encoding="utf-8"))
+
+    def test_task_scope_add_expands_direct_scope_idempotently(self) -> None:
+        _, repo, remote = self.make_repo("adaptive", require_review=False)
+        self.ap(
+            repo,
+            "task-start",
+            "SCOPE-DIRECT",
+            "--owned-path",
+            "shared.txt",
+            "--force-lifecycle",
+        )
+        expanded = self.ap(
+            repo,
+            "task-scope-add",
+            "SCOPE-DIRECT",
+            "--owned-path",
+            "future.txt",
+            "--json",
+        )
+        payload = json.loads(expanded.stdout)
+        self.assertEqual("expanded", payload["status"])
+        self.assertEqual(2, payload["scope_revision"])
+        noop = json.loads(
+            self.ap(
+                repo,
+                "task-scope-add",
+                "SCOPE-DIRECT",
+                "--owned-path",
+                "future.txt",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("noop", noop["status"])
+        self.assertEqual(2, noop["scope_revision"])
+
+        (repo / "future.txt").write_text("future\n", encoding="utf-8")
+        self.ap(
+            repo,
+            "commit-push",
+            "SCOPE-DIRECT",
+            "--msg",
+            "SCOPE-DIRECT: add future file",
+        )
+        self.assertEqual("future", git_output(remote, "show", "refs/heads/dev:future.txt"))
+
+    def test_task_scope_add_invalidates_review_and_blocks_conflicts(self) -> None:
+        _, repo, _ = self.make_repo()
+        first = self.start_task(repo, "SCOPE-FIRST", "shared.txt")
+        self.start_task(repo, "SCOPE-SECOND", "second-owned.txt")
+        (first / "shared.txt").write_text("reviewed\n", encoding="utf-8")
+        old_fingerprint = self.approve_task(first, "SCOPE-FIRST")
+
+        expanded = json.loads(
+            self.ap(
+                first,
+                "task-scope-add",
+                "SCOPE-FIRST",
+                "--owned-path",
+                "future.txt",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual(2, expanded["scope_revision"])
+        status = json.loads(self.ap(first, "task-status", "SCOPE-FIRST", "--json").stdout)["tasks"][0]
+        self.assertEqual("pending", status["review"]["verdict"])
+        self.assertNotEqual(old_fingerprint, status["current_diff_fingerprint"])
+        stale = self.ap(
+            first,
+            "task-review",
+            "SCOPE-FIRST",
+            "--verdict",
+            "approved",
+            "--diff-fingerprint",
+            old_fingerprint,
+            "--reviewer",
+            "test-reviewer",
+            check=False,
+        )
+        self.assertNotEqual(0, stale.returncode)
+
+        conflict = self.ap(
+            first,
+            "task-scope-add",
+            "SCOPE-FIRST",
+            "--owned-path",
+            "second-owned.txt",
+            check=False,
+        )
+        self.assertNotEqual(0, conflict.returncode)
+        self.assertIn("SCOPE-SECOND", conflict.stdout + conflict.stderr)
+
+    def test_task_scope_add_escalates_risk_without_moving_worktrees(self) -> None:
+        _, repo, _ = self.make_repo("adaptive", require_review=False)
+        self.ap(
+            repo,
+            "task-start",
+            "SCOPE-RISK",
+            "--owned-path",
+            "shared.txt",
+            "--force-lifecycle",
+        )
+        before = git_output(repo, "worktree", "list", "--porcelain")
+        expanded = json.loads(
+            self.ap(
+                repo,
+                "task-scope-add",
+                "SCOPE-RISK",
+                "--owned-path",
+                "backend/auth/token.go",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("high-risk", expanded["effective_profile"])
+        self.assertTrue(expanded["review_required"])
+        self.assertEqual(before, git_output(repo, "worktree", "list", "--porcelain"))
 
     def test_unnecessary_lifecycle_rejects_before_access_or_fetch_checks(self) -> None:
         _, repo, _ = self.make_repo("adaptive", require_review=False)
@@ -1782,13 +2087,13 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
 
     def test_gate_mutation_aborts_before_staging_or_commit(self) -> None:
         _, repo, remote = self.make_repo()
+        self.update_config(
+            repo,
+            lambda config: config["commands"].update(
+                {"gate_changed": "printf gate-change >> shared.txt"}
+            ),
+        )
         worktree = self.start_task(repo, "MUTATE-1")
-        engineering = worktree / "docs" / "ENGINEERING.md"
-        text = engineering.read_text(encoding="utf-8")
-        text = text.replace("gate_changed: 'true'", "gate_changed: 'printf gate-change >> shared.txt'")
-        engineering.write_text(text, encoding="utf-8")
-        git(worktree, "add", "docs/ENGINEERING.md")
-        git(worktree, "commit", "-qm", "configure mutating gate")
         before = git_output(worktree, "rev-parse", "HEAD")
         (worktree / "task.txt").write_text("task\n", encoding="utf-8")
         self.approve_task(worktree, "MUTATE-1")

@@ -1,15 +1,13 @@
 ---
 workflow:
-  skill_version: "4.1.9"
+  skill_version: "4.2.0"
   mode: "dev"
   profile: "auto"
   completion: "push"
-
 project:
   name: ""
   repo_root: "."
   stack: "generic"
-
 access:
   project:
     frontend:
@@ -38,7 +36,6 @@ access:
       url: ""
       username: ""
       password: ""
-
 concurrency:
   isolation: "adaptive"
   base_ref: ""
@@ -48,12 +45,10 @@ concurrency:
   cleanup_merged: true
   delete_remote_branch: true
   disposable_ignored: []
-
 commands:
   # Optional convenience command. Define the project-native fast commands used
   # by validation.routes; sync fills this only for package.json test:changed.
   project_fast: ""
-
 validation:
   on_unmapped: "error"
   # Recommended fast defaults. Raise only for a measured affected-scope check;
@@ -63,10 +58,8 @@ validation:
   # Initialization must replace this with real path-to-command mappings. Empty
   # routes intentionally fail closed for code/config changes.
   routes: []
-
 risk:
   rules: []
-
 structure:
   enabled: true
   enforcement: "advisory"
@@ -76,12 +69,10 @@ structure:
     enabled: true
     block: false
     rules: []
-
 optimization:
   completion_policy: "no-new-debt"
   require_baseline_for_global_review: false
   report_accepted_debt_as_findings: false
-
 docs:
   framework: "engineering-centered"
   design_dir: "docs/design"
@@ -90,17 +81,12 @@ docs:
   api_doc: "docs/interfaces/api.md"
   api_change_log: "docs/interfaces/api-change-log.md"
 ---
-
 # Engineering Configuration and Project Facts
-
-<!-- auto-coding-skill:managed-workflow:start version=4.1.9 -->
-
+<!-- auto-coding-skill:managed-workflow:start version=4.2.0 -->
 Root `AGENTS.md` is the single shared behavioral protocol. The installed
 `SKILL.md` contains invocation guidance. This file is the exact-schema source for
 project workflow configuration and access values that neither file can infer.
-
 The frontmatter contract is:
-
 - `workflow`: installed version and push-completion mode.
 - `access`: required project, Jenkins, GitLab, and Nexus access values.
 - `concurrency`: target branch and adaptive isolation settings.
@@ -112,16 +98,12 @@ The frontmatter contract is:
   expand the automatic local gate.
 - `structure` and `optimization`: advisory architecture and no-new-debt policy.
 - `docs`: locations inside the managed documentation directory framework.
-
 Run `python3 docs/tools/autopipeline/ap.py doctor` after changing frontmatter; it
 also performs the bounded local managed-install integrity check.
 Do not put competing delivery flows, agent roles, lifecycle rules, gate semantics,
 or completion rules outside this managed block.
-
 <!-- auto-coding-skill:managed-workflow:end -->
-
 # Project Facts Location
-
 Keep durable project facts in the installed `docs/project/` files. Do not append
 workflow rules or additional sections here; initialization owns this document's
 schema and body.

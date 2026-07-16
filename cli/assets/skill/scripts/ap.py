@@ -44,10 +44,12 @@ _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
 _RECOMMENDED_FINAL_COMMAND_SECONDS = 120.0
 _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
+_FINAL_GATE_CACHE_SCHEMA = 1
+_FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.1.9", "engineering": "4.1.9"},
+    "managed_versions": {"agents": "4.2.0", "engineering": "4.2.0"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -960,8 +962,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.1.9":
-        workflow_cfg["skill_version"] = "4.1.9"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.0":
+        workflow_cfg["skill_version"] = "4.2.0"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1274,16 +1276,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.1.9\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.0\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.1.9.md"
+            archive = archive_dir / "AGENTS.pre-4.2.0.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.1.9-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.0-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2296,6 +2298,19 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
     review_required = manifest.get("review_required", schema < 3)
     if not isinstance(review_required, bool):
         raise APError(f"Task {task_id} has an invalid review_required flag.")
+    try:
+        scope_revision = int(manifest.get("scope_revision") or 1)
+    except (TypeError, ValueError) as exc:
+        raise APError(f"Task {task_id} has an invalid scope_revision.") from exc
+    if scope_revision < 1:
+        raise APError(f"Task {task_id} has an invalid scope_revision.")
+    effective_profile = _text(manifest.get("effective_profile"))
+    if effective_profile and effective_profile not in (_WORKFLOW_PROFILES - {"auto"}):
+        raise APError(f"Task {task_id} has an invalid effective_profile.")
+    if "design_required" in manifest and not isinstance(manifest.get("design_required"), bool):
+        raise APError(f"Task {task_id} has an invalid design_required flag.")
+    if "scope_history" in manifest and not isinstance(manifest.get("scope_history"), list):
+        raise APError(f"Task {task_id} has an invalid scope_history.")
     return manifest
 
 
@@ -2309,7 +2324,7 @@ def _load_task_manifest(repo: Path, task_id: str) -> dict:
     return _validate_task_manifest(repo, manifest, task_id)
 
 
-def _save_task_manifest(repo: Path, manifest: dict) -> None:
+def _save_task_manifest(repo: Path, manifest: dict, *, strict_worktree: bool = False) -> None:
     _validate_task_manifest(repo, manifest)
     task_id = _validate_task_id(_text(manifest.get("task_id")))
     manifest["updated_at"] = _now_iso()
@@ -2321,11 +2336,15 @@ def _save_task_manifest(repo: Path, manifest: dict) -> None:
             try:
                 _write_json_object(_worktree_manifest_path(worktree), manifest)
             except APError:
-                pass
+                if strict_worktree:
+                    raise
 
 
 def _delete_task_manifest(repo: Path, manifest: dict) -> None:
     task_id = _validate_task_id(_text(manifest.get("task_id")))
+    worktree_value = _text(manifest.get("worktree_path"))
+    if worktree_value and Path(worktree_value).exists():
+        _clear_final_gate_receipt(Path(worktree_value))
     _task_registry_path(repo, task_id).unlink(missing_ok=True)
 
 
@@ -2373,13 +2392,13 @@ def _working_tree_paths(repo: Path) -> list[str]:
     paths.update(
         _git_z_paths(
             repo,
-            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+            ["git", "diff", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
         )
     )
     paths.update(
         _git_z_paths(
             repo,
-            ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
         )
     )
     paths.update(
@@ -2444,13 +2463,13 @@ def _task_content_fingerprint(repo: Path, cfg: dict, manifest: Optional[dict]) -
         if not batch:
             continue
         cached = run(
-            ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--", *batch],
+            ["git", "diff", "--cached", "--no-renames", "--binary", "--no-ext-diff", "--", *batch],
             cwd=repo,
             check=False,
         )
         digest.update(cached.stdout.encode("utf-8", errors="surrogateescape"))
         unstaged = run(
-            ["git", "diff", "--binary", "--no-ext-diff", "--", *batch],
+            ["git", "diff", "--no-renames", "--binary", "--no-ext-diff", "--", *batch],
             cwd=repo,
             check=False,
         )
@@ -2464,11 +2483,140 @@ def _task_content_fingerprint(repo: Path, cfg: dict, manifest: Optional[dict]) -
     return digest.hexdigest()
 
 
-def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
-    expected = sorted(set(path for path in paths if path))
-    for start in range(0, len(expected), 100):
-        run(["git", "add", "-A", "--", *expected[start : start + 100]], cwd=repo)
-    staged = sorted(
+def _final_gate_receipt_path(repo: Path) -> Path:
+    return _git_dir(repo) / "auto-coding-skill-final-gate.json"
+
+
+def _clear_final_gate_receipt(repo: Path) -> None:
+    try:
+        _final_gate_receipt_path(repo).unlink(missing_ok=True)
+    except APError:
+        return
+
+
+def _final_gate_identity(
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+    plan: dict,
+    base_ref: str,
+) -> tuple[dict, str]:
+    paths = list(plan.get("changed_files") or [])
+    validation_plan = _validation_plan(cfg, paths)
+    _validate_validation_plan(cfg, validation_plan)
+    command_hashes = {
+        name: hashlib.sha256(_configured_command(cfg, name).encode("utf-8")).hexdigest()
+        for name in validation_plan["commands"]
+    }
+    plan_payload = {
+        "scope": plan.get("selected_scope"),
+        "profile": plan.get("profile"),
+        "effective_mode": plan.get("effective_mode"),
+        "paths": validation_plan["paths"],
+        "commands": validation_plan["commands"],
+        "command_hashes": command_hashes,
+        "command_timeouts": validation_plan["command_timeouts"],
+        "matched_routes": validation_plan["matched_routes"],
+        "coverage": validation_plan["coverage"],
+        "unmapped": validation_plan["unmapped"],
+        "docs_only": validation_plan["docs_only"],
+        "compatibility_fallback": validation_plan["compatibility_fallback"],
+        "on_unmapped": _text(_validation_cfg(cfg).get("on_unmapped")).lower() or "error",
+        "budget": _final_gate_budget(cfg),
+        "diff_check": "working-index-base-v1",
+    }
+    plan_sha256 = hashlib.sha256(
+        json.dumps(plan_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    resolved_base = _resolve_commit(repo, base_ref or _text(manifest.get("base_sha")) or "HEAD")
+    identity = {
+        "algorithm": _FINAL_GATE_CACHE_ALGORITHM,
+        "skill_version": _text((cfg.get("workflow") or {}).get("skill_version")),
+        "task_id": _text(manifest.get("task_id")),
+        "task_uuid": _text(manifest.get("task_uuid")),
+        "worktree_path": str(repo.resolve()),
+        "branch": _current_branch(repo),
+        "base_sha": resolved_base,
+        "head_sha": _resolve_commit(repo, "HEAD"),
+        "scope_revision": int(manifest.get("scope_revision") or 1),
+        "owned_paths": sorted(manifest.get("owned_paths") or []),
+        "writer_generation": int((manifest.get("writer_lease") or {}).get("generation") or 0),
+        "plan_sha256": plan_sha256,
+    }
+    return identity, _task_content_fingerprint(repo, cfg, manifest)
+
+
+def _record_final_gate_receipt(
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+    plan: dict,
+    base_ref: str,
+    executed: list[str],
+) -> None:
+    identity, fingerprint = _final_gate_identity(repo, cfg, manifest, plan, base_ref)
+    _write_json_object(
+        _final_gate_receipt_path(repo),
+        {
+            "schema": _FINAL_GATE_CACHE_SCHEMA,
+            "kind": "final_changed_scope_gate",
+            "status": "pass",
+            "identity": identity,
+            "content_fingerprints": [fingerprint],
+            "executed": list(executed),
+            "passed_at": _now_iso(),
+        },
+    )
+
+
+def _reuse_final_gate_receipt(
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+    plan: dict,
+    base_ref: str,
+) -> Optional[dict]:
+    receipt = _read_json_object(_final_gate_receipt_path(repo)) or {}
+    if (
+        int(receipt.get("schema") or 0) != _FINAL_GATE_CACHE_SCHEMA
+        or _text(receipt.get("kind")) != "final_changed_scope_gate"
+        or _text(receipt.get("status")) != "pass"
+    ):
+        return None
+    identity, fingerprint = _final_gate_identity(repo, cfg, manifest, plan, base_ref)
+    if receipt.get("identity") != identity:
+        return None
+    allowed = receipt.get("content_fingerprints") or []
+    if not isinstance(allowed, list) or fingerprint not in allowed:
+        return None
+    return receipt
+
+
+def _extend_final_gate_receipt(
+    repo: Path,
+    cfg: dict,
+    manifest: dict,
+    plan: dict,
+    base_ref: str,
+) -> None:
+    receipt = _read_json_object(_final_gate_receipt_path(repo)) or {}
+    identity, fingerprint = _final_gate_identity(repo, cfg, manifest, plan, base_ref)
+    if (
+        int(receipt.get("schema") or 0) != _FINAL_GATE_CACHE_SCHEMA
+        or _text(receipt.get("kind")) != "final_changed_scope_gate"
+        or _text(receipt.get("status")) != "pass"
+        or receipt.get("identity") != identity
+    ):
+        raise APError("The successful final-gate receipt no longer matches the staged task state.")
+    allowed = list(receipt.get("content_fingerprints") or [])
+    if fingerprint not in allowed:
+        allowed.append(fingerprint)
+    receipt["content_fingerprints"] = allowed
+    _write_json_object(_final_gate_receipt_path(repo), receipt)
+
+
+def _staged_paths(repo: Path) -> list[str]:
+    return sorted(
         set(
             _checked_git_z_paths(
                 repo,
@@ -2476,6 +2624,7 @@ def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
                     "git",
                     "diff",
                     "--cached",
+                    "--no-renames",
                     "--name-only",
                     "-z",
                     "--diff-filter=ACDMRTUXB",
@@ -2484,6 +2633,36 @@ def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
             )
         )
     )
+
+
+def _exact_stage_plan(repo: Path, paths: list[str], *, dry_run: bool) -> tuple[list[str], list[str]]:
+    expected = sorted(set(path for path in paths if path))
+    expected_set = set(expected)
+    staged = _staged_paths(repo)
+    pending = _unstaged_task_paths(repo)
+    unexpected = sorted((set(staged) | set(pending)) - expected_set)
+    if unexpected:
+        raise APError(
+            "Refusing to commit paths outside the current task:\n- " + "\n- ".join(unexpected)
+        )
+    if dry_run:
+        for start in range(0, len(pending), 100):
+            run(
+                ["git", "add", "--dry-run", "-A", "--", *pending[start : start + 100]],
+                cwd=repo,
+            )
+    return expected, pending
+
+
+def _preflight_exact_paths(repo: Path, paths: list[str]) -> None:
+    _exact_stage_plan(repo, paths, dry_run=True)
+
+
+def _stage_exact_paths(repo: Path, paths: list[str]) -> list[str]:
+    expected, pending = _exact_stage_plan(repo, paths, dry_run=False)
+    for start in range(0, len(pending), 100):
+        run(["git", "add", "-A", "--", *pending[start : start + 100]], cwd=repo)
+    staged = _staged_paths(repo)
     unexpected = sorted(set(staged) - set(expected))
     if unexpected:
         raise APError(
@@ -2569,7 +2748,16 @@ def _task_changed_paths_from_base(repo: Path, base_sha: str) -> list[str]:
     paths = set(
         _checked_git_z_paths(
             repo,
-            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base_sha, "--"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--diff-filter=ACDMRTUXB",
+                base_sha,
+                "--",
+            ],
             "task diff paths",
         )
     )
@@ -2593,6 +2781,20 @@ def _task_unowned_paths(repo: Path, cfg: dict, manifest: dict) -> list[str]:
     ]
 
 
+def _task_staging_paths(repo: Path, cfg: dict, manifest: dict) -> list[str]:
+    paths = _task_commit_paths(repo)
+    owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
+    managed = set(_task_managed_paths(cfg, manifest))
+    unowned = [
+        path
+        for path in paths
+        if path not in managed and not _path_is_owned(path, owned)
+    ]
+    if unowned:
+        raise APError("Changes outside task owned_paths:\n- " + "\n- ".join(unowned))
+    return paths
+
+
 def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> str:
     base_sha = _text(manifest.get("base_sha"))
     owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
@@ -2603,7 +2805,14 @@ def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = N
         if path not in managed and _path_is_owned(path, owned)
     ]
     digest = hashlib.sha256()
-    digest.update(f"contract:{_AGENT_CONTRACT_VERSION}\nbase:{base_sha}\n".encode("utf-8"))
+    digest.update(
+        (
+            f"contract:{_AGENT_CONTRACT_VERSION}\nbase:{base_sha}\n"
+            f"scope_revision:{int(manifest.get('scope_revision') or 1)}\n"
+        ).encode("utf-8")
+    )
+    for owned_path in owned:
+        digest.update(f"owned:{owned_path}\0".encode("utf-8", errors="surrogateescape"))
     for rel in paths:
         digest.update(f"path:{rel}\0".encode("utf-8", errors="surrogateescape"))
         path = repo / rel
@@ -2691,11 +2900,50 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
     return fingerprint
 
 
+def _reconcile_task_risk(repo: Path, cfg: dict, manifest: dict) -> None:
+    changed_paths = _task_changed_paths_from_base(repo, _text(manifest.get("base_sha")))
+    plan = _resolve_execution_plan(
+        cfg,
+        repo,
+        changed_paths=changed_paths,
+        planned_paths=list(manifest.get("owned_paths") or []),
+        requested_task_kind="change",
+    )
+    old_profile = _text(manifest.get("effective_profile")) or (
+        "high-risk" if bool(manifest.get("review_required")) else "standard"
+    )
+    planned_profile = _text(plan.get("profile")) or "standard"
+    effective_profile = (
+        planned_profile
+        if _PROFILE_RANK[planned_profile] > _PROFILE_RANK[old_profile]
+        else old_profile
+    )
+    review_required = bool(manifest.get("review_required") or plan.get("review_required"))
+    design_required = bool(manifest.get("design_required") or plan.get("design_required"))
+    escalated = (
+        effective_profile != old_profile
+        or review_required != bool(manifest.get("review_required"))
+        or design_required != bool(manifest.get("design_required"))
+    )
+    if not escalated:
+        return
+    manifest["effective_profile"] = effective_profile
+    manifest["review_required"] = review_required
+    manifest["design_required"] = design_required
+    _invalidate_task_review(manifest, "actual changed paths raised task risk; review again")
+    _clear_final_gate_receipt(repo)
+    _save_task_manifest(repo, manifest)
+    raise APError(
+        "Actual changed paths raised task risk. Complete any necessary design/review and retry "
+        f"commit-push: profile={effective_profile}, review_required={str(review_required).lower()}."
+    )
+
+
 def _unstaged_task_paths(repo: Path) -> list[str]:
     paths = set(
         _checked_git_z_paths(
             repo,
-            ["git", "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
+            ["git", "diff", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRTUXB"],
             "unstaged task paths",
         )
     )
@@ -2732,7 +2980,14 @@ def _require_task_context(repo: Path, cfg: dict, task_id: str) -> dict:
     registered = _read_json_object(_task_registry_path(repo, expected_task))
     if not registered:
         raise APError(f"Task registry entry is missing for {expected_task}; refusing to recreate it implicitly.")
-    for field in ("task_id", "task_uuid", "task_branch", "worktree_path", "base_sha"):
+    for field in (
+        "task_id",
+        "task_uuid",
+        "task_branch",
+        "worktree_path",
+        "base_sha",
+        "scope_revision",
+    ):
         if _text(registered.get(field)) != _text(manifest.get(field)):
             raise APError(f"Task manifest/registry mismatch for {expected_task}: {field}")
     manifest = registered
@@ -3044,7 +3299,7 @@ def _run_configured_command_list(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise APError(
-                        "Final changed-scope gate exceeded its total time budget before "
+                        "Final changed-scope gate timed out: exceeded its total time budget before "
                         f"commands.{name}; narrow validation.routes"
                     )
                 timeout_s = min(timeout_s, remaining) if timeout_s is not None else remaining
@@ -3108,9 +3363,9 @@ def _changed_files(repo: Path, base_ref: str = "") -> list[str]:
     manifest = _active_task_manifest(repo)
     effective_base = base_ref or (_text(manifest.get("base_sha")) if manifest else "") or _default_base_ref(repo)
     if effective_base:
-        paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB", f"{effective_base}...HEAD"]))
-    paths.extend(_git_lines(repo, ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB"]))
-    paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB"]))
+        paths.extend(_git_lines(repo, ["git", "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB", f"{effective_base}...HEAD"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB"]))
+    paths.extend(_git_lines(repo, ["git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB"]))
     paths.extend(_git_lines(repo, ["git", "ls-files", "--others", "--exclude-standard"]))
     return _unique_paths(paths)
 
@@ -3123,9 +3378,10 @@ def _commit_changed_files(repo: Path, ref: str) -> list[str]:
             "diff-tree",
             "--root",
             "--no-commit-id",
+            "--no-renames",
             "--name-only",
             "-r",
-            "--diff-filter=ACMRTUXB",
+            "--diff-filter=ACDMRTUXB",
             commit_ref,
         ],
         cwd=repo,
@@ -5899,6 +6155,11 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     light_gate_start = time.time()
     monotonic_start = time.monotonic()
     cfg = _load_cfg(repo)
+    manifest = _active_task_manifest(repo)
+    if manifest:
+        manifest = _require_task_context(repo, cfg, _text(manifest.get("task_id")))
+        _clear_final_gate_receipt(repo)
+    before_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
     budget = _final_gate_budget(cfg)
     deadline = monotonic_start + budget["total_seconds"]
     requested_scope = _text(getattr(args, "scope", "")).lower()
@@ -5933,10 +6194,23 @@ def cmd_light_gate(args: argparse.Namespace) -> None:
     _run_git_diff_check(repo, cfg)
     if time.monotonic() > deadline:
         raise APError(
-            f"Final changed-scope gate exceeded {budget['total_seconds']:.0f}s; "
+            f"Final changed-scope gate timed out after {budget['total_seconds']:.0f}s; "
             "narrow validation.routes and keep slower checks explicit"
         )
     executed.append("diff_check")
+    after_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
+    if after_fingerprint != before_fingerprint:
+        _clear_final_gate_receipt(repo)
+        raise APError("The final gate changed task content; inspect the diff before retrying.")
+    if manifest:
+        _record_final_gate_receipt(
+            repo,
+            cfg,
+            manifest,
+            plan,
+            _text(getattr(args, "base", "")) or _text(manifest.get("base_sha")),
+            executed,
+        )
     duration_s = time.time() - light_gate_start
     _record_gate_profile(repo, cfg, "light_gate", "pass", duration_s, scope=selected_scope, detail=", ".join(executed))
     _record_evidence(
@@ -7732,6 +8006,10 @@ def cmd_task_start(args: argparse.Namespace) -> None:
                 "created_at": _now_iso(),
                 "initial_untracked": [],
                 "owned_paths": owned_paths,
+                "scope_revision": 1,
+                "effective_profile": plan["profile"],
+                "design_required": bool(plan["design_required"]),
+                "scope_history": [],
                 "depends_on": depends_on,
                 "prerequisite_shas": prerequisite_shas,
                 "writer_lease": {
@@ -7813,6 +8091,10 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "created_at": _now_iso(),
             "initial_untracked": [],
             "owned_paths": owned_paths,
+            "scope_revision": 1,
+            "effective_profile": plan["profile"],
+            "design_required": bool(plan["design_required"]),
+            "scope_history": [],
             "depends_on": depends_on,
             "prerequisite_shas": prerequisite_shas,
             "writer_lease": {
@@ -7940,6 +8222,171 @@ def _task_lifecycle_context(repo: Path, cfg: dict, task_id: str) -> tuple[Path, 
     manifest = _load_task_manifest(repo, task_id)
     _require_control_checkout(repo, manifest)
     return repo, Path(_text(manifest.get("worktree_path"))).resolve(), manifest
+
+
+def cmd_task_scope_add(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    additions = sorted({_normalize_owned_path(item) for item in (args.owned_path or [])})
+    if not additions:
+        raise APError("task-scope-add requires at least one --owned-path.")
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    result: dict = {}
+    with (
+        _repo_lock(control_repo, "integration", timeout_s=timeout_s),
+        _repo_lock(control_repo, "task-registry", timeout_s=timeout_s),
+        _repo_lock(control_repo, "direct-claim", timeout_s=timeout_s),
+        _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s),
+    ):
+        manifest = _load_task_manifest(control_repo, task_id)
+        _require_current_writer(manifest, args)
+        if int(manifest.get("schema") or 0) < 3:
+            raise APError("task-scope-add requires a schema-3 task created by the current workflow.")
+        if _text(manifest.get("state")) != "active":
+            raise APError(
+                f"Task {task_id} cannot expand scope in state={manifest.get('state')}; start a new task."
+            )
+        lease_generation = int((manifest.get("writer_lease") or {}).get("generation") or 0)
+        requested_generation = getattr(args, "lease_generation", None)
+        if requested_generation is not None and requested_generation != lease_generation:
+            raise APError(
+                f"Writer lease generation changed: expected={requested_generation}, current={lease_generation}."
+            )
+        if not worktree.exists():
+            raise APError(f"Task worktree is missing: {worktree}")
+        if _resolve_commit(worktree, "HEAD") != _text(manifest.get("base_sha")):
+            raise APError("task-scope-add is allowed only before the task creates a commit.")
+        if _text(manifest.get("last_commit")) or _text(manifest.get("remote_task_tip")):
+            raise APError("task-scope-add cannot extend a task that already committed or pushed work.")
+
+        current = sorted({_normalize_owned_path(item) for item in manifest.get("owned_paths") or []})
+        new_paths = [path for path in additions if not _path_is_owned(path, current)]
+        if not new_paths:
+            result = {
+                "task_id": task_id,
+                "status": "noop",
+                "scope_revision": int(manifest.get("scope_revision") or 1),
+                "owned_paths": current,
+            }
+        else:
+            proposed = sorted(set(current) | set(new_paths))
+            for claim in _active_direct_claims(control_repo):
+                claim_paths = list(claim.get("owned_paths") or [])
+                if _owned_paths_overlap(proposed, claim_paths):
+                    raise APError(
+                        "Expanded scope overlaps active direct claim held by "
+                        f"{_text(claim.get('owner')) or '(unknown)'}: "
+                        + ", ".join(claim_paths)
+                    )
+            registry_dir = _task_state_root(control_repo) / "tasks"
+            for path in sorted(registry_dir.glob("*.json")) if registry_dir.exists() else []:
+                other = _read_json_object(path) or {}
+                if _text(other.get("task_id")) == task_id:
+                    continue
+                if _text(other.get("state")) in {"", "integrated", "cleanup-pending"}:
+                    continue
+                other_owned = other.get("owned_paths") or []
+                if isinstance(other_owned, list) and _owned_paths_overlap(proposed, other_owned):
+                    raise APError(
+                        f"Expanded scope overlaps active task {_text(other.get('task_id')) or path.stem}: "
+                        + ", ".join(other_owned)
+                    )
+
+            worktree_cfg = _load_cfg(worktree)
+            existing_unowned = _task_unowned_paths(worktree, worktree_cfg, manifest)
+            implicit_adoptions = sorted(path for path in existing_unowned if path not in set(new_paths))
+            if implicit_adoptions:
+                raise APError(
+                    "Existing unowned changes must be added as exact --owned-path values before scope expansion:\n- "
+                    + "\n- ".join(implicit_adoptions)
+                )
+            changed_paths = _task_changed_paths_from_base(
+                worktree,
+                _text(manifest.get("base_sha")),
+            )
+            plan = _resolve_execution_plan(
+                worktree_cfg,
+                worktree,
+                changed_paths=changed_paths,
+                planned_paths=proposed,
+                intent=_text(getattr(args, "intent", "")),
+                requested_task_kind="change",
+            )
+            old_profile = _text(manifest.get("effective_profile")) or (
+                "high-risk" if bool(manifest.get("review_required")) else "standard"
+            )
+            planned_profile = _text(plan.get("profile")) or "standard"
+            effective_profile = (
+                planned_profile
+                if _PROFILE_RANK[planned_profile] > _PROFILE_RANK[old_profile]
+                else old_profile
+            )
+            old_manifest = json.loads(json.dumps(manifest))
+            revision = int(manifest.get("scope_revision") or 1) + 1
+            manifest["owned_paths"] = proposed
+            manifest["scope_revision"] = revision
+            manifest["effective_profile"] = effective_profile
+            manifest["review_required"] = bool(
+                manifest.get("review_required")
+                or plan.get("review_required")
+                or bool(getattr(args, "review_required", False))
+            )
+            manifest["design_required"] = bool(
+                manifest.get("design_required") or plan.get("design_required")
+            )
+            manifest["claimed_paths"] = []
+            history = list(manifest.get("scope_history") or [])
+            history.append(
+                {
+                    "revision": revision,
+                    "added_paths": new_paths,
+                    "adopted_dirty_paths": existing_unowned,
+                    "actor": _text(getattr(args, "writer", ""))
+                    or _text(os.environ.get("CODEX_THREAD_ID")),
+                    "updated_at": _now_iso(),
+                    "previous_profile": old_profile,
+                    "effective_profile": effective_profile,
+                }
+            )
+            manifest["scope_history"] = history
+            _invalidate_task_review(manifest, "task scope expanded; review and final gate must run again")
+            _clear_final_gate_receipt(worktree)
+            try:
+                _save_task_manifest(control_repo, manifest, strict_worktree=True)
+            except Exception:
+                _save_task_manifest(control_repo, old_manifest)
+                raise
+            registered = _load_task_manifest(control_repo, task_id)
+            mirrored = _read_json_object(_worktree_manifest_path(worktree)) or {}
+            for field in ("task_uuid", "scope_revision", "owned_paths", "review_required"):
+                if registered.get(field) != mirrored.get(field):
+                    raise APError(f"Task scope manifest synchronization failed for field: {field}")
+            result = {
+                "task_id": task_id,
+                "status": "expanded",
+                "scope_revision": revision,
+                "owned_paths": proposed,
+                "added_paths": new_paths,
+                "effective_profile": effective_profile,
+                "review_required": manifest["review_required"],
+                "design_required": manifest["design_required"],
+            }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result["status"] == "noop":
+        print(
+            f"[task-scope-add] NOOP task={task_id} "
+            f"scope_revision={result['scope_revision']}"
+        )
+    else:
+        print(
+            f"[task-scope-add] OK task={task_id} scope_revision={result['scope_revision']} "
+            f"profile={result['effective_profile']} review_required="
+            f"{str(result['review_required']).lower()} added={','.join(result['added_paths'])}"
+        )
 
 
 def cmd_task_review(args: argparse.Namespace) -> None:
@@ -8266,11 +8713,17 @@ def cmd_task_finish(args: argparse.Namespace) -> None:
     task_id = _validate_task_id(args.task_id)
     manifest = _load_task_manifest(repo, task_id)
     if _text(manifest.get("execution_mode")).lower() == "direct":
-        if repo.resolve() != Path(_text(manifest.get("worktree_path"))).resolve():
-            raise APError("Run task-finish for a direct task from its current checkout.")
-        if _task_commit_paths(repo) or _resolve_commit(repo, "HEAD") != _text(manifest.get("base_sha")):
-            raise APError("Direct task still has changes or commits; use commit-push instead of task-finish.")
-        _clear_direct_task(repo, manifest)
+        timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+        with (
+            _repo_lock(repo, "integration", timeout_s=timeout_s),
+            _repo_lock(repo, f"task-{task_id}", timeout_s=timeout_s),
+        ):
+            manifest = _load_task_manifest(repo, task_id)
+            if repo.resolve() != Path(_text(manifest.get("worktree_path"))).resolve():
+                raise APError("Run task-finish for a direct task from its current checkout.")
+            if _task_commit_paths(repo) or _resolve_commit(repo, "HEAD") != _text(manifest.get("base_sha")):
+                raise APError("Direct task still has changes or commits; use commit-push instead of task-finish.")
+            _clear_direct_task(repo, manifest)
         print(f"[task-finish] OK task={task_id} execution_mode=direct no temporary branch existed")
         return
     _require_control_checkout(repo, manifest)
@@ -8675,6 +9128,7 @@ def _cmd_direct_commit_push_locked(
 ) -> None:
     _require_current_writer(manifest, args)
     _require_dependencies(repo, manifest, _text(manifest.get("base_sha")))
+    _reconcile_task_risk(repo, cfg, manifest)
     _require_approved_review(repo, cfg, manifest)
     branch = _current_branch(repo)
     target = _text(manifest.get("target_branch"))
@@ -8696,6 +9150,8 @@ def _cmd_direct_commit_push_locked(
         commit_sha = pending_commit
         plan = _resolve_execution_plan(cfg, repo, base_ref=_text(manifest.get("base_sha")))
     else:
+        task_paths = _task_staging_paths(repo, cfg, manifest)
+        _preflight_exact_paths(repo, task_paths)
         cmd_doctor(
             argparse.Namespace(
                 repo=str(repo),
@@ -8711,23 +9167,36 @@ def _cmd_direct_commit_push_locked(
             base_ref=_text(manifest.get("base_sha")),
         )
         before_gate = _task_content_fingerprint(repo, cfg, manifest)
-        cmd_light_gate(
-            argparse.Namespace(
-                repo=str(repo),
-                scope="changed",
-                profile=plan["profile"],
-                mode="dev",
-                base=_text(manifest.get("base_sha")),
-                explain=False,
-            )
+        receipt = _reuse_final_gate_receipt(
+            repo,
+            cfg,
+            manifest,
+            plan,
+            _text(manifest.get("base_sha")),
         )
+        if receipt:
+            print(
+                "[light-gate] REUSED task="
+                f"{manifest['task_id']} passed_at={receipt.get('passed_at')}"
+            )
+        else:
+            cmd_light_gate(
+                argparse.Namespace(
+                    repo=str(repo),
+                    scope="changed",
+                    profile=plan["profile"],
+                    mode="dev",
+                    base=_text(manifest.get("base_sha")),
+                    explain=False,
+                )
+            )
         after_gate = _task_content_fingerprint(repo, cfg, manifest)
         if after_gate != before_gate:
             raise APError("The final gate changed direct-task files; inspect them and retry commit-push.")
         manifest = _require_task_context(repo, cfg, args.task_id)
         _require_current_writer(manifest, args)
         _require_approved_review(repo, cfg, manifest)
-        task_paths = _task_commit_paths(repo)
+        task_paths = _task_staging_paths(repo, cfg, manifest)
         staged = _stage_exact_paths(repo, task_paths)
         if not staged:
             _clear_direct_task(repo, manifest)
@@ -8736,6 +9205,13 @@ def _cmd_direct_commit_push_locked(
         unstaged = _unstaged_task_paths(repo)
         if unstaged:
             raise APError("Direct-task files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged))
+        _extend_final_gate_receipt(
+            repo,
+            cfg,
+            manifest,
+            plan,
+            _text(manifest.get("base_sha")),
+        )
         commit_sha = _commit_exact_index(repo, args.msg)
         manifest["state"] = "push-pending"
         manifest["last_commit"] = commit_sha
@@ -8783,7 +9259,23 @@ def _cmd_commit_push_locked(
     _save_task_manifest(repo, manifest)
     _require_current_writer(manifest, args)
     _require_dependencies(repo, manifest, _text(manifest.get("base_sha")))
+    _reconcile_task_risk(repo, cfg, manifest)
     _require_approved_review(repo, cfg, manifest)
+    working_paths = _task_commit_paths(repo)
+    head = _resolve_commit(repo, "HEAD")
+    pending_commit = _text(manifest.get("last_commit"))
+    if pending_commit and pending_commit == head and not working_paths:
+        plan = _resolve_execution_plan(cfg, repo, base_ref=_text(manifest.get("base_sha")))
+        _push_current_task(repo, manifest, pending_commit)
+        print(
+            f"[commit-push] OK - profile={plan['profile']} mode={plan['effective_mode']} "
+            f"scope={plan['selected_scope']} commit={pending_commit}"
+        )
+        return
+    protected = set(manifest.get("initial_untracked") or [])
+    _cleanup_generated_noise(repo, protected_paths=protected)
+    task_paths = _task_staging_paths(repo, cfg, manifest)
+    _preflight_exact_paths(repo, task_paths)
     cmd_doctor(
         argparse.Namespace(
             repo=str(repo),
@@ -8807,16 +9299,23 @@ def _cmd_commit_push_locked(
 
     msg = args.msg
     before_gate = _task_content_fingerprint(repo, cfg, manifest)
-    cmd_light_gate(
-        argparse.Namespace(
-            repo=str(repo),
-            scope="changed",
-            profile=plan["profile"],
-            mode="dev",
-            base=base_ref,
-            explain=False,
+    receipt = _reuse_final_gate_receipt(repo, cfg, manifest, plan, base_ref)
+    if receipt:
+        print(
+            "[light-gate] REUSED task="
+            f"{manifest['task_id']} passed_at={receipt.get('passed_at')}"
         )
-    )
+    else:
+        cmd_light_gate(
+            argparse.Namespace(
+                repo=str(repo),
+                scope="changed",
+                profile=plan["profile"],
+                mode="dev",
+                base=base_ref,
+                explain=False,
+            )
+        )
 
     after_gate = _task_content_fingerprint(repo, cfg, manifest)
     if after_gate != before_gate:
@@ -8834,15 +9333,13 @@ def _cmd_commit_push_locked(
             "no files were staged or restored."
         )
 
-    protected = set(manifest.get("initial_untracked") or [])
-    _cleanup_generated_noise(repo, protected_paths=protected)
     pre_stage_fingerprint = _task_content_fingerprint(repo, cfg, manifest)
     manifest = _require_task_context(repo, cfg, args.task_id)
     _require_current_writer(manifest, args)
     _require_approved_review(repo, cfg, manifest)
     if _task_content_fingerprint(repo, cfg, manifest) != pre_stage_fingerprint:
         raise APError("Task-owned files changed immediately before staging; refusing to commit.")
-    task_paths = _task_commit_paths(repo)
+    task_paths = _task_staging_paths(repo, cfg, manifest)
     staged = _stage_exact_paths(repo, task_paths)
     if not staged:
         raise APError("Nothing to commit.")
@@ -8852,8 +9349,12 @@ def _cmd_commit_push_locked(
             "Task-owned files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged)
         )
     manifest = _require_task_context(repo, cfg, args.task_id)
+    _extend_final_gate_receipt(repo, cfg, manifest, plan, base_ref)
 
     committed_sha = _commit_exact_index(repo, msg)
+    manifest["state"] = "push-pending"
+    manifest["last_commit"] = committed_sha
+    _save_task_manifest(repo, manifest)
     _push_current_task(repo, manifest, committed_sha)
     print(f"[commit-push] OK - profile={plan['profile']} mode={mode} scope={plan['selected_scope']}")
 
@@ -8868,6 +9369,8 @@ def cmd_commit_push(args: argparse.Namespace) -> None:
     lock_name = f"task-{_validate_task_id(args.task_id)}"
     timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
     with _repo_lock(repo, lock_name, timeout_s=timeout_s):
+        manifest = _require_task_context(repo, cfg, args.task_id)
+        _require_current_writer(manifest, args)
         _cmd_commit_push_locked(args, repo, cfg, manifest)
 
 
@@ -9075,6 +9578,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("task_id", nargs="?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_task_status)
+
+    s = sp.add_parser("task-scope-add")
+    s.add_argument("task_id")
+    s.add_argument("--owned-path", action="append", required=True)
+    s.add_argument("--writer")
+    s.add_argument("--lease-generation", type=int)
+    s.add_argument("--intent")
+    s.add_argument("--review-required", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_task_scope_add)
 
     s = sp.add_parser("task-submodule-sync")
     s.add_argument("task_id")

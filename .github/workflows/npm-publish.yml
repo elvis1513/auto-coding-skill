@@ -11,6 +11,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN_AVAILABLE: ${{ secrets.NPM_TOKEN != '' }}
     permissions:
       contents: read
     steps:
@@ -59,10 +61,16 @@ jobs:
           fi
 
       - name: Publish
-        if: steps.registry.outputs.published != 'true'
+        if: steps.registry.outputs.published != 'true' && env.NPM_TOKEN_AVAILABLE == 'true'
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Require external publication
+        if: steps.registry.outputs.published != 'true' && env.NPM_TOKEN_AVAILABLE != 'true'
+        run: |
+          echo "NPM_TOKEN is not configured. Publish with the authorized local npm token before pushing the version tag." >&2
+          exit 1
 
       - name: Verify npm publication
         shell: bash

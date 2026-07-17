@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.7 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.8 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -79,22 +79,19 @@ failure may continue in the same conversation/task without a second lifecycle.
 - Validate delegated assignment/result JSON with `agent-contract-check` before use.
 - Require fingerprinted review only for path/rule-confirmed high-risk,
   contract-crossing, parallel, or configured work; intent words are candidates only.
-- Keep `reviewer` at `xhigh`: focused is one 90-second analysis; deep gets 300
-  seconds for parallel/cross-module or sensitive boundaries. Timeout is `blocked`
-  and is not sent to `task-review`.
+- Use `high`/150 seconds for focused review and `xhigh`/360 seconds for deep parallel,
+  cross-module, or sensitive review. Retry once only if no semantic event arrives
+  within 30 seconds; never retry started analysis.
 - Run `python3 docs/tools/autopipeline/ap.py review-run <TASK> --reviewer <ID> --json`.
-  It launches a separate read-only Codex process without the lifecycle-owner identity, stops its process group at the fixed deadline,
-  and records only the assigned HEAD, scope, identity, fingerprint, and mode-0600 SHA-256-bound Git-local diff artifact.
-  Before analysis, the Reviewer runs `python3 docs/tools/autopipeline/ap.py review-artifact --file <assignment.json>` and reviews that frozen patch, never a reconstructed live `git diff`. `review-assignment` alone requires a different
-  deadline-capable host and cannot stop an in-app subagent.
-- `agent-result-template` supplies all 16 fields; contract checking aggregates errors,
-  and `review-run` safely normalizes presentation fields from the same analysis.
-- Review blocks only defects introduced or worsened in the promised scope.
-  Adjacent existing issues are non-blocking follow-ups.
-- Semantic changes invalidate approval. Mechanical documentation-only corrections
-  may receive a targeted recheck by the same reviewer.
-- Historical debt does not block ordinary delivery; block only new or worsened
-  P0/P1 issues.
+  It runs a separate read-only identity, streams allowlisted metadata privately,
+  stops the process group at deadline, and binds a mode-0600 SHA-256 patch to the
+  assigned HEAD, scope, identity, and fingerprint. Reviewers read the frozen patch
+  with `review-artifact`; `review-assignment` alone needs a deadline-capable host and cannot stop an in-app subagent.
+- `agent-result-template` supplies all 16 fields and `review-run` normalizes presentation.
+- Runtime exhaustion needs explicit `review-runtime-override` authorization; it records
+  `runtime-bypassed`, never approval, and cannot replace a substantive blocked result.
+- Block only new or worsened in-scope P0/P1 defects. Adjacent debt is a follow-up;
+  semantic changes invalidate approval, while mechanical docs may get a targeted recheck.
 
 ## Bounded real validation
 

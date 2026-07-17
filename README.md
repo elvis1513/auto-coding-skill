@@ -9,6 +9,10 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
+Version 4.2.8 makes the supervised Reviewer observable and recoverable without
+weakening review semantics: it streams private event metadata, distinguishes
+startup failure from analysis timeout, retries one no-event startup, and supports
+an audited fingerprint-bound user override that is never reported as approval.
 Version 4.2.7 freezes every pre-commit Reviewer diff as a private, SHA-256-bound
 Git-local patch, including staged, unstaged, untracked, deleted, mode, symlink,
 and binary changes. Version 4.2.6 makes the managed structure/optimization description defer to
@@ -236,16 +240,15 @@ never triggers a broader fallback.
 - Parallel fixers require separate worktrees and non-overlapping paths.
 - Reviewer fingerprint approval is required for high-risk, cross-module,
   explicitly configured, or parallel integration work.
-- The `reviewer` Agent remains `xhigh`. A focused review gets one 90-second pass
-  over the supplied stable diff and relevant evidence. Timeout produces
-  `blocked`; do not call `task-review` for that result.
+- Focused review uses `high` effort and a 150-second hard wall over the supplied
+  stable diff and evidence. Deep review uses `xhigh` and 360 seconds.
 - Cross-module or parallel work and API, auth, database, payment, file-transfer,
-  gateway, or production-configuration boundaries use 300-second deep review.
+  gateway, or production-configuration boundaries use deep review.
   Fixing Reviewer JSON formatting reuses the same analysis and never starts
   another substantive review.
 - `review-assignment` writes the validated assignment under Git-local state with
   the exact fingerprint, HEAD, scope revision, owning fixer, review depth, and
-  90/300-second deadline. Before that deadline begins, it freezes the exact
+  150/360-second deadline. Before that deadline begins, it freezes the exact
   task-owned working-tree state into a mode-0600 binary patch and binds its
   canonical path, format, and SHA-256 into the assignment. Reissuing the same
   live assignment is idempotent. Snapshot inputs and emitted patches above
@@ -255,11 +258,20 @@ never triggers a broader fallback.
   rejected by `task-review`.
 - `review-run` is the default executable path: it creates/reuses that assignment,
   starts a separate `codex exec` session in read-only mode, removes the parent
-  lifecycle identity, and supervises the full process group against the original
-  remaining deadline. Timeout performs TERM then KILL, records a Git-local blocked
-  receipt, and cannot be converted into approval. Plain `review-assignment` remains
+  lifecycle identity, consumes JSON events incrementally, and supervises the full
+  process group against the original remaining deadline. If no semantic event
+  arrives within 30 seconds it retries the same immutable assignment once. After
+  analysis starts it never retries. Private schema-2 receipts record only bounded,
+  allowlisted event/diagnostic categories, byte counts, and hashes. Plain `review-assignment` remains
   available only when another host can enforce the deadline itself; it does not
-  stop an in-app subagent.
+  stop an in-app subagent. A descendant that deliberately creates a new POSIX
+  session is outside portable process-group termination, but cannot keep the
+  non-blocking event readers or Reviewer deadline open.
+- Exhausted `runtime-unavailable` or `analysis-timed-out` states remain blocked by
+  default. `review-runtime-override` can record explicit user authorization bound
+  to the exact fingerprint, assignment, artifact, and runtime receipt. Its verdict
+  is `runtime-bypassed`, never `approved`; real blocked/changes-requested results
+  cannot use this path.
 - DD/ADR is created only for lasting cross-module, API, data, security,
   deployment, or key user-flow decisions.
 - Historical debt does not block product work unless the current change worsens it.
@@ -307,6 +319,24 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.8
+
+- Replaced end-only Reviewer output collection with bounded JSONL event streaming.
+  Schema-2 Git-local receipts now record CLI/model/effort identity, attempt phases,
+  first/last event times, event-log hashes, diagnostic categories, and byte counts
+  without persisting prompt, patch, stderr, tool output, or model content.
+- Split runtime startup failure from analysis timeout. A no-semantic-event startup
+  is capped at 30 seconds and retried once with the same assignment, fingerprint,
+  artifact, command, and absolute deadline; an analysis that started is never
+  repeated. Focused review now uses `high/150s`, while deep uses `xhigh/360s`.
+- Added `review-runtime-override` for explicit user-authorized delivery after an
+  exhausted runtime-unavailable or analysis-timeout failure. The private override
+  binds all immutable review evidence and records `runtime-bypassed`, never
+  `approved`; failure-time hashes reject pre-authorization tampering, and a
+  substantive Reviewer result observed before timeout remains non-bypassable.
+- Restricted the hidden custom runner to explicit test harnesses and closed spawn
+  failure, unbounded-output, silent-startup, and lost-diagnostics paths.
 
 ## What changed in 4.2.7
 

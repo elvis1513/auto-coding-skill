@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -780,65 +783,352 @@ class AutoCodingProfileTests(unittest.TestCase):
         repo, _ = self.make_repo()
         assignment_path = repo / "assignment.json"
         result_path = repo / "result.json"
+        reviewer_config = repo / ".agents" / "agents" / "reviewer.toml"
+        reviewer_config.parent.mkdir(parents=True)
+        reviewer_config.write_text(
+            'name = "reviewer"\n'
+            'model = "vendor/reviewer-model"\n'
+            'developer_instructions = "review only the immutable artifact"\n',
+            encoding="utf-8",
+        )
         with mock.patch.object(ap.shutil, "which", return_value="/usr/local/bin/codex"):
-            command = ap._codex_reviewer_command(repo, assignment_path, result_path)
+            focused = ap._codex_reviewer_command(
+                repo,
+                assignment_path,
+                result_path,
+                review_depth="focused",
+            )
+            deep = ap._codex_reviewer_command(
+                repo,
+                assignment_path,
+                result_path,
+                review_depth="deep",
+            )
 
-        self.assertEqual("/usr/local/bin/codex", command[0])
-        self.assertIn("--ephemeral", command)
-        self.assertIn("--ignore-user-config", command)
-        self.assertIn("read-only", command)
-        self.assertIn('model_reasoning_effort="xhigh"', command)
-        prompt = command[-1]
+        self.assertEqual("/usr/local/bin/codex", focused[0])
+        self.assertIn("--json", focused)
+        self.assertIn("--ephemeral", focused)
+        self.assertIn("--ignore-user-config", focused)
+        self.assertIn("read-only", focused)
+        self.assertIn('model_reasoning_effort="high"', focused)
+        self.assertIn('model_reasoning_effort="xhigh"', deep)
+        self.assertEqual("vendor/reviewer-model", focused[focused.index("--model") + 1])
+        prompt = focused[-1]
         self.assertIn("docs/tools/autopipeline/ap.py review-artifact --file", prompt)
         self.assertIn("diff_artifact_sha256", prompt)
         self.assertIn("never substitute a live git diff", prompt)
         developer_override = next(
-            item for item in command if item.startswith("developer_instructions=")
+            item for item in focused if item.startswith("developer_instructions=")
         )
         tomllib.loads(developer_override)
-        self.assertEqual(str(result_path), command[command.index("-o") + 1])
+        self.assertEqual(str(result_path), focused[focused.index("-o") + 1])
 
     def test_reviewer_process_timeout_terminates_its_process_group(self) -> None:
         repo, _ = self.make_repo()
-        process = mock.MagicMock()
-        process.pid = 4321
-        process.poll.return_value = None
-        process.communicate.side_effect = [
-            subprocess.TimeoutExpired(cmd=["fake-reviewer"], timeout=0.01),
-            ("partial", "stopped"),
-        ]
-        with (
-            mock.patch.object(ap.subprocess, "Popen", return_value=process) as popen,
-            mock.patch.object(ap.os, "killpg") as killpg,
-        ):
+        runner = repo / "slow-reviewer.py"
+        runner.write_text(
+            "import json, sys, time\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+            "print('Bearer secret-token password=hunter2', file=sys.stderr, flush=True)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        with self.assertRaises(ap._ReviewerRuntimeTimeout) as raised:
+            ap._run_supervised_reviewer_process(
+                [sys.executable, str(runner)],
+                cwd=repo,
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout_seconds=0.3,
+                startup_timeout_seconds=0.2,
+            )
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertEqual(1, raised.exception.diagnostics["event_count"])
+        safe = ap._safe_reviewer_attempt(raised.exception.diagnostics, 1, "analysis-timeout")
+        self.assertNotIn("secret-token", json.dumps(safe))
+        self.assertNotIn("hunter2", json.dumps(safe))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
+    def test_reviewer_timeout_kills_group_after_leader_exits(self) -> None:
+        repo, _ = self.make_repo()
+        child_pid_path = repo / "reviewer-grandchild.pid"
+        runner = repo / "leader-exits-reviewer.py"
+        runner.write_text(
+            "import json, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        with self.assertRaises(ap._ReviewerRuntimeTimeout):
+            ap._run_supervised_reviewer_process(
+                [sys.executable, str(runner)],
+                cwd=repo,
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout_seconds=0.3,
+                startup_timeout_seconds=0.2,
+            )
+        self.assertLess(time.monotonic() - started, 3.0)
+        child_pid = int(child_pid_path.read_text())
+        child_gone = False
+        for _ in range(20):
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                child_gone = True
+                break
+            time.sleep(0.05)
+        self.assertTrue(child_gone, "Reviewer grandchild survived process-group cleanup")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX detached-process behavior")
+    def test_detached_pipe_holder_cannot_extend_reviewer_deadline(self) -> None:
+        repo, _ = self.make_repo()
+        child_pid_path = repo / "detached-reviewer-child.pid"
+        runner = repo / "detached-child-reviewer.py"
+        runner.write_text(
+            "import json, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)\n"
+            f"Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        child_pid = 0
+        try:
             with self.assertRaises(ap._ReviewerRuntimeTimeout):
                 ap._run_supervised_reviewer_process(
-                    ["fake-reviewer", "; touch must-not-run"],
+                    [sys.executable, str(runner)],
                     cwd=repo,
                     env={"PATH": os.environ.get("PATH", "")},
-                    timeout_seconds=0.01,
+                    timeout_seconds=0.3,
+                    startup_timeout_seconds=0.2,
                 )
+            child_pid = int(child_pid_path.read_text())
+        finally:
+            if not child_pid and child_pid_path.exists():
+                child_pid = int(child_pid_path.read_text())
+            if child_pid:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertFalse(
+            any(thread.name.startswith("reviewer-stream-") for thread in threading.enumerate())
+        )
 
-        self.assertEqual(["fake-reviewer", "; touch must-not-run"], popen.call_args.args[0])
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertEqual(mock.call(4321, ap.signal.SIGTERM), killpg.call_args)
+    def test_reviewer_process_without_first_event_is_runtime_unavailable(self) -> None:
+        repo, _ = self.make_repo()
+        runner = repo / "silent-reviewer.py"
+        runner.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        with self.assertRaises(ap._ReviewerRuntimeUnavailable) as raised:
+            ap._run_supervised_reviewer_process(
+                [sys.executable, str(runner)],
+                cwd=repo,
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout_seconds=1,
+                startup_timeout_seconds=0.1,
+            )
+        self.assertEqual(0, raised.exception.diagnostics["event_count"])
+
+    def test_reviewer_process_clean_exit_without_semantic_event_is_unavailable(self) -> None:
+        repo, _ = self.make_repo()
+        runner = repo / "empty-reviewer.py"
+        runner.write_text("pass\n", encoding="utf-8")
+        with self.assertRaises(ap._ReviewerRuntimeUnavailable):
+            ap._run_supervised_reviewer_process(
+                [sys.executable, str(runner)],
+                cwd=repo,
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout_seconds=1,
+                startup_timeout_seconds=0.2,
+            )
+
+    def test_reviewer_event_writer_failure_stops_process_and_reader_threads(self) -> None:
+        repo, _ = self.make_repo()
+        runner = repo / "writer-failure-reviewer.py"
+        runner.write_text(
+            "import json, time\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+
+        class FailingWriter:
+            def write(self, _: str) -> None:
+                raise OSError("event log unavailable")
+
+            def flush(self) -> None:
+                pass
+
+        started = time.monotonic()
+        with mock.patch.object(
+            ap,
+            "_terminate_reviewer_process",
+            wraps=ap._terminate_reviewer_process,
+        ) as terminate:
+            with self.assertRaises(ap._ReviewerRuntimeInternalError):
+                ap._run_supervised_reviewer_process(
+                    [sys.executable, str(runner)],
+                    cwd=repo,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout_seconds=3,
+                    startup_timeout_seconds=1,
+                    event_writer=FailingWriter(),
+                )
+        self.assertLess(time.monotonic() - started, 3.0)
+        terminate.assert_called_once()
+        self.assertFalse(
+            any(thread.name.startswith("reviewer-stream-") for thread in threading.enumerate())
+        )
+
+    def test_reviewer_output_flood_is_bounded_and_cleans_reader_threads(self) -> None:
+        repo, _ = self.make_repo()
+        runner = repo / "flood-reviewer.py"
+        runner.write_text(
+            "import json\n"
+            "for index in range(10000):\n"
+            " print(json.dumps({'type': 'item.completed', 'item': {'type': 'note'}, 'i': index}), flush=True)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        with mock.patch.object(ap, "_REVIEW_OUTPUT_MAX_BYTES", 2048):
+            with self.assertRaises(ap._ReviewerRuntimeOutputLimit):
+                ap._run_supervised_reviewer_process(
+                    [sys.executable, str(runner)],
+                    cwd=repo,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout_seconds=3,
+                    startup_timeout_seconds=1,
+                )
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertFalse(
+            any(thread.name.startswith("reviewer-stream-") for thread in threading.enumerate())
+        )
+
+    def test_reviewer_single_unterminated_line_is_bounded(self) -> None:
+        repo, _ = self.make_repo()
+        runner = repo / "long-line-reviewer.py"
+        runner.write_text(
+            "import sys, time\n"
+            "sys.stdout.write('x' * 10000)\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(ap, "_REVIEW_OUTPUT_MAX_BYTES", 2048):
+            with self.assertRaises(ap._ReviewerRuntimeOutputLimit):
+                ap._run_supervised_reviewer_process(
+                    [sys.executable, str(runner)],
+                    cwd=repo,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout_seconds=3,
+                    startup_timeout_seconds=1,
+                )
+        self.assertFalse(
+            any(thread.name.startswith("reviewer-stream-") for thread in threading.enumerate())
+        )
+
+    def test_reviewer_event_metadata_does_not_persist_model_or_patch_content(self) -> None:
+        record, semantic = ap._reviewer_event_metadata(
+            "stdout",
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "text": "PATCH_SECRET_TOKEN",
+                        "output": "Bearer private-token",
+                    },
+                }
+            ),
+            "2026-07-17T00:00:00+00:00",
+        )
+        serialized = json.dumps(record)
+        self.assertTrue(semantic)
+        self.assertEqual("item.completed", record["event_type"])
+        self.assertEqual("command_execution", record["item_type"])
+        self.assertNotIn("PATCH_SECRET_TOKEN", serialized)
+        self.assertNotIn("private-token", serialized)
+
+    def test_substantive_agent_message_is_not_erased_by_later_approved_message(self) -> None:
+        assignment = self.reviewer_assignment(
+            review_depth="focused",
+            timeout_seconds=150,
+            issued_at="2026-07-17T00:00:00+00:00",
+            deadline_at="2026-07-17T00:02:30+00:00",
+        )
+        stdout = "\n".join(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": json.dumps({"verdict": verdict})},
+                }
+            )
+            for verdict in ("blocked", "approved")
+        )
+        result = ap._substantive_reviewer_event_result(stdout, assignment)
+        self.assertIsNotNone(result)
+        self.assertEqual("blocked", result["verdict"])
+
+    def test_reviewer_spawn_failure_is_runtime_unavailable_with_safe_diagnostics(self) -> None:
+        repo, _ = self.make_repo()
+        with mock.patch.object(
+            ap.subprocess,
+            "Popen",
+            side_effect=OSError("permission denied token=private-value"),
+        ):
+            with self.assertRaises(ap._ReviewerRuntimeUnavailable) as raised:
+                ap._run_supervised_reviewer_process(
+                    ["missing-reviewer"],
+                    cwd=repo,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout_seconds=1,
+                )
+        safe = ap._safe_reviewer_attempt(raised.exception.diagnostics, 1, "runtime-unavailable")
+        self.assertEqual("spawn-failed", safe["phase"])
+        self.assertNotIn("private-value", json.dumps(safe))
+
+    def test_reviewer_attempt_receipt_never_persists_raw_stderr(self) -> None:
+        diagnostics = ap._reviewer_attempt_diagnostics(
+            started_at="2026-07-17T00:00:00+00:00",
+            finished_at="2026-07-17T00:00:01+00:00",
+            stdout="",
+            stderr="PATCH_SECRET_TOKEN\n-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material",
+            first_event_at="",
+            last_event_at="",
+            last_event_type="",
+            event_count=0,
+            phase="spawn-failed",
+            exit_code=None,
+        )
+        serialized = json.dumps(
+            ap._safe_reviewer_attempt(diagnostics, 1, "runtime-unavailable")
+        )
+        self.assertNotIn("stderr_tail", serialized)
+        self.assertNotIn("PATCH_SECRET_TOKEN", serialized)
+        self.assertNotIn("PRIVATE KEY", serialized)
+        self.assertIn(hashlib.sha256(diagnostics["stderr"].encode()).hexdigest(), serialized)
 
     def test_reviewer_assignment_timing_contract_and_fixed_budgets(self) -> None:
         issued_at = "2026-07-16T00:00:00+00:00"
         assignment = self.reviewer_assignment(
             review_depth="focused",
-            timeout_seconds=90,
+            timeout_seconds=150,
             issued_at=issued_at,
-            deadline_at="2026-07-16T00:01:30+00:00",
+            deadline_at="2026-07-16T00:02:30+00:00",
             scope_revision=1,
         )
         self.assertEqual(
             assignment,
             ap._validate_orchestration_contract("assignment", assignment),
         )
-        self.assertEqual(("focused", 90), ap._normalized_task_review_policy(True))
+        self.assertEqual(("focused", 150), ap._normalized_task_review_policy(True))
         self.assertEqual(
-            ("deep", 300),
+            ("deep", 360),
             ap._normalized_task_review_policy(True, "focused", "deep"),
         )
         self.assertEqual(("none", 0), ap._normalized_task_review_policy(False, "deep"))
@@ -848,17 +1138,17 @@ class AutoCodingProfileTests(unittest.TestCase):
                 review_depth="focused",
                 timeout_seconds=0,
                 issued_at=issued_at,
-                deadline_at="2026-07-16T00:01:30+00:00",
+                deadline_at="2026-07-16T00:02:30+00:00",
             ),
             self.reviewer_assignment(
                 review_depth="focused",
-                timeout_seconds=90,
+                timeout_seconds=150,
                 issued_at="2026-07-16T00:00:00",
-                deadline_at="2026-07-16T00:01:30",
+                deadline_at="2026-07-16T00:02:30",
             ),
             self.reviewer_assignment(
                 review_depth="focused",
-                timeout_seconds=90,
+                timeout_seconds=150,
                 issued_at=issued_at,
                 deadline_at="2026-07-16T00:01:00+00:00",
             ),
@@ -1100,8 +1390,8 @@ class AutoCodingProfileTests(unittest.TestCase):
         deep = self.plan(repo, cfg, planned_paths=["backend/auth/service.py"])
 
         for plan, depth, timeout in [
-            (focused, "focused", 90),
-            (deep, "deep", 300),
+            (focused, "focused", 150),
+            (deep, "deep", 360),
         ]:
             with self.subTest(depth=depth):
                 self.assertTrue(plan["review_required"])

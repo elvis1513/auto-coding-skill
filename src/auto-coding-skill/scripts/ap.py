@@ -15,6 +15,7 @@ import io
 import json
 import os
 import posixpath
+import queue
 import re
 import shlex
 import shutil
@@ -24,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.parse
@@ -51,8 +53,10 @@ _GENERATED_NOISE_PATTERNS = [
 ]
 _AGENT_CONTRACT_VERSION = 1
 _AGENT_CONTRACT_SCHEMA = "data/contracts/orchestration-v1.schema.json"
-_FOCUSED_REVIEW_TIMEOUT_SECONDS = 90
-_DEEP_REVIEW_TIMEOUT_SECONDS = 300
+_FOCUSED_REVIEW_TIMEOUT_SECONDS = 150
+_DEEP_REVIEW_TIMEOUT_SECONDS = 360
+_REVIEW_STARTUP_TIMEOUT_SECONDS = 30.0
+_REVIEW_RUNTIME_ATTEMPT_LIMIT = 2
 _REVIEW_RUNTIME_FIELDS = (
     "runtime_state",
     "runtime_started_at",
@@ -61,6 +65,14 @@ _REVIEW_RUNTIME_FIELDS = (
     "runtime_exit_code",
     "runtime_command_sha256",
     "runtime_receipt_path",
+    "runtime_event_log_path",
+    "runtime_receipt_sha256",
+    "runtime_event_log_sha256",
+    "runtime_result_sha256",
+    "runtime_attempt_count",
+    "runtime_failure_kind",
+    "runtime_override_path",
+    "runtime_override_sha256",
 )
 _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
@@ -77,13 +89,65 @@ _DEEP_REVIEW_CATEGORIES = {
 }
 
 
-class _ReviewerRuntimeTimeout(RuntimeError):
+class _ReviewerRuntimeFailure(RuntimeError):
+    """Base class for supervised Reviewer runtime failures with safe diagnostics."""
+
+    def __init__(self, message: str, diagnostics: Optional[dict] = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+        self.stdout = _text(self.diagnostics.get("stdout"))
+        self.stderr = _text(self.diagnostics.get("stderr"))
+
+
+class _ReviewerRuntimeTimeout(_ReviewerRuntimeFailure):
     """Raised after the supervised Reviewer process group has been stopped."""
 
-    def __init__(self, stdout: str = "", stderr: str = "") -> None:
-        super().__init__("Reviewer runtime exceeded its assignment deadline.")
-        self.stdout = stdout
-        self.stderr = stderr
+    def __init__(self, diagnostics: Optional[dict] = None) -> None:
+        super().__init__(
+            "Reviewer analysis exceeded its assignment deadline.",
+            diagnostics,
+        )
+
+
+class _ReviewerRuntimeUnavailable(_ReviewerRuntimeFailure):
+    """Raised when no semantic Reviewer event arrives during startup."""
+
+    def __init__(self, diagnostics: Optional[dict] = None) -> None:
+        super().__init__(
+            "Reviewer runtime produced no semantic event before its startup deadline.",
+            diagnostics,
+        )
+
+
+class _ReviewerRuntimeOutputLimit(_ReviewerRuntimeFailure):
+    """Raised after bounded Reviewer output exceeds the private diagnostic limit."""
+
+    def __init__(self, diagnostics: Optional[dict] = None) -> None:
+        super().__init__("Reviewer runtime output exceeded its bounded limit.", diagnostics)
+
+
+class _ReviewerRuntimeInternalError(_ReviewerRuntimeFailure):
+    """Raised after an internal supervision failure has stopped the process group."""
+
+    def __init__(self, diagnostics: Optional[dict] = None) -> None:
+        super().__init__("Reviewer runtime supervision failed safely.", diagnostics)
+
+
+def _review_startup_timeout_seconds() -> float:
+    raw = _text(os.environ.get("AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS"))
+    if not raw:
+        return _REVIEW_STARTUP_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise APError(
+            "AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS must be a positive number."
+        ) from exc
+    if value <= 0:
+        raise APError(
+            "AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS must be a positive number."
+        )
+    return min(value, _REVIEW_STARTUP_TIMEOUT_SECONDS)
 
 
 def _review_diff_artifact_limit() -> int:
@@ -104,7 +168,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.7", "engineering": "4.2.7"},
+    "managed_versions": {"agents": "4.2.8", "engineering": "4.2.8"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -1167,8 +1231,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.7":
-        workflow_cfg["skill_version"] = "4.2.7"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.8":
+        workflow_cfg["skill_version"] = "4.2.8"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1481,16 +1545,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.7\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.8\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.7.md"
+            archive = archive_dir / "AGENTS.pre-4.2.8.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.7-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.8-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2537,6 +2601,7 @@ def _validate_task_manifest(repo: Path, manifest: dict, expected_task_id: str = 
         "approved",
         "changes-requested",
         "blocked",
+        "runtime-bypassed",
     }:
         raise APError(f"Task {task_id} has an invalid review contract.")
     review_required = manifest.get("review_required", schema < 3)
@@ -3420,7 +3485,7 @@ def _require_staged_review_matches(repo: Path, cfg: dict, manifest: dict) -> Non
     staged = _staged_task_review_fingerprint(repo, manifest, cfg)
     if staged != approved:
         raise APError(
-            "The exact staged tree does not match the immutable Reviewer snapshot; refusing to commit."
+            "The exact staged tree does not match the immutable review clearance snapshot; refusing to commit."
         )
 
 
@@ -3475,6 +3540,78 @@ def _require_dependencies(repo: Path, manifest: dict, ancestor_ref: str) -> None
             )
 
 
+def _validate_review_runtime_override(repo: Path, manifest: dict, fingerprint: str) -> dict:
+    review = manifest.get("review") or {}
+    override_path = _review_runtime_override_path(
+        repo,
+        _text(manifest.get("task_id")),
+        fingerprint,
+    ).resolve()
+    if Path(_text(review.get("runtime_override_path"))).resolve() != override_path:
+        raise APError("Reviewer runtime override path does not match Git-local task state.")
+    override_sha256 = _text(review.get("runtime_override_sha256"))
+    payload_bytes = _read_private_review_file(override_path, "runtime override")
+    if hashlib.sha256(payload_bytes).hexdigest() != override_sha256:
+        raise APError("Reviewer runtime override SHA-256 binding is invalid.")
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise APError("Reviewer runtime override is invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise APError("Reviewer runtime override must contain one JSON object.")
+    expected = {
+        "schema": 1,
+        "task_id": _text(manifest.get("task_id")),
+        "diff_fingerprint": fingerprint,
+        "assignment_sha256": _text(review.get("assignment_sha256")),
+        "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
+        "runtime_receipt_path": _text(review.get("runtime_receipt_path")),
+    }
+    mismatched = [field for field, value in expected.items() if payload.get(field) != value]
+    if mismatched:
+        raise APError(
+            "Reviewer runtime override does not match task state: " + ", ".join(mismatched)
+        )
+    if payload.get("user_authorized") is not True:
+        raise APError("Reviewer runtime override lacks explicit user authorization.")
+    if not _text(payload.get("authorized_by")) or not _text(payload.get("reason")):
+        raise APError("Reviewer runtime override authorization audit is incomplete.")
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list) or not evidence or not all(
+        isinstance(item, str) and item for item in evidence
+    ):
+        raise APError("Reviewer runtime override requires non-empty evidence.")
+    receipt_path = Path(_text(payload.get("runtime_receipt_path"))).resolve()
+    expected_result_path, expected_receipt_path = _review_runtime_paths(
+        repo,
+        _text(manifest.get("task_id")),
+        fingerprint,
+    )
+    del expected_result_path
+    if receipt_path != expected_receipt_path.resolve():
+        raise APError("Reviewer runtime override receipt path is not canonical.")
+    receipt_sha256 = _private_review_file_sha256(receipt_path, "runtime receipt")
+    if receipt_sha256 != _text(payload.get("runtime_receipt_sha256")):
+        raise APError("Reviewer runtime override receipt SHA-256 binding is invalid.")
+    failure_state = _text(payload.get("runtime_failure_state"))
+    if failure_state not in {"runtime-unavailable", "analysis-timed-out"}:
+        raise APError("Reviewer runtime override cannot cover this failure state.")
+    assignment_path = Path(_text(review.get("assignment_path"))).resolve()
+    assignment = _load_bound_review_assignment(repo, manifest, assignment_path)
+    receipt = _validate_bound_review_runtime_receipt(
+        repo,
+        manifest,
+        assignment,
+        receipt_path,
+        failure_state,
+    )
+    if _text(receipt.get("status")) != failure_state:
+        raise APError("Reviewer runtime override failure state does not match its receipt.")
+    if failure_state == "runtime-unavailable" and len(receipt.get("attempts") or []) != _REVIEW_RUNTIME_ATTEMPT_LIMIT:
+        raise APError("Reviewer runtime-unavailable override requires exhausted startup attempts.")
+    return payload
+
+
 def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
     unowned = _task_unowned_paths(repo, cfg, manifest)
     if unowned:
@@ -3483,8 +3620,11 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
     if not bool(manifest.get("review_required", int(manifest.get("schema") or 2) < 3)):
         return fingerprint
     review = manifest.get("review") or {}
-    if _text(review.get("verdict")) != "approved":
-        raise APError("Task review must be approved before commit-push or integration.")
+    verdict = _text(review.get("verdict"))
+    if verdict not in {"approved", "runtime-bypassed"}:
+        raise APError(
+            "Task review must be approved or carry an explicit runtime bypass before commit-push or integration."
+        )
     if _text(review.get("diff_fingerprint")) != fingerprint:
         raise APError("Approved review fingerprint is stale for the current owned diff.")
     if _text(review.get("diff_base")) != _text(manifest.get("base_sha")):
@@ -3508,6 +3648,8 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
         if assignment.get(field) != review.get(field):
             raise APError(f"Approved review {field} binding does not match its assignment.")
     _validate_review_diff_artifact(repo, assignment)
+    if verdict == "runtime-bypassed":
+        _validate_review_runtime_override(repo, manifest, fingerprint)
     return fingerprint
 
 
@@ -7231,7 +7373,7 @@ def _normalize_reviewer_runtime_result(assignment: dict, payload: dict) -> dict:
     return _validate_orchestration_contract("result", result)
 
 
-def _reviewer_agent_instructions(worktree: Path) -> str:
+def _reviewer_agent_config(worktree: Path) -> dict:
     candidates = [
         worktree / ".agents" / "agents" / "reviewer.toml",
         _skill_root().parent.parent / "agents" / "reviewer.toml",
@@ -7245,18 +7387,35 @@ def _reviewer_agent_instructions(worktree: Path) -> str:
             raise APError(f"Cannot load managed Reviewer Agent config: {path}: {exc}") from exc
         instructions = _text(payload.get("developer_instructions"))
         if instructions:
-            return instructions
-    return (
-        "Act as an independent read-only code reviewer. Review only the supplied "
-        "assignment and return one JSON object with an approved, changes-requested, "
-        "or blocked verdict. Do not modify files."
-    )
+            model = _text(payload.get("model"))
+            if model and any(char in model for char in "\0\r\n"):
+                raise APError(f"Managed Reviewer model contains invalid characters: {path}")
+            return {
+                "instructions": instructions,
+                "model": model,
+                "config_path": str(path),
+            }
+    return {
+        "instructions": (
+            "Act as an independent read-only code reviewer. Review only the supplied "
+            "assignment and return one JSON object with an approved, changes-requested, "
+            "or blocked verdict. Do not modify files."
+        ),
+        "model": "",
+        "config_path": "",
+    }
+
+
+def _reviewer_agent_instructions(worktree: Path) -> str:
+    return _text(_reviewer_agent_config(worktree).get("instructions"))
 
 
 def _codex_reviewer_command(
     worktree: Path,
     assignment_path: Path,
     result_path: Path,
+    *,
+    review_depth: str = "deep",
 ) -> list[str]:
     codex = shutil.which("codex")
     if not codex:
@@ -7264,7 +7423,13 @@ def _codex_reviewer_command(
             "The supervised Reviewer runtime requires the Codex CLI on PATH. "
             "Install Codex or run review-assignment and use another deadline-capable host."
         )
-    instructions = _reviewer_agent_instructions(worktree)
+    agent_config = _reviewer_agent_config(worktree)
+    instructions = _text(agent_config.get("instructions"))
+    model = _text(agent_config.get("model"))
+    depth = _text(review_depth).lower()
+    if depth not in {"focused", "deep"}:
+        raise APError(f"Unsupported Reviewer depth: {review_depth!r}")
+    reasoning_effort = "high" if depth == "focused" else "xhigh"
     artifact_command = shlex.join(
         [
             "python3",
@@ -7284,11 +7449,14 @@ def _codex_reviewer_command(
         f"{assignment_path} --verdict <approved|changes-requested|blocked>` when useful. "
         "Return only one JSON object as the final response; do not modify files."
     )
-    return [
+    command = [
         codex,
         "-a",
         "never",
         "exec",
+        "--json",
+        "--color",
+        "never",
         "--ephemeral",
         "--ignore-user-config",
         "-C",
@@ -7296,36 +7464,226 @@ def _codex_reviewer_command(
         "-s",
         "read-only",
         "-c",
-        'model_reasoning_effort="xhigh"',
+        f'model_reasoning_effort="{reasoning_effort}"',
         "-c",
         "developer_instructions=" + json.dumps(instructions, ensure_ascii=False),
         "-o",
         str(result_path),
-        prompt,
     ]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+    return command
 
 
-def _terminate_reviewer_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    if process.poll() is None:
+def _terminate_reviewer_process(process: subprocess.Popen[str]) -> None:
+    if os.name == "posix":
         try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:
-                process.terminate()
-        except ProcessLookupError:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             pass
-    try:
-        stdout, stderr = process.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
         try:
-            if os.name == "posix":
+            process.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            pass
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                break
+            time.sleep(0.05)
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            pass
+        else:
+            try:
                 os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
             pass
-        stdout, stderr = process.communicate()
-    return stdout or "", stderr or ""
+        return
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _reviewer_diagnostic_categories(value: str) -> list[str]:
+    lowered = value.lower()
+    patterns = {
+        "authentication": ("unauthorized", "forbidden", "login", "401", "403"),
+        "model-discovery": ("available models", "model list", "model unavailable"),
+        "network-disconnect": ("stream disconnected", "connection reset", "connection closed"),
+        "permission": ("operation not permitted", "permission denied", "readonly database"),
+        "rate-limit": ("rate limit", "too many requests", "429"),
+        "state-database": ("state_", "sqlite", "database"),
+        "timeout": ("timed out", "timeout"),
+        "tls": ("tls", "certificate", "handshake eof"),
+    }
+    return sorted(
+        category
+        for category, needles in patterns.items()
+        if any(needle in lowered for needle in needles)
+    )
+
+
+def _reviewer_event_metadata(stream: str, line: str, timestamp: str) -> tuple[dict, bool]:
+    encoded = line.encode("utf-8", errors="replace")
+    record = {
+        "timestamp": timestamp,
+        "stream": stream,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    if stream == "stderr":
+        record["event_type"] = "diagnostic"
+        record["categories"] = _reviewer_diagnostic_categories(line)
+        return record, False
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        record["event_type"] = "stdout-non-json"
+        return record, False
+    if not isinstance(payload, dict):
+        record["event_type"] = "stdout-non-object"
+        return record, False
+    event_type = _text(payload.get("type")) or "unknown-json-event"
+    record["event_type"] = event_type
+    item = payload.get("item")
+    if isinstance(item, dict) and _text(item.get("type")):
+        record["item_type"] = _text(item.get("type"))
+    semantic = event_type != "thread.started"
+    return record, semantic
+
+
+def _reviewer_phase(event_type: str) -> str:
+    if event_type == "thread.started":
+        return "runtime-started"
+    if event_type == "turn.started":
+        return "analysis-started"
+    if event_type.startswith("item."):
+        return "analyzing"
+    if event_type == "turn.completed":
+        return "finalizing"
+    if event_type in {"error", "turn.failed"}:
+        return "runtime-error"
+    return "runtime-event"
+
+
+def _append_reviewer_output(parts: list[str], current_bytes: int, value: str) -> int:
+    encoded = value.encode("utf-8", errors="replace")
+    if current_bytes + len(encoded) > _REVIEW_OUTPUT_MAX_BYTES:
+        raise _ReviewerRuntimeOutputLimit()
+    parts.append(value)
+    return current_bytes + len(encoded)
+
+
+def _reviewer_stream_reader(
+    stream: object,
+    stream_name: str,
+    output_queue: queue.Queue,
+    stop_event: threading.Event,
+    semantic_seen: threading.Event,
+) -> None:
+    def emit(raw: bytes) -> None:
+        line = raw.decode("utf-8", errors="replace")
+        timestamp = _now_iso()
+        if stream_name == "stdout" and _reviewer_event_metadata(
+            stream_name,
+            line,
+            timestamp,
+        )[1]:
+            semantic_seen.set()
+        while not stop_event.is_set():
+            try:
+                output_queue.put((stream_name, line, timestamp), timeout=0.05)
+                return
+            except queue.Full:
+                continue
+
+    try:
+        if os.name == "posix":
+            descriptor = stream.fileno()  # type: ignore[attr-defined]
+            os.set_blocking(descriptor, False)
+            pending = b""
+            while not stop_event.is_set():
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except (BlockingIOError, InterruptedError):
+                    stop_event.wait(0.02)
+                    continue
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    raw, pending = pending.split(b"\n", 1)
+                    emit(raw + b"\n")
+                if len(pending) > _REVIEW_OUTPUT_MAX_BYTES:
+                    emit(pending)
+                    pending = b""
+            if pending and not stop_event.is_set():
+                emit(pending)
+        else:
+            while not stop_event.is_set():
+                raw = stream.readline(_REVIEW_OUTPUT_MAX_BYTES + 1)  # type: ignore[attr-defined]
+                if raw == b"":
+                    break
+                emit(raw)
+    except (OSError, ValueError):
+        pass
+    finally:
+        while not stop_event.is_set():
+            try:
+                output_queue.put((stream_name, None, _now_iso()), timeout=0.05)
+                break
+            except queue.Full:
+                continue
+
+
+def _reviewer_attempt_diagnostics(
+    *,
+    started_at: str,
+    finished_at: str,
+    stdout: str,
+    stderr: str,
+    first_event_at: str,
+    last_event_at: str,
+    last_event_type: str,
+    event_count: int,
+    phase: str,
+    exit_code: Optional[int],
+) -> dict:
+    return {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "first_event_at": first_event_at,
+        "last_event_at": last_event_at,
+        "last_event_type": last_event_type,
+        "event_count": event_count,
+        "phase": phase,
+        "exit_code": exit_code,
+        "stdout_bytes": len(stdout.encode("utf-8", errors="replace")),
+        "stderr_bytes": len(stderr.encode("utf-8", errors="replace")),
+        "stdout_sha256": hashlib.sha256(stdout.encode("utf-8", errors="replace")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode("utf-8", errors="replace")).hexdigest(),
+        "diagnostic_categories": _reviewer_diagnostic_categories(stderr),
+        "stdout": stdout,
+        "stderr": stderr,
+    }
 
 
 def _run_supervised_reviewer_process(
@@ -7334,30 +7692,224 @@ def _run_supervised_reviewer_process(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: float,
-) -> subprocess.CompletedProcess[str]:
+    startup_timeout_seconds: Optional[float] = None,
+    event_writer: Optional[object] = None,
+) -> tuple[subprocess.CompletedProcess[str], dict]:
     if timeout_seconds <= 0:
         raise _ReviewerRuntimeTimeout()
-    process = subprocess.Popen(
-        command,
-        cwd=str(cwd),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
+    startup_timeout = min(
+        startup_timeout_seconds or _review_startup_timeout_seconds(),
+        timeout_seconds,
     )
+    started_at = _now_iso()
+    started_monotonic = time.monotonic()
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        stdout, stderr = _terminate_reviewer_process(process)
-        raise _ReviewerRuntimeTimeout(stdout, stderr) from exc
-    return subprocess.CompletedProcess(
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            bufsize=0,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        diagnostics = _reviewer_attempt_diagnostics(
+            started_at=started_at,
+            finished_at=_now_iso(),
+            stdout="",
+            stderr=str(exc),
+            first_event_at="",
+            last_event_at="",
+            last_event_type="",
+            event_count=0,
+            phase="spawn-failed",
+            exit_code=None,
+        )
+        raise _ReviewerRuntimeUnavailable(diagnostics) from exc
+    if process.stdout is None or process.stderr is None:
+        _terminate_reviewer_process(process)
+        raise _ReviewerRuntimeUnavailable()
+
+    output_queue: queue.Queue = queue.Queue(maxsize=256)
+    stop_event = threading.Event()
+    semantic_seen = threading.Event()
+    readers = [
+        threading.Thread(
+            target=_reviewer_stream_reader,
+            args=(process.stdout, "stdout", output_queue, stop_event, semantic_seen),
+            name=f"reviewer-stream-{process.pid}-stdout",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_reviewer_stream_reader,
+            args=(process.stderr, "stderr", output_queue, stop_event, semantic_seen),
+            name=f"reviewer-stream-{process.pid}-stderr",
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    stdout_bytes = 0
+    stderr_bytes = 0
+    closed_streams: set[str] = set()
+    first_event_at = ""
+    last_event_at = ""
+    last_event_type = ""
+    event_count = 0
+    phase = "starting"
+    failure: Optional[type[_ReviewerRuntimeFailure]] = None
+    supervision_error: Optional[Exception] = None
+
+    def consume(item: tuple[str, Optional[str], str], *, write_event: bool = True) -> None:
+        nonlocal stdout_bytes, stderr_bytes, first_event_at, last_event_at
+        nonlocal last_event_type, event_count, phase
+        stream_name, line, timestamp = item
+        if line is None:
+            closed_streams.add(stream_name)
+            return
+        if stream_name == "stdout":
+            stdout_bytes = _append_reviewer_output(stdout_parts, stdout_bytes, line)
+        else:
+            stderr_bytes = _append_reviewer_output(stderr_parts, stderr_bytes, line)
+        record, semantic = _reviewer_event_metadata(stream_name, line, timestamp)
+        if write_event and event_writer is not None:
+            event_writer.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            event_writer.flush()
+        if stream_name == "stdout" and record["event_type"] not in {
+            "stdout-non-json",
+            "stdout-non-object",
+        }:
+            event_count += 1
+            last_event_at = timestamp
+            last_event_type = _text(record.get("event_type"))
+            phase = _reviewer_phase(last_event_type)
+            if semantic and not first_event_at:
+                first_event_at = timestamp
+
+    try:
+        while len(closed_streams) < 2 or process.poll() is None:
+            try:
+                item = output_queue.get(timeout=0.05)
+            except queue.Empty:
+                item = None
+            if item is not None:
+                consume(item)
+            elapsed = time.monotonic() - started_monotonic
+            if elapsed >= timeout_seconds:
+                failure = _ReviewerRuntimeTimeout
+                break
+            if (
+                not first_event_at
+                and not semantic_seen.is_set()
+                and elapsed >= startup_timeout
+            ):
+                failure = _ReviewerRuntimeUnavailable
+                break
+    except _ReviewerRuntimeOutputLimit:
+        failure = _ReviewerRuntimeOutputLimit
+    except (OSError, ValueError) as exc:
+        failure = _ReviewerRuntimeInternalError
+        supervision_error = exc
+        phase = "supervision-failed"
+    finally:
+        if failure is not None or process.poll() is None:
+            try:
+                _terminate_reviewer_process(process)
+            except OSError as exc:
+                failure = _ReviewerRuntimeInternalError
+                supervision_error = supervision_error or exc
+                phase = "process-cleanup-failed"
+        tail_deadline = time.monotonic() + 0.5
+        while any(reader.is_alive() for reader in readers) and time.monotonic() < tail_deadline:
+            try:
+                item = output_queue.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            try:
+                consume(item, write_event=supervision_error is None)
+            except _ReviewerRuntimeOutputLimit:
+                failure = _ReviewerRuntimeOutputLimit
+            except (OSError, ValueError) as exc:
+                failure = _ReviewerRuntimeInternalError
+                supervision_error = supervision_error or exc
+                phase = "supervision-failed"
+        stop_event.set()
+        drain_deadline = time.monotonic() + 2
+        while any(reader.is_alive() for reader in readers) and time.monotonic() < drain_deadline:
+            try:
+                item = output_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                consume(item, write_event=supervision_error is None)
+            except _ReviewerRuntimeOutputLimit:
+                failure = _ReviewerRuntimeOutputLimit
+            except (OSError, ValueError) as exc:
+                failure = _ReviewerRuntimeInternalError
+                supervision_error = supervision_error or exc
+                phase = "supervision-failed"
+        for reader in readers:
+            reader.join(timeout=0.2)
+        if not any(reader.is_alive() for reader in readers):
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        while True:
+            try:
+                item = output_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                consume(item, write_event=supervision_error is None)
+            except _ReviewerRuntimeOutputLimit:
+                failure = _ReviewerRuntimeOutputLimit
+            except (OSError, ValueError) as exc:
+                failure = _ReviewerRuntimeInternalError
+                supervision_error = supervision_error or exc
+                phase = "supervision-failed"
+
+    if any(reader.is_alive() for reader in readers):
+        failure = _ReviewerRuntimeInternalError
+        phase = "reader-cleanup-failed"
+    if failure is _ReviewerRuntimeUnavailable and first_event_at:
+        failure = _ReviewerRuntimeTimeout
+
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    diagnostics = _reviewer_attempt_diagnostics(
+        started_at=started_at,
+        finished_at=_now_iso(),
+        stdout=stdout,
+        stderr=stderr,
+        first_event_at=first_event_at,
+        last_event_at=last_event_at,
+        last_event_type=last_event_type,
+        event_count=event_count,
+        phase=phase,
+        exit_code=process.returncode,
+    )
+    if failure is not None:
+        error = failure(diagnostics)
+        if supervision_error is not None:
+            raise error from supervision_error
+        raise error
+    if not first_event_at:
+        raise _ReviewerRuntimeUnavailable(diagnostics)
+    completed = subprocess.CompletedProcess(
         command,
         int(process.returncode or 0),
-        stdout or "",
-        stderr or "",
+        stdout,
+        stderr,
     )
+    return completed, diagnostics
 
 
 def _validate_agent_plan(plan: dict) -> dict:
@@ -11031,6 +11583,151 @@ def _review_runtime_paths(
     return root / f"{fingerprint}.result.json", root / f"{fingerprint}.run.json"
 
 
+def _review_runtime_event_log_path(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+) -> Path:
+    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
+        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
+    root = _task_review_dir(control_repo, task_id, create=True)
+    return root / f"{fingerprint}.events.jsonl"
+
+
+def _review_runtime_override_path(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+) -> Path:
+    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
+        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
+    root = _task_review_dir(control_repo, task_id, create=True)
+    return root / f"{fingerprint}.override.json"
+
+
+def _open_private_review_event_log(path: Path):
+    _guard_review_file_parent(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, "w", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        raise APError(f"Cannot create private Reviewer event log: {path}: {exc}") from exc
+
+
+def _private_review_file_sha256(path: Path, label: str) -> str:
+    payload = _read_private_review_file(path, label)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _reviewer_cli_version(command: list[str], runner_kind: str) -> str:
+    if runner_kind != "codex" or not command:
+        return "test-override"
+    try:
+        completed = subprocess.run(
+            [command[0], "--version"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    return _text(completed.stdout) or _text(completed.stderr) or "unknown"
+
+
+def _reviewer_command_metadata(command: list[str], runner_kind: str) -> dict:
+    model = "runtime-default"
+    reasoning_effort = "unknown"
+    for index, argument in enumerate(command):
+        if argument in {"-m", "--model"} and index + 1 < len(command):
+            model = command[index + 1]
+        match = re.fullmatch(r'model_reasoning_effort="?([^"=]+)"?', argument)
+        if match:
+            reasoning_effort = match.group(1)
+    return {
+        "runner_kind": runner_kind,
+        "cli_path": command[0] if command else "",
+        "cli_version": _reviewer_cli_version(command, runner_kind),
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+    }
+
+
+def _safe_reviewer_attempt(diagnostics: dict, attempt: int, status: str) -> dict:
+    return {
+        "attempt": attempt,
+        "status": status,
+        "started_at": _text(diagnostics.get("started_at")),
+        "finished_at": _text(diagnostics.get("finished_at")),
+        "first_event_at": _text(diagnostics.get("first_event_at")),
+        "last_event_at": _text(diagnostics.get("last_event_at")),
+        "last_event_type": _text(diagnostics.get("last_event_type")),
+        "event_count": int(diagnostics.get("event_count") or 0),
+        "phase": _text(diagnostics.get("phase")) or "unknown",
+        "exit_code": diagnostics.get("exit_code"),
+        "stdout_bytes": int(diagnostics.get("stdout_bytes") or 0),
+        "stderr_bytes": int(diagnostics.get("stderr_bytes") or 0),
+        "stdout_sha256": _text(diagnostics.get("stdout_sha256")),
+        "stderr_sha256": _text(diagnostics.get("stderr_sha256")),
+        "diagnostic_categories": list(diagnostics.get("diagnostic_categories") or []),
+    }
+
+
+def _validate_review_runtime_receipt(receipt: dict) -> dict:
+    if int(receipt.get("schema") or 0) == 1:
+        return receipt
+    if int(receipt.get("schema") or 0) != 2:
+        raise APError("Reviewer runtime receipt has an unsupported schema.")
+    required_strings = (
+        "task_id",
+        "reviewer",
+        "diff_fingerprint",
+        "assignment_sha256",
+        "diff_artifact_sha256",
+        "command_sha256",
+        "runner_kind",
+        "cli_path",
+        "cli_version",
+        "model",
+        "reasoning_effort",
+        "event_log_path",
+        "status",
+        "started_at",
+    )
+    missing = [field for field in required_strings if not _text(receipt.get(field))]
+    if missing:
+        raise APError("Reviewer runtime receipt is missing: " + ", ".join(missing))
+    attempts = receipt.get("attempts")
+    if not isinstance(attempts, list) or len(attempts) > _REVIEW_RUNTIME_ATTEMPT_LIMIT:
+        raise APError("Reviewer runtime receipt has an invalid attempts list.")
+    allowed_statuses = {
+        "starting",
+        "retrying",
+        "runtime-unavailable",
+        "analysis-timed-out",
+        "output-limit",
+        "failed",
+        "result-invalid",
+        "blocked",
+        "completed",
+    }
+    if _text(receipt.get("status")) not in allowed_statuses:
+        raise APError("Reviewer runtime receipt has an invalid status.")
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict) or int(attempt.get("attempt") or 0) != index:
+            raise APError("Reviewer runtime receipt attempts are not sequential.")
+        if "stderr_tail" in attempt:
+            raise APError("Reviewer runtime receipt cannot persist raw stderr text.")
+        for field in ("stdout_bytes", "stderr_bytes", "event_count"):
+            value = attempt.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise APError(f"Reviewer runtime receipt attempt {field} is invalid.")
+    return receipt
+
+
 def _review_command_sha256(command: list[str]) -> str:
     digest = hashlib.sha256()
     for argument in command:
@@ -11046,26 +11743,63 @@ def _bounded_reviewer_output(value: str, label: str) -> str:
     return value
 
 
-def _read_bounded_reviewer_output(path: Path) -> str:
+def _read_bounded_reviewer_bytes(path: Path) -> bytes:
     try:
-        with path.open("rb") as handle:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            os.close(descriptor)
+            raise APError(f"Reviewer result must be a regular file: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
             payload = handle.read(_REVIEW_OUTPUT_MAX_BYTES + 1)
     except OSError as exc:
         raise APError(f"Cannot read Reviewer result: {path}: {exc}") from exc
     if len(payload) > _REVIEW_OUTPUT_MAX_BYTES:
         raise APError(f"Reviewer result exceeded {_REVIEW_OUTPUT_MAX_BYTES} bytes; refusing oversized output.")
-    return payload.decode("utf-8", errors="strict")
+    return payload
+
+
+def _read_bounded_reviewer_output(path: Path) -> str:
+    return _read_bounded_reviewer_bytes(path).decode("utf-8", errors="strict")
 
 
 def _review_result_file_sha256(path: Path) -> str:
+    return hashlib.sha256(_read_bounded_reviewer_bytes(path)).hexdigest()
+
+
+def _substantive_reviewer_result(path: Path, assignment: dict) -> Optional[dict]:
+    if path.is_symlink():
+        raise APError("Refusing a symlinked Reviewer result.")
+    if not path.exists():
+        return None
     try:
-        with path.open("rb") as handle:
-            payload = handle.read(_REVIEW_OUTPUT_MAX_BYTES + 1)
-    except OSError as exc:
-        raise APError(f"Cannot hash Reviewer result: {path}: {exc}") from exc
-    if len(payload) > _REVIEW_OUTPUT_MAX_BYTES:
-        raise APError(f"Reviewer result exceeded {_REVIEW_OUTPUT_MAX_BYTES} bytes; refusing oversized output.")
-    return hashlib.sha256(payload).hexdigest()
+        payload = json.loads(_read_bounded_reviewer_output(path))
+        result = _normalize_reviewer_runtime_result(assignment, payload)
+    except (APError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if _text(result.get("verdict")) in {"blocked", "changes-requested"}:
+        return result
+    return None
+
+
+def _substantive_reviewer_event_result(stdout: str, assignment: dict) -> Optional[dict]:
+    substantive: Optional[dict] = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+            item = event.get("item") if isinstance(event, dict) else None
+            if not isinstance(item, dict) or _text(item.get("type")) != "agent_message":
+                continue
+            payload = json.loads(_text(item.get("text")))
+            result = _normalize_reviewer_runtime_result(assignment, payload)
+        except (APError, json.JSONDecodeError, TypeError):
+            continue
+        verdict = _text(result.get("verdict"))
+        if verdict == "blocked":
+            substantive = result
+        elif verdict == "changes-requested" and substantive is None:
+            substantive = result
+    return substantive
 
 
 def _update_review_runtime(
@@ -11088,9 +11822,81 @@ def _update_review_runtime(
         manifest["review"] = review
         receipt = _read_json_object(receipt_path) or {}
         receipt.update(receipt_updates)
+        _validate_review_runtime_receipt(receipt)
         _write_private_json(receipt_path, receipt)
+        review["runtime_receipt_sha256"] = _private_review_file_sha256(
+            receipt_path,
+            "runtime receipt",
+        )
+        if _REVIEW_SHA256_RE.fullmatch(_text(receipt.get("event_log_sha256"))):
+            review["runtime_event_log_sha256"] = _text(receipt.get("event_log_sha256"))
+        if _REVIEW_SHA256_RE.fullmatch(_text(receipt.get("result_sha256"))):
+            review["runtime_result_sha256"] = _text(receipt.get("result_sha256"))
         _save_task_manifest(control_repo, manifest)
         return manifest
+
+
+def _validate_bound_review_runtime_receipt(
+    control_repo: Path,
+    manifest: dict,
+    assignment: dict,
+    receipt_path: Path,
+    expected_status: str,
+) -> dict:
+    review = manifest.get("review") or {}
+    task_id = _text(manifest.get("task_id"))
+    fingerprint = _text(review.get("diff_fingerprint"))
+    expected_result_path, expected_receipt_path = _review_runtime_paths(
+        control_repo,
+        task_id,
+        fingerprint,
+    )
+    if receipt_path.resolve() != expected_receipt_path.resolve():
+        raise APError("Reviewer runtime receipt path is not canonical.")
+    payload = _read_private_review_file(receipt_path, "runtime receipt")
+    try:
+        receipt = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise APError("Reviewer runtime receipt is invalid JSON.") from exc
+    if not isinstance(receipt, dict):
+        raise APError("Reviewer runtime receipt must contain one JSON object.")
+    _validate_review_runtime_receipt(receipt)
+    expected = {
+        "task_id": task_id,
+        "reviewer": _text(review.get("reviewer")),
+        "diff_fingerprint": fingerprint,
+        "assignment_path": _text(review.get("assignment_path")),
+        "assignment_sha256": _text(review.get("assignment_sha256")),
+        "diff_artifact_path": _text(assignment.get("diff_artifact_path")),
+        "diff_artifact_sha256": _text(assignment.get("diff_artifact_sha256")),
+        "result_path": str(expected_result_path),
+        "command_sha256": _text(review.get("runtime_command_sha256")),
+        "event_log_path": str(
+            _review_runtime_event_log_path(control_repo, task_id, fingerprint)
+        ),
+        "status": expected_status,
+    }
+    mismatched = [field for field, value in expected.items() if receipt.get(field) != value]
+    if mismatched:
+        raise APError(
+            "Reviewer runtime receipt does not match task state: " + ", ".join(mismatched)
+        )
+    receipt_sha256 = hashlib.sha256(payload).hexdigest()
+    if receipt_sha256 != _text(review.get("runtime_receipt_sha256")):
+        raise APError("Reviewer runtime receipt changed after failure finalization.")
+    event_log_path = Path(_text(receipt.get("event_log_path"))).resolve()
+    event_log_sha256 = _private_review_file_sha256(event_log_path, "event log")
+    if event_log_sha256 != _text(receipt.get("event_log_sha256")) or event_log_sha256 != _text(
+        review.get("runtime_event_log_sha256")
+    ):
+        raise APError("Reviewer runtime event log changed after failure finalization.")
+    result_sha256 = _text(receipt.get("result_sha256"))
+    if result_sha256 and (
+        _review_result_file_sha256(expected_result_path) != result_sha256
+        or result_sha256 != _text(review.get("runtime_result_sha256"))
+    ):
+        raise APError("Reviewer runtime result changed after failure finalization.")
+    return receipt
 
 
 def _blocked_reviewer_runtime_result(
@@ -11138,6 +11944,11 @@ def cmd_review_run(args: argparse.Namespace) -> None:
 
     command_override = _text(getattr(args, "runner_command_json", ""))
     if command_override:
+        if _text(os.environ.get("AUTOCODING_TEST_RUNNER_OVERRIDE")) != "1":
+            raise APError(
+                "--runner-command-json is test-only; set AUTOCODING_TEST_RUNNER_OVERRIDE=1 "
+                "inside the isolated test harness."
+            )
         try:
             command_value = json.loads(command_override)
         except json.JSONDecodeError as exc:
@@ -11147,12 +11958,21 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         ):
             raise APError("--runner-command-json must be a non-empty JSON array of argv strings.")
         command = command_value
+        runner_kind = "test-override"
     else:
-        command = _codex_reviewer_command(worktree, assignment_path, result_path)
+        command = _codex_reviewer_command(
+            worktree,
+            assignment_path,
+            result_path,
+            review_depth=_text(assignment.get("review_depth")) or "focused",
+        )
+        runner_kind = "codex"
     command_sha256 = _review_command_sha256(command)
+    command_metadata = _reviewer_command_metadata(command, runner_kind)
     started_at = _now_iso()
+    event_log_path = _review_runtime_event_log_path(control_repo, task_id, fingerprint)
     receipt = {
-        "schema": 1,
+        "schema": 2,
         "task_id": task_id,
         "reviewer": reviewer,
         "diff_fingerprint": fingerprint,
@@ -11162,6 +11982,11 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         "diff_artifact_sha256": _text(assignment.get("diff_artifact_sha256")),
         "result_path": str(result_path),
         "command_sha256": command_sha256,
+        **command_metadata,
+        "event_log_path": str(event_log_path),
+        "event_log_sha256": "",
+        "attempts": [],
+        "failure_kind": "",
         "status": "starting",
         "started_at": started_at,
         "finished_at": "",
@@ -11188,7 +12013,18 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
         if _dt.datetime.now(_dt.timezone.utc) >= deadline:
             raise APError("Review assignment deadline expired before Reviewer runtime start.")
-        _write_private_json(receipt_path, receipt)
+        if result_path.exists() or result_path.is_symlink():
+            raise APError("Reviewer runtime result already exists before the first attempt.")
+        if event_log_path.exists() or event_log_path.is_symlink():
+            raise APError("Reviewer runtime event log already exists for this diff fingerprint.")
+        event_log = _open_private_review_event_log(event_log_path)
+        try:
+            _validate_review_runtime_receipt(receipt)
+            _write_private_json(receipt_path, receipt)
+        except Exception:
+            event_log.close()
+            event_log_path.unlink(missing_ok=True)
+            raise
         current_review.update(
             {
                 "runtime_state": "starting",
@@ -11198,6 +12034,9 @@ def cmd_review_run(args: argparse.Namespace) -> None:
                 "runtime_exit_code": None,
                 "runtime_command_sha256": command_sha256,
                 "runtime_receipt_path": str(receipt_path),
+                "runtime_event_log_path": str(event_log_path),
+                "runtime_attempt_count": 0,
+                "runtime_failure_kind": "",
             }
         )
         manifest["review"] = current_review
@@ -11217,43 +12056,212 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         }
     )
     deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
-    remaining = (deadline - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
-    try:
-        completed = _run_supervised_reviewer_process(
-            command,
-            cwd=worktree,
-            env=env,
-            timeout_seconds=remaining,
-        )
-    except _ReviewerRuntimeTimeout as exc:
+    attempts: list[dict] = []
+    completed: Optional[subprocess.CompletedProcess[str]] = None
+    runtime_failure: Optional[_ReviewerRuntimeFailure] = None
+    failure_kind = ""
+    substantive_result: Optional[dict] = None
+
+    def observed_substantive_result() -> bool:
+        nonlocal substantive_result, runtime_failure, failure_kind
+        try:
+            substantive_result = _substantive_reviewer_result(result_path, assignment)
+            if substantive_result is None and runtime_failure is not None:
+                substantive_result = _substantive_reviewer_event_result(
+                    runtime_failure.stdout,
+                    assignment,
+                )
+        except APError:
+            runtime_failure = _ReviewerRuntimeInternalError(
+                {"phase": "result-inspection-failed"}
+            )
+            failure_kind = "supervision-error"
+            return True
+        return substantive_result is not None
+
+    for attempt_number in range(1, _REVIEW_RUNTIME_ATTEMPT_LIMIT + 1):
+        remaining = (deadline - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        if remaining <= 0:
+            runtime_failure = _ReviewerRuntimeTimeout()
+            failure_kind = "analysis-timeout"
+            break
+        if attempt_number > 1:
+            if result_path.is_symlink():
+                event_log.close()
+                raise APError("Refusing a symlinked Reviewer result before retry.")
+            result_path.unlink(missing_ok=True)
+        try:
+            completed, diagnostics = _run_supervised_reviewer_process(
+                command,
+                cwd=worktree,
+                env=env,
+                timeout_seconds=remaining,
+                startup_timeout_seconds=_review_startup_timeout_seconds(),
+                event_writer=event_log,
+            )
+            attempts.append(
+                _safe_reviewer_attempt(
+                    diagnostics,
+                    attempt_number,
+                    "completed" if completed.returncode == 0 else "failed",
+                )
+            )
+            break
+        except _ReviewerRuntimeUnavailable as exc:
+            runtime_failure = exc
+            failure_kind = "runtime-unavailable"
+            attempts.append(
+                _safe_reviewer_attempt(exc.diagnostics, attempt_number, failure_kind)
+            )
+            if observed_substantive_result():
+                break
+            if attempt_number < _REVIEW_RUNTIME_ATTEMPT_LIMIT:
+                _update_review_runtime(
+                    control_repo,
+                    task_id,
+                    fingerprint,
+                    updates={
+                        "runtime_state": "retrying",
+                        "runtime_attempt_count": attempt_number,
+                        "runtime_failure_kind": failure_kind,
+                    },
+                    receipt_path=receipt_path,
+                    receipt_updates={
+                        "status": "retrying",
+                        "attempts": attempts,
+                        "failure_kind": failure_kind,
+                    },
+                )
+                continue
+            break
+        except _ReviewerRuntimeTimeout as exc:
+            runtime_failure = exc
+            failure_kind = "analysis-timeout"
+            attempts.append(
+                _safe_reviewer_attempt(exc.diagnostics, attempt_number, failure_kind)
+            )
+            observed_substantive_result()
+            break
+        except _ReviewerRuntimeOutputLimit as exc:
+            runtime_failure = exc
+            failure_kind = "output-limit"
+            attempts.append(
+                _safe_reviewer_attempt(exc.diagnostics, attempt_number, failure_kind)
+            )
+            observed_substantive_result()
+            break
+        except _ReviewerRuntimeInternalError as exc:
+            runtime_failure = exc
+            failure_kind = "supervision-error"
+            attempts.append(
+                _safe_reviewer_attempt(exc.diagnostics, attempt_number, failure_kind)
+            )
+            observed_substantive_result()
+            break
+
+    event_log.close()
+    event_log_sha256 = _private_review_file_sha256(event_log_path, "event log")
+    if runtime_failure is not None:
         finished_at = _now_iso()
+        if substantive_result is not None:
+            _write_private_json(result_path, substantive_result)
+            result_sha256 = _review_result_file_sha256(result_path)
+            _update_review_runtime(
+                control_repo,
+                task_id,
+                fingerprint,
+                updates={
+                    "verdict": substantive_result["verdict"],
+                    "reason": "substantive Reviewer result observed before runtime failure",
+                    "runtime_state": "blocked",
+                    "runtime_finished_at": finished_at,
+                    "runtime_exit_code": None,
+                    "runtime_attempt_count": len(attempts),
+                    "runtime_failure_kind": failure_kind,
+                },
+                receipt_path=receipt_path,
+                receipt_updates={
+                    "status": "blocked",
+                    "finished_at": finished_at,
+                    "exit_code": None,
+                    "verdict": substantive_result["verdict"],
+                    "result_sha256": result_sha256,
+                    "attempts": attempts,
+                    "failure_kind": failure_kind,
+                    "event_log_sha256": event_log_sha256,
+                },
+            )
+            print(json.dumps(substantive_result, ensure_ascii=False, indent=2))
+            raise APError(
+                "Reviewer produced a substantive result before runtime failure; it cannot be bypassed."
+            ) from runtime_failure
+        runtime_state = (
+            "runtime-unavailable"
+            if failure_kind == "runtime-unavailable"
+            else "analysis-timed-out"
+            if failure_kind == "analysis-timeout"
+            else "failed"
+        )
         result = _blocked_reviewer_runtime_result(
             assignment,
-            "Reviewer runtime reached its fixed deadline and was terminated.",
-            ["runtime_timeout=true"],
+            (
+                "Reviewer runtime was unavailable before analysis started."
+                if failure_kind == "runtime-unavailable"
+                else "Reviewer analysis reached its fixed deadline and was terminated."
+                if failure_kind == "analysis-timeout"
+                else "Reviewer runtime exceeded its bounded output limit."
+                if failure_kind == "output-limit"
+                else "Reviewer runtime supervision failed safely."
+            ),
+            [
+                f"runtime_failure_kind={failure_kind}",
+                f"runtime_attempt_count={len(attempts)}",
+                f"event_log_sha256={event_log_sha256}",
+            ],
         )
         _write_private_json(result_path, result)
+        result_sha256 = _review_result_file_sha256(result_path)
         _update_review_runtime(
             control_repo,
             task_id,
             fingerprint,
             updates={
                 "verdict": "blocked",
-                "reason": "reviewer runtime timeout",
-                "runtime_state": "timed-out",
+                "reason": f"reviewer {failure_kind}",
+                "runtime_state": runtime_state,
                 "runtime_finished_at": finished_at,
                 "runtime_exit_code": None,
+                "runtime_attempt_count": len(attempts),
+                "runtime_failure_kind": failure_kind,
             },
             receipt_path=receipt_path,
             receipt_updates={
-                "status": "timed-out",
+                "status": (
+                    "runtime-unavailable"
+                    if failure_kind == "runtime-unavailable"
+                    else "analysis-timed-out"
+                    if failure_kind == "analysis-timeout"
+                    else "output-limit"
+                    if failure_kind == "output-limit"
+                    else "failed"
+                ),
                 "finished_at": finished_at,
                 "exit_code": None,
+                "attempts": attempts,
+                "failure_kind": failure_kind,
+                "event_log_sha256": event_log_sha256,
+                "result_sha256": result_sha256,
             },
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        raise APError("Reviewer runtime timed out and was terminated; review is blocked.") from exc
+        if runtime_state in {"runtime-unavailable", "analysis-timed-out"}:
+            raise APError(
+                f"Reviewer {failure_kind}; review is blocked unless an explicit runtime override is recorded."
+            ) from runtime_failure
+        raise APError(f"Reviewer {failure_kind}; review is blocked.") from runtime_failure
 
+    if completed is None:
+        raise APError("Reviewer runtime ended without a process result.")
     finished_at = _now_iso()
     if completed.returncode != 0:
         result = _blocked_reviewer_runtime_result(
@@ -11262,6 +12270,7 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             [f"runner_exit_code={completed.returncode}"],
         )
         _write_private_json(result_path, result)
+        result_sha256 = _review_result_file_sha256(result_path)
         _update_review_runtime(
             control_repo,
             task_id,
@@ -11272,12 +12281,18 @@ def cmd_review_run(args: argparse.Namespace) -> None:
                 "runtime_state": "failed",
                 "runtime_finished_at": finished_at,
                 "runtime_exit_code": completed.returncode,
+                "runtime_attempt_count": len(attempts),
+                "runtime_failure_kind": "process-exit",
             },
             receipt_path=receipt_path,
             receipt_updates={
                 "status": "failed",
                 "finished_at": finished_at,
                 "exit_code": completed.returncode,
+                "attempts": attempts,
+                "failure_kind": "process-exit",
+                "event_log_sha256": event_log_sha256,
+                "result_sha256": result_sha256,
             },
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -11298,6 +12313,7 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             ["result_contract_valid=false"],
         )
         _write_private_json(result_path, result)
+        result_sha256 = _review_result_file_sha256(result_path)
         _update_review_runtime(
             control_repo,
             task_id,
@@ -11308,12 +12324,18 @@ def cmd_review_run(args: argparse.Namespace) -> None:
                 "runtime_state": "failed",
                 "runtime_finished_at": finished_at,
                 "runtime_exit_code": completed.returncode,
+                "runtime_attempt_count": len(attempts),
+                "runtime_failure_kind": "result-invalid",
             },
             receipt_path=receipt_path,
             receipt_updates={
                 "status": "result-invalid",
                 "finished_at": finished_at,
                 "exit_code": completed.returncode,
+                "attempts": attempts,
+                "failure_kind": "result-invalid",
+                "event_log_sha256": event_log_sha256,
+                "result_sha256": result_sha256,
             },
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -11332,6 +12354,8 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             "runtime_state": runtime_state,
             "runtime_finished_at": finished_at,
             "runtime_exit_code": completed.returncode,
+            "runtime_attempt_count": len(attempts),
+            "runtime_failure_kind": "",
         },
         receipt_path=receipt_path,
         receipt_updates={
@@ -11340,6 +12364,9 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             "exit_code": completed.returncode,
             "verdict": result["verdict"],
             "result_sha256": result_sha256,
+            "attempts": attempts,
+            "failure_kind": "",
+            "event_log_sha256": event_log_sha256,
         },
     )
     if result["verdict"] == "blocked":
@@ -11357,6 +12384,130 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             )
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_review_runtime_override(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    if not bool(getattr(args, "confirm_runtime_bypass", False)):
+        raise APError("Runtime bypass requires --confirm-runtime-bypass.")
+    authorized_by = _text(getattr(args, "authorized_by", ""))
+    authorization_ref = _text(getattr(args, "authorization_ref", ""))
+    reason = _text(getattr(args, "reason", ""))
+    evidence = list(getattr(args, "evidence", None) or [])
+    for label, value in (
+        ("authorized-by", authorized_by),
+        ("authorization-ref", authorization_ref),
+        ("reason", reason),
+    ):
+        if not value or any(char in value for char in "\0\r\n"):
+            raise APError(f"--{label} must be non-empty and single-line.")
+    if len(reason) < 12:
+        raise APError("--reason must explain the exceptional delivery decision.")
+    if not evidence or not all(
+        isinstance(item, str) and item and not any(char in item for char in "\0\r\n")
+        for item in evidence
+    ):
+        raise APError("Runtime bypass requires at least one single-line --evidence value.")
+
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        lifecycle_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+        if not lifecycle_actor or lifecycle_actor != _text(manifest.get("owner")):
+            raise APError("Only the task lifecycle owner may record a Reviewer runtime bypass.")
+        if _text(manifest.get("state")) not in {"active", "pushed", "integration-raced"}:
+            raise APError(f"Task {task_id} cannot accept a runtime bypass in state={manifest.get('state')}.")
+        review = dict(manifest.get("review") or {})
+        runtime_state = _text(review.get("runtime_state"))
+        if runtime_state not in {"runtime-unavailable", "analysis-timed-out"}:
+            raise APError(
+                "Runtime bypass is allowed only after exhausted runtime-unavailable or analysis-timed-out state."
+            )
+        fingerprint = _task_review_fingerprint(worktree, manifest, _load_cfg(worktree))
+        supplied = _text(args.diff_fingerprint)
+        if supplied != fingerprint or _text(review.get("diff_fingerprint")) != fingerprint:
+            raise APError(
+                f"Runtime bypass fingerprint mismatch: supplied={supplied or '(missing)'}, current={fingerprint}."
+            )
+        assignment_path = Path(_text(review.get("assignment_path"))).resolve()
+        assignment = _load_bound_review_assignment(control_repo, manifest, assignment_path)
+        _validate_review_diff_artifact(control_repo, assignment)
+        receipt_path = Path(_text(review.get("runtime_receipt_path"))).resolve()
+        _, expected_receipt_path = _review_runtime_paths(
+            control_repo,
+            task_id,
+            fingerprint,
+        )
+        if receipt_path != expected_receipt_path.resolve():
+            raise APError("Reviewer runtime receipt path is not canonical.")
+        receipt = _validate_bound_review_runtime_receipt(
+            control_repo,
+            manifest,
+            assignment,
+            receipt_path,
+            runtime_state,
+        )
+        if int(receipt.get("schema") or 0) != 2:
+            raise APError("Runtime bypass requires a schema-2 Reviewer receipt.")
+        if runtime_state == "runtime-unavailable" and len(receipt.get("attempts") or []) != _REVIEW_RUNTIME_ATTEMPT_LIMIT:
+            raise APError("Runtime-unavailable bypass requires exhausted startup attempts.")
+        override_path = _review_runtime_override_path(control_repo, task_id, fingerprint)
+        if override_path.exists() or override_path.is_symlink():
+            raise APError("Reviewer runtime override already exists for this diff fingerprint.")
+        payload = {
+            "schema": 1,
+            "task_id": task_id,
+            "diff_fingerprint": fingerprint,
+            "assignment_sha256": _text(review.get("assignment_sha256")),
+            "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
+            "runtime_receipt_path": str(receipt_path),
+            "runtime_receipt_sha256": _private_review_file_sha256(
+                receipt_path,
+                "runtime receipt",
+            ),
+            "runtime_failure_state": runtime_state,
+            "user_authorized": True,
+            "authorized_by": authorized_by,
+            "authorization_ref": authorization_ref,
+            "authorized_at": _now_iso(),
+            "lifecycle_owner": lifecycle_actor,
+            "reason": reason,
+            "evidence": evidence,
+        }
+        _write_private_json(override_path, payload)
+        override_sha256 = _private_review_file_sha256(override_path, "runtime override")
+        review.update(
+            {
+                "verdict": "runtime-bypassed",
+                "reason": reason,
+                "reviewed_at": payload["authorized_at"],
+                "runtime_state": "runtime-bypassed",
+                "runtime_override_path": str(override_path),
+                "runtime_override_sha256": override_sha256,
+            }
+        )
+        manifest["review"] = review
+        _save_task_manifest(control_repo, manifest)
+    result = {
+        "task_id": task_id,
+        "verdict": "runtime-bypassed",
+        "diff_fingerprint": fingerprint,
+        "authorized_by": authorized_by,
+        "authorization_ref": authorization_ref,
+        "override_path": str(override_path),
+        "override_sha256": override_sha256,
+    }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"[review-runtime-override] task={task_id} verdict=runtime-bypassed "
+            f"fingerprint={fingerprint}"
+        )
 
 
 def cmd_task_review(args: argparse.Namespace) -> None:
@@ -11506,9 +12657,27 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                 raise APError(
                     "Reviewer runtime verdict does not match the requested task-review verdict."
                 )
-            receipt = _read_json_object(receipt_path)
-            if not receipt:
-                raise APError("Reviewer runtime receipt is missing or invalid.")
+            receipt = _validate_bound_review_runtime_receipt(
+                control_repo,
+                manifest,
+                assignment,
+                receipt_path,
+                "completed",
+            )
+            if int(receipt.get("schema") or 0) == 2:
+                expected_event_log_path = _review_runtime_event_log_path(
+                    control_repo,
+                    task_id,
+                    fingerprint,
+                ).resolve()
+                if Path(_text(receipt.get("event_log_path"))).resolve() != expected_event_log_path:
+                    raise APError("Reviewer runtime event log path is not canonical.")
+                if Path(_text(assigned_review.get("runtime_event_log_path"))).resolve() != expected_event_log_path:
+                    raise APError("Reviewer runtime event log manifest binding is invalid.")
+                if _private_review_file_sha256(expected_event_log_path, "event log") != _text(
+                    receipt.get("event_log_sha256")
+                ):
+                    raise APError("Reviewer runtime event log SHA-256 binding is invalid.")
             expected_receipt = {
                 "task_id": task_id,
                 "reviewer": reviewer,
@@ -12271,7 +13440,7 @@ def _push_current_task(repo: Path, manifest: dict, expected_commit: str = "") ->
     manifest["last_commit"] = commit_sha
     manifest["claimed_paths"] = _changed_files(repo, _text(manifest.get("base_sha")))
     review = manifest.get("review") or {}
-    if _text(review.get("verdict")) == "approved":
+    if _text(review.get("verdict")) in {"approved", "runtime-bypassed"}:
         review["diff_head"] = commit_sha
         review["diff_fingerprint"] = _task_review_fingerprint(repo, manifest)
         manifest["review"] = review
@@ -12819,6 +13988,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--json", action="store_true")
     s.add_argument("--runner-command-json", help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_review_run)
+
+    s = sp.add_parser(
+        "review-runtime-override",
+        help="Record an explicit user-authorized bypass for an exhausted Reviewer runtime failure",
+    )
+    s.add_argument("task_id")
+    s.add_argument("--diff-fingerprint", required=True)
+    s.add_argument("--authorized-by", required=True)
+    s.add_argument("--authorization-ref", required=True)
+    s.add_argument("--reason", required=True)
+    s.add_argument("--evidence", action="append", required=True)
+    s.add_argument("--confirm-runtime-bypass", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_review_runtime_override)
 
     s = sp.add_parser("task-submodule-sync")
     s.add_argument("task_id")

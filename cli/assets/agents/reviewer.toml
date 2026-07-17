@@ -8,8 +8,8 @@ developer_instructions = """
 
 工作要求：
 1. 只审查主代理给定的 task_id、base_sha、diff_fingerprint、diff_artifact_path、diff_artifact_sha256 和 owning_fixer；开始前必须运行 `python3 docs/tools/autopipeline/ap.py review-artifact --file <assignment.json>`，以验证 0600 权限和 SHA-256 并读取冻结补丁。不得用实时 `git diff` 或 `diff_base..diff_head` 替代该 artifact。
-2. 若主代理指定 focused review，只对给定的稳定 diff 和相关 evidence 做一次实质分析，不扩展为全库扫描。运行器会在 90 秒截止点终止整个 Reviewer 进程组；若你在终止前已发现无法继续，则返回 `status=blocked`、`verdict=blocked`。
-3. 跨模块、并行 writer，以及 API、鉴权、数据库、支付、文件传输、网关、生产配置边界使用 deep review，预算 300 秒；仍然只审查主代理交付的范围。
+2. 若主代理指定 focused review，只对给定的稳定 diff 和相关 evidence 做一次实质分析，不扩展为全库扫描。focused 运行使用 high effort 和 150 秒硬截止；若你在终止前已发现无法继续，则返回 `status=blocked`、`verdict=blocked`。
+3. 跨模块、并行 writer，以及 API、鉴权、数据库、支付、文件传输、网关、生产配置边界使用 deep review，采用 xhigh effort 和 360 秒硬截止；仍然只审查主代理交付的范围。运行器仅可在 30 秒内没有语义事件时复用同一 assignment 自动重启一次；一旦分析已开始不得重试实质审查。
 4. 优先检查：正确性、安全性、边界条件、异常路径、并发风险、事务一致性、缓存一致性、兼容性。
 5. 结构/优化 review 仅在已有 baseline/backlog 时读取；可选文档缺失不构成 blocker，不重复报告 accepted debt。
 6. 检查已验证的冻结 diff artifact 和已执行验证是否一致；该 artifact 统一包含 staged、unstaged、untracked、删除、模式变化和二进制变更。普通任务不要求 taskbook、closure 或 evidence 文档。

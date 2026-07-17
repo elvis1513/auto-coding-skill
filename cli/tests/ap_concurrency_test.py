@@ -30,6 +30,7 @@ def command(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("CODEX_THREAD_ID", _TEST_OWNER)
+    env.setdefault("AUTOCODING_TEST_RUNNER_OVERRIDE", "1")
     result = subprocess.run(
         list(args),
         cwd=cwd,
@@ -239,7 +240,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "    raise SystemExit(13)\n"
             "if os.environ.get('AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256') != actual:\n"
             "    raise SystemExit(14)\n"
-            "if int(os.environ['AUTOCODING_REVIEW_TIMEOUT_SECONDS']) not in (90, 300):\n"
+            "if int(os.environ['AUTOCODING_REVIEW_TIMEOUT_SECONDS']) not in (150, 360):\n"
             "    raise SystemExit(15)\n"
             "for token in sys.argv[2:]:\n"
             "    if token.encode('utf-8') not in payload:\n"
@@ -397,6 +398,28 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         if not common_dir.is_absolute():
             common_dir = (repo / common_dir).resolve()
         return common_dir / "auto-coding-skill" / "tasks" / f"{task_id}.json"
+
+    def shorten_review_deadline(
+        self,
+        repo: Path,
+        task_id: str,
+        issued: dict,
+        seconds: int = 2,
+    ) -> None:
+        deadline = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=seconds)
+        assignment = issued["assignment"]
+        assignment["deadline_at"] = deadline.isoformat()
+        assignment["issued_at"] = (deadline - timedelta(seconds=150)).isoformat()
+        assignment_path = Path(issued["assignment_path"])
+        assignment_path.write_text(json.dumps(assignment, indent=2) + "\n", encoding="utf-8")
+        manifest_path = self.registry_manifest_path(repo, task_id)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["review"]["issued_at"] = assignment["issued_at"]
+        manifest["review"]["deadline_at"] = assignment["deadline_at"]
+        manifest["review"]["assignment_sha256"] = hashlib.sha256(
+            assignment_path.read_bytes()
+        ).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     def install_hook(self, repo: Path, name: str, body: str) -> Path:
         common_dir = Path(git_output(repo, "rev-parse", "--git-common-dir"))
@@ -960,7 +983,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertEqual(first, second)
         assignment = first["assignment"]
         self.assertEqual("focused", assignment["review_depth"])
-        self.assertEqual(90, assignment["timeout_seconds"])
+        self.assertEqual(150, assignment["timeout_seconds"])
         self.assertEqual(1, assignment["scope_revision"])
         self.assertTrue(Path(first["assignment_path"]).is_file())
         assignment_path = Path(first["assignment_path"])
@@ -981,7 +1004,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertEqual(artifact, emitted.stdout.encode("utf-8"))
         issued = datetime.fromisoformat(assignment["issued_at"])
         deadline = datetime.fromisoformat(assignment["deadline_at"])
-        self.assertEqual(90, int((deadline - issued).total_seconds()))
+        self.assertEqual(150, int((deadline - issued).total_seconds()))
 
         artifact_path.write_bytes(artifact + b"tampered\n")
         tampered = self.ap(
@@ -1235,7 +1258,153 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, tampered.returncode)
-        self.assertIn("receipt does not bind", tampered.stdout + tampered.stderr)
+        self.assertIn("result changed", tampered.stdout + tampered.stderr)
+
+    def test_review_run_retries_clean_exit_without_event_and_rejects_approved_file(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-NO-EVENT", "shared.txt")
+        (worktree / "shared.txt").write_text("review without event\n", encoding="utf-8")
+        counter = root / "attempt-count.txt"
+        runner_path = root / "no-event-reviewer.py"
+        runner_path.write_text(
+            "import json, os\n"
+            "from pathlib import Path\n"
+            f"counter = Path({str(counter)!r})\n"
+            "counter.write_text(str(int(counter.read_text() or '0') + 1) if counter.exists() else '1')\n"
+            "Path(os.environ['AUTOCODING_REVIEW_RESULT']).write_text(json.dumps({'verdict': 'approved'}) + '\\n')\n",
+            encoding="utf-8",
+        )
+        rejected = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-NO-EVENT",
+            "--reviewer",
+            "reviewer-no-event",
+            "--runner-command-json",
+            json.dumps([sys.executable, str(runner_path)]),
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("runtime-unavailable", rejected.stdout + rejected.stderr)
+        self.assertEqual("2", counter.read_text())
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-NO-EVENT", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("runtime-unavailable", status["review"]["runtime_state"])
+        self.assertEqual("blocked", status["review"]["verdict"])
+
+    def test_substantive_result_written_before_timeout_cannot_be_bypassed(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-SUBSTANTIVE", "shared.txt")
+        (worktree / "shared.txt").write_text("substantive finding\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-SUBSTANTIVE",
+                "--reviewer",
+                "reviewer-substantive",
+                "--json",
+            ).stdout
+        )
+        self.shorten_review_deadline(repo, "REVIEW-SUBSTANTIVE", issued)
+        runner_path = root / "substantive-reviewer.py"
+        runner_path.write_text(
+            "import json, os, time\n"
+            "from pathlib import Path\n"
+            "result = Path(os.environ['AUTOCODING_REVIEW_RESULT'])\n"
+            "result.write_text(json.dumps({'verdict': 'changes-requested', 'summary': 'real defect'}) + '\\n')\n"
+            "result.chmod(0o600)\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        timed_out = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-SUBSTANTIVE",
+            "--reviewer",
+            "reviewer-substantive",
+            "--runner-command-json",
+            json.dumps([sys.executable, str(runner_path)]),
+            check=False,
+        )
+        self.assertNotEqual(0, timed_out.returncode)
+        self.assertIn("cannot be bypassed", timed_out.stdout + timed_out.stderr)
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-SUBSTANTIVE", "--json").stdout
+        )["tasks"][0]
+        review = status["review"]
+        self.assertEqual("changes-requested", review["verdict"])
+        self.assertEqual("blocked", review["runtime_state"])
+        receipt = json.loads(Path(review["runtime_receipt_path"]).read_text())
+        self.assertEqual("blocked", receipt["status"])
+        self.assertEqual("changes-requested", receipt["verdict"])
+        self.assertEqual(1, len(receipt["attempts"]))
+        bypass = self.ap(
+            worktree,
+            "review-runtime-override",
+            "REVIEW-SUBSTANTIVE",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--authorized-by",
+            "product-owner",
+            "--authorization-ref",
+            "conversation-substantive",
+            "--reason",
+            "A substantive Reviewer result must remain blocking.",
+            "--evidence",
+            "reviewer returned changes requested",
+            "--confirm-runtime-bypass",
+            check=False,
+        )
+        self.assertNotEqual(0, bypass.returncode)
+        self.assertIn("allowed only after", bypass.stdout + bypass.stderr)
+
+    def test_substantive_agent_message_before_timeout_cannot_be_bypassed(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-EVENT-FINDING", "shared.txt")
+        (worktree / "shared.txt").write_text("event finding\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-EVENT-FINDING",
+                "--reviewer",
+                "reviewer-event-finding",
+                "--json",
+            ).stdout
+        )
+        self.shorten_review_deadline(repo, "REVIEW-EVENT-FINDING", issued)
+        runner_path = root / "event-finding-reviewer.py"
+        runner_path.write_text(
+            "import json, sys, time\n"
+            "result = json.dumps({'verdict': 'blocked', 'summary': 'event-only defect'})\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+            "sys.stdout.write(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': result}}))\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        timed_out = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-EVENT-FINDING",
+            "--reviewer",
+            "reviewer-event-finding",
+            "--runner-command-json",
+            json.dumps([sys.executable, str(runner_path)]),
+            check=False,
+        )
+        self.assertNotEqual(0, timed_out.returncode)
+        self.assertIn("cannot be bypassed", timed_out.stdout + timed_out.stderr)
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-EVENT-FINDING", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("blocked", status["review"]["verdict"])
+        self.assertEqual("blocked", status["review"]["runtime_state"])
+        result = json.loads(Path(status["review"]["runtime_result_path"]).read_text())
+        self.assertEqual("event-only defect", result["summary"])
 
     def test_blocked_runtime_cannot_be_reassigned_or_overwritten_as_approved(self) -> None:
         root, repo, _ = self.make_repo()
@@ -1290,8 +1459,27 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, overwritten.returncode)
         self.assertIn("runtime state=blocked", overwritten.stdout + overwritten.stderr)
+        bypass = self.ap(
+            worktree,
+            "review-runtime-override",
+            "REVIEW-BLOCKED",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--authorized-by",
+            "product-owner",
+            "--authorization-ref",
+            "conversation-blocked",
+            "--reason",
+            "User cannot override a substantive Reviewer blocked verdict.",
+            "--evidence",
+            "reviewer returned blocked",
+            "--confirm-runtime-bypass",
+            check=False,
+        )
+        self.assertNotEqual(0, bypass.returncode)
+        self.assertIn("allowed only after", bypass.stdout + bypass.stderr)
 
-    def test_review_run_terminates_real_process_at_original_deadline(self) -> None:
+    def test_review_run_retries_runtime_unavailable_and_allows_bound_user_override(self) -> None:
         root, repo, _ = self.make_repo()
         worktree = self.start_task(repo, "REVIEW-TIMEOUT", "shared.txt")
         (worktree / "shared.txt").write_text("review me slowly\n", encoding="utf-8")
@@ -1305,45 +1493,145 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 "--json",
             ).stdout
         )
-        deadline = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=2)
-        assignment = issued["assignment"]
-        assignment["deadline_at"] = deadline.isoformat()
-        assignment["issued_at"] = (deadline - timedelta(seconds=90)).isoformat()
-        assignment_path = Path(issued["assignment_path"])
-        assignment_path.write_text(json.dumps(assignment, indent=2) + "\n", encoding="utf-8")
-        manifest_path = self.registry_manifest_path(repo, "REVIEW-TIMEOUT")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["review"]["issued_at"] = assignment["issued_at"]
-        manifest["review"]["deadline_at"] = assignment["deadline_at"]
-        manifest["review"]["assignment_sha256"] = hashlib.sha256(
-            assignment_path.read_bytes()
-        ).hexdigest()
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        self.shorten_review_deadline(repo, "REVIEW-TIMEOUT", issued, seconds=5)
 
         slow_reviewer = root / "slow-reviewer.py"
         slow_reviewer.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
         started = time.monotonic()
-        timed_out = self.ap(
-            worktree,
-            "review-run",
-            "REVIEW-TIMEOUT",
-            "--reviewer",
-            "reviewer-timeout",
-            "--runner-command-json",
-            json.dumps([sys.executable, str(slow_reviewer)]),
-            check=False,
-        )
+        previous_startup_timeout = os.environ.get("AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS")
+        os.environ["AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS"] = "0.1"
+        try:
+            timed_out = self.ap(
+                worktree,
+                "review-run",
+                "REVIEW-TIMEOUT",
+                "--reviewer",
+                "reviewer-timeout",
+                "--runner-command-json",
+                json.dumps([sys.executable, str(slow_reviewer)]),
+                check=False,
+            )
+        finally:
+            if previous_startup_timeout is None:
+                os.environ.pop("AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["AUTOCODING_REVIEW_STARTUP_TIMEOUT_SECONDS"] = previous_startup_timeout
         elapsed = time.monotonic() - started
         self.assertNotEqual(0, timed_out.returncode)
         self.assertLess(elapsed, 6.0)
-        self.assertIn("timed out and was terminated", timed_out.stdout + timed_out.stderr)
+        self.assertIn("runtime-unavailable", timed_out.stdout + timed_out.stderr)
         status = json.loads(
             self.ap(worktree, "task-status", "REVIEW-TIMEOUT", "--json").stdout
         )["tasks"][0]
         self.assertEqual("blocked", status["review"]["verdict"])
-        self.assertEqual("timed-out", status["review"]["runtime_state"])
+        self.assertEqual("runtime-unavailable", status["review"]["runtime_state"])
         receipt = json.loads(Path(status["review"]["runtime_receipt_path"]).read_text())
-        self.assertEqual("timed-out", receipt["status"])
+        self.assertEqual(2, receipt["schema"])
+        self.assertEqual("runtime-unavailable", receipt["status"])
+        self.assertEqual(2, len(receipt["attempts"]))
+        self.assertRegex(receipt["event_log_sha256"], r"^[0-9a-f]{64}$")
+
+        receipt_path = Path(status["review"]["runtime_receipt_path"])
+        original_receipt = receipt_path.read_bytes()
+        tampered_receipt = json.loads(original_receipt)
+        tampered_receipt["failure_kind"] = "tampered-before-override"
+        receipt_path.write_text(json.dumps(tampered_receipt) + "\n", encoding="utf-8")
+        rejected_receipt = self.ap(
+            worktree,
+            "review-runtime-override",
+            "REVIEW-TIMEOUT",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--authorized-by",
+            "product-owner",
+            "--authorization-ref",
+            "conversation-pre-tamper",
+            "--reason",
+            "Tampered pre-override evidence must be rejected.",
+            "--evidence",
+            "targeted tests passed",
+            "--confirm-runtime-bypass",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected_receipt.returncode)
+        self.assertIn("changed after failure finalization", rejected_receipt.stdout + rejected_receipt.stderr)
+        receipt_path.write_bytes(original_receipt)
+
+        event_log_path = Path(status["review"]["runtime_event_log_path"])
+        original_event_log = event_log_path.read_bytes()
+        event_log_path.write_bytes(original_event_log + b'{"event_type":"tampered"}\n')
+        rejected_event = self.ap(
+            worktree,
+            "review-runtime-override",
+            "REVIEW-TIMEOUT",
+            "--diff-fingerprint",
+            status["current_diff_fingerprint"],
+            "--authorized-by",
+            "product-owner",
+            "--authorization-ref",
+            "conversation-event-tamper",
+            "--reason",
+            "Tampered event evidence must be rejected before override.",
+            "--evidence",
+            "targeted tests passed",
+            "--confirm-runtime-bypass",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected_event.returncode)
+        self.assertIn("event log changed", rejected_event.stdout + rejected_event.stderr)
+        event_log_path.write_bytes(original_event_log)
+
+        override = json.loads(
+            self.ap(
+                worktree,
+                "review-runtime-override",
+                "REVIEW-TIMEOUT",
+                "--diff-fingerprint",
+                status["current_diff_fingerprint"],
+                "--authorized-by",
+                "product-owner",
+                "--authorization-ref",
+                "conversation-2026-07-17",
+                "--reason",
+                "User accepted the exhausted Reviewer runtime failure.",
+                "--evidence",
+                "targeted tests passed",
+                "--confirm-runtime-bypass",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("runtime-bypassed", override["verdict"])
+        bypassed_status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-TIMEOUT", "--json").stdout
+        )["tasks"][0]
+        self.assertEqual("runtime-bypassed", bypassed_status["review"]["verdict"])
+        self.assertEqual("runtime-bypassed", bypassed_status["review"]["runtime_state"])
+
+        receipt_path = Path(bypassed_status["review"]["runtime_receipt_path"])
+        original_receipt = receipt_path.read_bytes()
+        tampered_receipt = json.loads(original_receipt)
+        tampered_receipt["failure_kind"] = "tampered"
+        receipt_path.write_text(json.dumps(tampered_receipt) + "\n", encoding="utf-8")
+        rejected_tamper = self.ap(
+            worktree,
+            "commit-push",
+            "REVIEW-TIMEOUT",
+            "--msg",
+            "test: reject tampered runtime bypass",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected_tamper.returncode)
+        self.assertIn("receipt SHA-256", rejected_tamper.stdout + rejected_tamper.stderr)
+        receipt_path.write_bytes(original_receipt)
+
+        pushed = self.ap(
+            worktree,
+            "commit-push",
+            "REVIEW-TIMEOUT",
+            "--msg",
+            "test: allow bound runtime bypass",
+        )
+        self.assertIn("commit-push", pushed.stdout + pushed.stderr)
 
     def test_task_review_requires_assignment_and_exact_head(self) -> None:
         _, repo, _ = self.make_repo()
@@ -1412,7 +1700,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         assignment = issued["assignment"]
         past_deadline = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=1)
         assignment["deadline_at"] = past_deadline.isoformat()
-        assignment["issued_at"] = (past_deadline - timedelta(seconds=90)).isoformat()
+        assignment["issued_at"] = (past_deadline - timedelta(seconds=150)).isoformat()
         assignment_path.write_text(json.dumps(assignment, indent=2) + "\n", encoding="utf-8")
 
         manifest_path = self.registry_manifest_path(repo, "REVIEW-EXPIRED")

@@ -113,6 +113,9 @@ class AutoCodingProfileTests(unittest.TestCase):
             "diff_base": "HEAD~1",
             "diff_head": "HEAD",
             "diff_fingerprint": "a" * 64,
+            "diff_artifact_path": "/tmp/review.patch",
+            "diff_artifact_sha256": "b" * 64,
+            "diff_artifact_format": "git-binary-patch-v1",
             "owning_fixer": "fixer-1",
         }
         assignment.update(overrides)
@@ -137,6 +140,54 @@ class AutoCodingProfileTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("change\n", encoding="utf-8")
         return repo, cfg
+
+    def test_direct_cleanup_restores_active_state_when_registry_removal_fails(self) -> None:
+        repo, _ = self.make_repo()
+        manifest = {
+            "task_id": "DIRECT-CLEANUP-RETRY",
+            "task_uuid": "direct-cleanup-uuid",
+            "worktree_path": str(repo),
+        }
+        active_path = ap._worktree_manifest_path(repo)
+        ap._write_json_object(active_path, manifest)
+
+        with mock.patch.object(
+            ap,
+            "_delete_task_manifest",
+            side_effect=APError("simulated registry failure"),
+        ):
+            with self.assertRaisesRegex(APError, "simulated registry failure"):
+                ap._clear_direct_task(repo, manifest)
+
+        restored = ap._read_json_object(active_path)
+        self.assertIsNotNone(restored)
+        self.assertEqual(manifest["task_uuid"], restored["task_uuid"])
+
+    def test_registry_failure_preserves_review_evidence_for_retry(self) -> None:
+        repo, _ = self.make_repo()
+        manifest = {
+            "task_id": "CLEANUP-EVIDENCE",
+            "task_uuid": "cleanup-evidence-uuid",
+            "worktree_path": str(repo),
+        }
+        registry_path = ap._task_registry_path(repo, manifest["task_id"])
+        ap._write_json_object(registry_path, manifest)
+        review_dir = ap._task_review_dir(repo, manifest["task_id"], create=True)
+        evidence_path = review_dir / "evidence.patch"
+        ap._write_private_bytes(evidence_path, b"immutable evidence\n")
+        original_unlink = Path.unlink
+
+        def fail_registry_unlink(path: Path, *args: object, **kwargs: object) -> None:
+            if path == registry_path:
+                raise PermissionError("simulated registry permission failure")
+            original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", new=fail_registry_unlink):
+            with self.assertRaisesRegex(APError, "Cannot remove task registry state"):
+                ap._delete_task_manifest(repo, manifest)
+
+        self.assertTrue(registry_path.exists())
+        self.assertEqual(b"immutable evidence\n", evidence_path.read_bytes())
 
     @staticmethod
     def write_config(repo: Path, cfg: dict) -> None:
@@ -628,6 +679,9 @@ class AutoCodingProfileTests(unittest.TestCase):
             "diff_base": "HEAD~1",
             "diff_head": "HEAD",
             "diff_fingerprint": fingerprint,
+            "diff_artifact_path": "/tmp/review.patch",
+            "diff_artifact_sha256": "b" * 64,
+            "diff_artifact_format": "git-binary-patch-v1",
             "owning_fixer": "fixer-1",
         }
         ap._validate_orchestration_contract("assignment", assignment)
@@ -734,6 +788,10 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertIn("--ignore-user-config", command)
         self.assertIn("read-only", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
+        prompt = command[-1]
+        self.assertIn("docs/tools/autopipeline/ap.py review-artifact --file", prompt)
+        self.assertIn("diff_artifact_sha256", prompt)
+        self.assertIn("never substitute a live git diff", prompt)
         developer_override = next(
             item for item in command if item.startswith("developer_instructions=")
         )

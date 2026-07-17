@@ -9,7 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.2.6 makes the managed structure/optimization description defer to
+Version 4.2.7 freezes every pre-commit Reviewer diff as a private, SHA-256-bound
+Git-local patch, including staged, unstaged, untracked, deleted, mode, symlink,
+and binary changes. Version 4.2.6 makes the managed structure/optimization description defer to
 preserved project frontmatter instead of restating template defaults. Version
 4.2.5 keeps JSX self-closing and closing-tag slashes out of regex state.
 Version 4.2.4 fixes TypeScript function-body detection after an explicit return
@@ -243,7 +245,12 @@ never triggers a broader fallback.
   another substantive review.
 - `review-assignment` writes the validated assignment under Git-local state with
   the exact fingerprint, HEAD, scope revision, owning fixer, review depth, and
-  90/300-second deadline. Reissuing the same live assignment is idempotent;
+  90/300-second deadline. Before that deadline begins, it freezes the exact
+  task-owned working-tree state into a mode-0600 binary patch and binds its
+  canonical path, format, and SHA-256 into the assignment. Reissuing the same
+  live assignment is idempotent. Snapshot inputs and emitted patches above
+  64 MiB fail closed and require a narrower scope or a project-specific
+  large-artifact review path;
   expired or completed attempts cannot be silently renewed, and late results are
   rejected by `task-review`.
 - `review-run` is the default executable path: it creates/reuses that assignment,
@@ -258,8 +265,16 @@ never triggers a broader fallback.
 - Historical debt does not block product work unless the current change worsens it.
 
 Before returning a Reviewer result, use the absolute assignment path printed by
-`review-assignment` to generate the complete 16-field skeleton, then fill its
-summary, evidence, findings, and risks:
+`review-assignment` to verify and read the frozen patch. Never reconstruct a
+pre-commit review from `diff_base..diff_head` or a live `git diff`:
+
+```bash
+python3 docs/tools/autopipeline/ap.py review-artifact \
+  --file <assignment.json>
+```
+
+Then generate the complete 16-field skeleton and fill its summary, evidence,
+findings, and risks:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py agent-result-template \
@@ -292,6 +307,20 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.2.7
+
+- Replaced live pre-commit diff discovery with an immutable Git-local patch
+  artifact that captures staged, unstaged, untracked, deleted, mode, symlink,
+  and binary changes in both direct and isolated task modes.
+- Bound the artifact's canonical path, format, and SHA-256 into the Reviewer
+  assignment, then bound the complete assignment SHA-256 into runtime state,
+  receipt, verdict validation, and final commit authorization. The deadline
+  starts only after snapshot creation.
+- Added the full `review-artifact` command for verified Reviewer access and
+  lifecycle cleanup for task artifacts after successful direct closure,
+  isolated cleanup, or explicit orphan pruning. Cleanup now preserves registry
+  and review evidence on failure so the same task can be retried safely.
 
 ## What changed in 4.2.6
 

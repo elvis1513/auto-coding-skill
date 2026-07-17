@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.6 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.7 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
@@ -83,9 +83,9 @@ failure may continue in the same conversation/task without a second lifecycle.
   seconds for parallel/cross-module or sensitive boundaries. Timeout is `blocked`
   and is not sent to `task-review`.
 - Run `python3 docs/tools/autopipeline/ap.py review-run <TASK> --reviewer <ID> --json`.
-  It launches a separate read-only Codex process without the lifecycle-owner identity,
-  stops its process group at the fixed deadline, and records only the assigned HEAD,
-  scope, identity, and fingerprint. `review-assignment` alone requires a different
+  It launches a separate read-only Codex process without the lifecycle-owner identity, stops its process group at the fixed deadline,
+  and records only the assigned HEAD, scope, identity, fingerprint, and mode-0600 SHA-256-bound Git-local diff artifact.
+  Before analysis, the Reviewer runs `python3 docs/tools/autopipeline/ap.py review-artifact --file <assignment.json>` and reviews that frozen patch, never a reconstructed live `git diff`. `review-assignment` alone requires a different
   deadline-capable host and cannot stop an in-app subagent.
 - `agent-result-template` supplies all 16 fields; contract checking aggregates errors,
   and `review-run` safely normalizes presentation fields from the same analysis.

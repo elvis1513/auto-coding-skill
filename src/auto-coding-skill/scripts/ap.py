@@ -16,11 +16,14 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.parse
@@ -60,6 +63,9 @@ _REVIEW_RUNTIME_FIELDS = (
     "runtime_receipt_path",
 )
 _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
+_REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
+_REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+_REVIEW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEEP_REVIEW_CATEGORIES = {
     "api",
     "auth",
@@ -78,6 +84,19 @@ class _ReviewerRuntimeTimeout(RuntimeError):
         super().__init__("Reviewer runtime exceeded its assignment deadline.")
         self.stdout = stdout
         self.stderr = stderr
+
+
+def _review_diff_artifact_limit() -> int:
+    raw = _text(os.environ.get("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES"))
+    if not raw:
+        return _REVIEW_DIFF_ARTIFACT_MAX_BYTES
+    try:
+        requested = int(raw)
+    except ValueError as exc:
+        raise APError("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES must be a positive integer.") from exc
+    if requested < 1:
+        raise APError("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES must be a positive integer.")
+    return min(requested, _REVIEW_DIFF_ARTIFACT_MAX_BYTES)
 _RECOMMENDED_FINAL_COMMAND_SECONDS = 120.0
 _RECOMMENDED_FINAL_TOTAL_SECONDS = 180.0
 _FINAL_GATE_CACHE_SCHEMA = 1
@@ -85,7 +104,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.6", "engineering": "4.2.6"},
+    "managed_versions": {"agents": "4.2.7", "engineering": "4.2.7"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -1148,8 +1167,8 @@ def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
     if _text(workflow_cfg.get("completion")).lower() != "push":
         workflow_cfg["completion"] = "push"
         changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.6":
-        workflow_cfg["skill_version"] = "4.2.6"
+    if _text(workflow_cfg.get("skill_version")) != "4.2.7":
+        workflow_cfg["skill_version"] = "4.2.7"
         changed.append("workflow.skill_version")
 
     commands_cfg = cfg.setdefault("commands", {})
@@ -1462,16 +1481,16 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         if current_agents:
             archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.6\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.2.7\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.6.md"
+            archive = archive_dir / "AGENTS.pre-4.2.7.md"
             if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
                 digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.6-{digest}.md"
+                archive = archive_dir / f"AGENTS.pre-4.2.7-{digest}.md"
             if not archive.exists():
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
@@ -2572,12 +2591,125 @@ def _save_task_manifest(repo: Path, manifest: dict, *, strict_worktree: bool = F
                     raise
 
 
+def _guard_review_directory(path: Path, common_dir: Path, *, create: bool) -> None:
+    if path.is_symlink():
+        raise APError(f"Refusing symlinked Git-local review storage: {path}")
+    if path.exists():
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise APError(f"Cannot inspect Git-local review storage: {path}: {exc}") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise APError(f"Git-local review storage must be a directory: {path}")
+    elif create:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            _guard_review_directory(path, common_dir, create=False)
+        except OSError as exc:
+            raise APError(f"Cannot create Git-local review storage: {path}: {exc}") from exc
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(common_dir)
+    except (OSError, ValueError) as exc:
+        raise APError(f"Git-local review storage escapes the Git common directory: {path}") from exc
+    if os.name == "posix" and path.exists():
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            raise APError(f"Cannot protect Git-local review storage: {path}: {exc}") from exc
+
+
+def _task_review_root(repo: Path, *, create: bool = False) -> Path:
+    common_dir = _git_common_dir(repo).resolve()
+    state_root = common_dir / "auto-coding-skill"
+    review_root = state_root / "reviews"
+    _guard_review_directory(state_root, common_dir, create=create)
+    if state_root.exists():
+        _guard_review_directory(review_root, common_dir, create=create)
+    return review_root
+
+
+def _task_review_dir(repo: Path, task_id: str, *, create: bool = False) -> Path:
+    common_dir = _git_common_dir(repo).resolve()
+    review_root = _task_review_root(repo, create=create)
+    review_dir = review_root / _validate_task_id(task_id)
+    if review_root.exists():
+        _guard_review_directory(review_dir, common_dir, create=create)
+    return review_dir
+
+
+def _process_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _cleanup_stale_review_snapshots(root: Path, *, legacy_root: bool = False) -> None:
+    if not root.exists() or root.is_symlink():
+        return
+    now = time.time()
+    for candidate in sorted(root.glob(".snapshot-*")):
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        match = re.fullmatch(r"\.snapshot-(\d+)-[A-Za-z0-9_-]+", candidate.name)
+        if match and _process_is_running(int(match.group(1))):
+            continue
+        if not match:
+            try:
+                age_seconds = now - candidate.stat().st_mtime
+            except OSError:
+                continue
+            if not legacy_root or age_seconds < 3600:
+                continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError as exc:
+            raise APError(f"Cannot remove stale Git-local review snapshot: {candidate}: {exc}") from exc
+
+
+def _delete_task_review_artifacts(repo: Path, task_id: str) -> None:
+    review_dir = _task_review_dir(repo, task_id)
+    if review_dir.is_symlink():
+        raise APError(f"Refusing to remove symlinked Git-local review state: {review_dir}")
+    if not review_dir.exists():
+        return
+    try:
+        shutil.rmtree(review_dir)
+    except OSError as exc:
+        raise APError(f"Cannot remove Git-local review state: {review_dir}: {exc}") from exc
+
+
 def _delete_task_manifest(repo: Path, manifest: dict) -> None:
     task_id = _validate_task_id(_text(manifest.get("task_id")))
+    registry_path = _task_registry_path(repo, task_id)
+    try:
+        registry_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise APError(f"Cannot remove task registry state: {registry_path}: {exc}") from exc
+
+    # Registry deletion is the authoritative lifecycle transition. Review
+    # evidence is deliberately removed afterwards so a registry failure never
+    # leaves a live task without the immutable artifact that justified it. If
+    # artifact cleanup fails, task-prune can safely retry it as orphaned state.
     worktree_value = _text(manifest.get("worktree_path"))
     if worktree_value and Path(worktree_value).exists():
         _clear_final_gate_receipt(Path(worktree_value))
-    _task_registry_path(repo, task_id).unlink(missing_ok=True)
+    try:
+        _delete_task_review_artifacts(repo, task_id)
+    except APError as exc:
+        print(
+            f"[task-cleanup] warning: registry removed but Git-local review state remains for task-prune: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _current_branch(repo: Path) -> str:
@@ -3062,15 +3194,41 @@ def _task_staging_paths(repo: Path, cfg: dict, manifest: dict) -> list[str]:
     return paths
 
 
-def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> str:
+def _review_snapshot_git(
+    repo: Path,
+    arguments: list[str],
+    env: dict[str, str],
+) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=str(repo),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise APError(
+            f"Cannot capture immutable task review snapshot ({completed.returncode}): "
+            f"git {' '.join(arguments)}\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+        )
+    return completed.stdout
+
+
+def _task_review_paths(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> list[str]:
     base_sha = _text(manifest.get("base_sha"))
     owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
     managed = set(_task_managed_paths(cfg or _load_cfg(repo), manifest))
-    paths = [
+    return [
         path
         for path in _task_changed_paths_from_base(repo, base_sha)
         if path not in managed and _path_is_owned(path, owned)
     ]
+
+
+def _task_review_fingerprint_for_tree(manifest: dict, paths: list[str], tree_sha: str) -> str:
+    base_sha = _text(manifest.get("base_sha"))
+    owned = [_normalize_owned_path(item) for item in manifest.get("owned_paths") or []]
     digest = hashlib.sha256()
     digest.update(
         (
@@ -3082,21 +3240,188 @@ def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = N
         digest.update(f"owned:{owned_path}\0".encode("utf-8", errors="surrogateescape"))
     for rel in paths:
         digest.update(f"path:{rel}\0".encode("utf-8", errors="surrogateescape"))
+    digest.update(f"tree:{tree_sha}\0".encode("ascii"))
+    return digest.hexdigest()
+
+
+def _require_bounded_review_snapshot_input(repo: Path, paths: list[str]) -> None:
+    limit = _review_diff_artifact_limit()
+    total = 0
+    for rel in paths:
         path = repo / rel
         try:
-            mode = path.lstat().st_mode
-        except OSError:
-            digest.update(b"missing\0")
+            metadata = path.lstat()
+        except FileNotFoundError:
             continue
-        digest.update(f"mode:{mode:o}\0".encode("ascii"))
-        if path.is_symlink():
-            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
-        elif path.is_file():
-            digest.update(path.read_bytes())
-        else:
-            digest.update(b"non-file")
-        digest.update(b"\0")
-    return digest.hexdigest()
+        except OSError as exc:
+            raise APError(f"Cannot size review snapshot input {rel}: {exc}") from exc
+        if stat.S_ISREG(metadata.st_mode):
+            total += metadata.st_size
+        elif stat.S_ISLNK(metadata.st_mode):
+            try:
+                total += len(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            except OSError as exc:
+                raise APError(f"Cannot size review snapshot symlink {rel}: {exc}") from exc
+        if total > limit:
+            raise APError(
+                "Task-owned review snapshot input exceeds the 64 MiB safety limit; "
+                "narrow the task-owned scope or use a project-specific large-artifact review path."
+            )
+
+
+def _task_review_snapshot(
+    repo: Path,
+    manifest: dict,
+    cfg: Optional[dict] = None,
+    *,
+    include_patch: bool = False,
+) -> dict:
+    base_sha = _text(manifest.get("base_sha"))
+    paths = _task_review_paths(repo, manifest, cfg)
+    _require_bounded_review_snapshot_input(repo, paths)
+    task_id = _validate_task_id(_text(manifest.get("task_id")))
+    review_root = _task_review_dir(repo, task_id, create=True)
+    _cleanup_stale_review_snapshots(review_root)
+    snapshot_root = Path(
+        tempfile.mkdtemp(prefix=f".snapshot-{os.getpid()}-", dir=review_root)
+    )
+    if os.name == "posix":
+        snapshot_root.chmod(0o700)
+    index_path = snapshot_root / "index"
+    object_dir = snapshot_root / "objects"
+    object_dir.mkdir(mode=0o700)
+    env = os.environ.copy()
+    inherited_alternates = _text(env.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"))
+    alternates = [str((_git_common_dir(repo) / "objects").resolve())]
+    if inherited_alternates:
+        alternates.append(inherited_alternates)
+    env.update(
+        {
+            "GIT_INDEX_FILE": str(index_path),
+            "GIT_OBJECT_DIRECTORY": str(object_dir),
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.pathsep.join(alternates),
+            "GIT_PAGER": "cat",
+        }
+    )
+    try:
+        _review_snapshot_git(repo, ["read-tree", base_sha], env)
+        for start in range(0, len(paths), 100):
+            _review_snapshot_git(
+                repo,
+                ["add", "-A", "--", *paths[start : start + 100]],
+                env,
+            )
+        tree_sha = _text(_review_snapshot_git(repo, ["write-tree"], env))
+        if not tree_sha:
+            raise APError("Cannot capture immutable task review snapshot tree.")
+        patch = b""
+        if include_patch:
+            patch_path = snapshot_root / "review.patch"
+            patch_arguments = [
+                "git",
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--diff-algorithm=myers",
+                "--no-indent-heuristic",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                base_sha,
+                tree_sha,
+                "--",
+            ]
+            patch_limit = _review_diff_artifact_limit()
+            stderr_path = snapshot_root / "review.stderr"
+            process: Optional[subprocess.Popen[bytes]] = None
+            try:
+                with patch_path.open("wb") as handle, stderr_path.open("wb") as stderr_handle:
+                    process = subprocess.Popen(
+                        patch_arguments,
+                        cwd=str(repo),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=stderr_handle,
+                    )
+                    if process.stdout is None:
+                        raise APError("Cannot capture immutable task review patch output.")
+                    patch_size = 0
+                    while True:
+                        chunk = process.stdout.read(64 * 1024)
+                        if not chunk:
+                            break
+                        patch_size += len(chunk)
+                        if patch_size > patch_limit:
+                            if process.poll() is None:
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=2)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    process.wait(timeout=2)
+                            raise APError(
+                                "Immutable task review patch exceeds the 64 MiB safety limit; "
+                                "narrow the task-owned scope or review the large artifact through a project-specific path."
+                            )
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    returncode = process.wait()
+            except OSError as exc:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
+                raise APError(f"Cannot render immutable task review patch: {exc}") from exc
+            if returncode != 0:
+                raise APError(
+                    "Cannot render immutable task review patch "
+                    f"({returncode}): {stderr_path.read_text(encoding='utf-8', errors='replace')}"
+                )
+            patch = patch_path.read_bytes()
+    finally:
+        try:
+            shutil.rmtree(snapshot_root)
+        except OSError as exc:
+            raise APError(
+                f"Cannot remove temporary Git-local review snapshot state: {snapshot_root}: {exc}"
+            ) from exc
+
+    return {
+        "fingerprint": _task_review_fingerprint_for_tree(manifest, paths, tree_sha),
+        "tree_sha": tree_sha,
+        "paths": paths,
+        "patch": patch,
+        "patch_sha256": hashlib.sha256(patch).hexdigest() if include_patch else "",
+    }
+
+
+def _task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> str:
+    return _text(_task_review_snapshot(repo, manifest, cfg).get("fingerprint"))
+
+
+def _staged_task_review_fingerprint(repo: Path, manifest: dict, cfg: Optional[dict] = None) -> str:
+    tree_sha = _text(run(["git", "write-tree"], cwd=repo).stdout)
+    if not tree_sha:
+        raise APError("Cannot bind the staged task tree to its approved review.")
+    return _task_review_fingerprint_for_tree(
+        manifest,
+        _task_review_paths(repo, manifest, cfg),
+        tree_sha,
+    )
+
+
+def _require_staged_review_matches(repo: Path, cfg: dict, manifest: dict) -> None:
+    if not bool(manifest.get("review_required", int(manifest.get("schema") or 2) < 3)):
+        return
+    approved = _text((manifest.get("review") or {}).get("diff_fingerprint"))
+    staged = _staged_task_review_fingerprint(repo, manifest, cfg)
+    if staged != approved:
+        raise APError(
+            "The exact staged tree does not match the immutable Reviewer snapshot; refusing to commit."
+        )
 
 
 def _invalidate_task_review(manifest: dict, reason: str) -> None:
@@ -3164,6 +3489,25 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
         raise APError("Approved review fingerprint is stale for the current owned diff.")
     if _text(review.get("diff_base")) != _text(manifest.get("base_sha")):
         raise APError("Approved review base is stale for the current task base.")
+    assignment_path = _text(review.get("assignment_path"))
+    if not assignment_path:
+        raise APError("Approved review has no immutable diff assignment.")
+    expected_assignment_path = _review_assignment_path(
+        repo,
+        _text(manifest.get("task_id")),
+        fingerprint,
+    ).resolve()
+    if Path(assignment_path).resolve() != expected_assignment_path:
+        raise APError("Approved review assignment path does not match Git-local task state.")
+    assignment = _load_bound_review_assignment(
+        repo,
+        manifest,
+        expected_assignment_path,
+    )
+    for field in ("diff_artifact_path", "diff_artifact_sha256", "diff_artifact_format"):
+        if assignment.get(field) != review.get(field):
+            raise APError(f"Approved review {field} binding does not match its assignment.")
+    _validate_review_diff_artifact(repo, assignment)
     return fingerprint
 
 
@@ -6566,6 +6910,9 @@ def _agent_contract_shape() -> tuple[dict, list[str]]:
                 "diff_base",
                 "diff_head",
                 "diff_fingerprint",
+                "diff_artifact_path",
+                "diff_artifact_sha256",
+                "diff_artifact_format",
                 "owning_fixer",
                 "review_depth",
                 "timeout_seconds",
@@ -6918,9 +7265,21 @@ def _codex_reviewer_command(
             "Install Codex or run review-assignment and use another deadline-capable host."
         )
     instructions = _reviewer_agent_instructions(worktree)
+    artifact_command = shlex.join(
+        [
+            "python3",
+            "docs/tools/autopipeline/ap.py",
+            "review-artifact",
+            "--file",
+            str(assignment_path),
+        ]
+    )
     prompt = (
         f"Review the exact assignment at {assignment_path}. "
-        "Stay inside its diff, identity, and deadline. Use "
+        f"Before analysis, run `{artifact_command}`; it verifies diff_artifact_path, "
+        "mode 0600, and diff_artifact_sha256, then emits the immutable patch. "
+        "Review that emitted patch and never substitute a live git diff or diff_base..diff_head. "
+        "Stay inside its identity and deadline. Use "
         "`python3 docs/tools/autopipeline/ap.py agent-result-template --file "
         f"{assignment_path} --verdict <approved|changes-requested|blocked>` when useful. "
         "Return only one JSON object as the final response; do not modify files."
@@ -10145,6 +10504,220 @@ def _parse_iso_timestamp(value: object, field: str) -> _dt.datetime:
     return parsed.astimezone(_dt.timezone.utc)
 
 
+def _review_assignment_path(control_repo: Path, task_id: str, fingerprint: str) -> Path:
+    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
+        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
+    return _task_review_dir(control_repo, task_id) / f"{fingerprint}.assignment.json"
+
+
+def _review_diff_artifact_path(control_repo: Path, task_id: str, fingerprint: str) -> Path:
+    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
+        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
+    return _task_review_dir(control_repo, task_id) / f"{fingerprint}.patch"
+
+
+def _guard_review_file_parent(path: Path) -> None:
+    task_dir = path.parent
+    review_root = task_dir.parent
+    state_root = review_root.parent
+    common_dir = state_root.parent.resolve()
+    if review_root.name != "reviews" or state_root.name != "auto-coding-skill":
+        raise APError(f"Review file path is outside canonical Git-local storage: {path}")
+    for directory in (state_root, review_root, task_dir):
+        _guard_review_directory(directory, common_dir, create=False)
+    try:
+        task_dir.resolve().relative_to(common_dir)
+    except (OSError, ValueError) as exc:
+        raise APError(f"Review file path escapes the Git common directory: {path}") from exc
+    if path.is_symlink():
+        raise APError(f"Refusing symlinked Git-local review file: {path}")
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    _guard_review_file_parent(path)
+    temporary_name = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    if os.name == "posix":
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = -1
+        try:
+            directory_fd = os.open(path.parent, directory_flags)
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        except OSError as exc:
+            if directory_fd >= 0:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except OSError:
+                    pass
+            raise APError(f"Cannot protect Git-local review state: {path}: {exc}") from exc
+        finally:
+            if directory_fd >= 0:
+                os.close(directory_fd)
+        return
+
+    temporary = path.with_name(temporary_name)
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise APError(f"Cannot protect Git-local review state: {path}: {exc}") from exc
+
+
+def _read_private_review_file(path: Path, label: str) -> bytes:
+    _guard_review_file_parent(path)
+    if os.name == "posix":
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = -1
+        file_fd = -1
+        try:
+            directory_fd = os.open(path.parent, directory_flags)
+            file_fd = os.open(
+                path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Review {label} must be a regular Git-local file: {path}")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise APError(f"Review {label} must use mode 0600: {path}")
+            with os.fdopen(file_fd, "rb") as handle:
+                file_fd = -1
+                return handle.read()
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot read review {label}: {path}: {exc}") from exc
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+            if directory_fd >= 0:
+                os.close(directory_fd)
+
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+            raise APError(f"Review {label} must be a regular Git-local file: {path}")
+        return path.read_bytes()
+    except APError:
+        raise
+    except OSError as exc:
+        raise APError(f"Cannot read review {label}: {path}: {exc}") from exc
+
+
+def _read_verified_private_review_file(path: Path, expected_sha256: str, label: str) -> bytes:
+    if not _REVIEW_SHA256_RE.fullmatch(_text(expected_sha256)):
+        raise APError(f"Review {label} has an invalid SHA-256 binding.")
+    payload = _read_private_review_file(path, label)
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise APError(
+            f"Review {label} SHA-256 mismatch: expected={expected_sha256}, actual={actual_sha256}."
+        )
+    return payload
+
+
+def _review_assignment_file_sha256(path: Path) -> str:
+    return hashlib.sha256(_read_private_review_file(path, "assignment")).hexdigest()
+
+
+def _read_private_review_json(path: Path, label: str) -> Optional[dict]:
+    try:
+        payload = json.loads(_read_private_review_file(path, label).decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_bound_review_assignment(
+    control_repo: Path,
+    manifest: dict,
+    assignment_path: Path,
+) -> dict:
+    review = manifest.get("review") or {}
+    fingerprint = _text(review.get("diff_fingerprint"))
+    expected_path = _review_assignment_path(
+        control_repo,
+        _text(manifest.get("task_id")),
+        fingerprint,
+    ).resolve()
+    if assignment_path.resolve() != expected_path:
+        raise APError("Review assignment path does not match canonical Git-local task state.")
+    if _text(review.get("assignment_path")) and Path(_text(review.get("assignment_path"))).resolve() != expected_path:
+        raise APError("Review assignment manifest path does not match canonical Git-local task state.")
+    expected_sha256 = _text(review.get("assignment_sha256"))
+    if not _REVIEW_SHA256_RE.fullmatch(expected_sha256):
+        raise APError("Review assignment has no valid manifest SHA-256 binding.")
+    payload = _read_private_review_file(expected_path, "assignment")
+    if len(payload) > 1024 * 1024:
+        raise APError("Review assignment exceeds the 1 MiB contract limit.")
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise APError(
+            f"Review assignment SHA-256 mismatch: expected={expected_sha256}, actual={actual_sha256}."
+        )
+    try:
+        assignment = json.loads(payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise APError("Review assignment file is invalid JSON.") from exc
+    if not isinstance(assignment, dict):
+        raise APError("Review assignment file must contain one JSON object.")
+    _validate_orchestration_contract("assignment", assignment)
+    if _text(assignment.get("task_id")) != _text(manifest.get("task_id")):
+        raise APError("Review assignment task identity does not match its manifest.")
+    if _text(assignment.get("diff_fingerprint")) != fingerprint:
+        raise APError("Review assignment fingerprint does not match its manifest.")
+    return assignment
+
+
+def _persist_review_diff_artifact(path: Path, payload: bytes, expected_sha256: str) -> None:
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise APError("Generated review diff artifact SHA-256 is inconsistent.")
+    if path.exists() or path.is_symlink():
+        existing = _read_verified_private_review_file(path, expected_sha256, "diff artifact")
+        if existing != payload:
+            raise APError("Existing immutable review diff artifact does not match the current snapshot.")
+        return
+    _write_private_bytes(path, payload)
+    _read_verified_private_review_file(path, expected_sha256, "diff artifact")
+
+
+def _validate_review_diff_artifact(control_repo: Path, assignment: dict) -> bytes:
+    task_id = _validate_task_id(_text(assignment.get("task_id")))
+    fingerprint = _text(assignment.get("diff_fingerprint"))
+    expected_path = _review_diff_artifact_path(control_repo, task_id, fingerprint).resolve()
+    supplied_path = Path(_text(assignment.get("diff_artifact_path"))).resolve()
+    if supplied_path != expected_path:
+        raise APError("Review diff artifact path does not match canonical Git-local task state.")
+    if _text(assignment.get("diff_artifact_format")) != _REVIEW_DIFF_ARTIFACT_FORMAT:
+        raise APError("Review diff artifact format is unsupported.")
+    return _read_verified_private_review_file(
+        expected_path,
+        _text(assignment.get("diff_artifact_sha256")),
+        "diff artifact",
+    )
+
+
 def _task_review_policy(cfg: dict, worktree: Path, manifest: dict) -> tuple[str, int]:
     changed_paths = _task_changed_paths_from_base(worktree, _text(manifest.get("base_sha")))
     plan = _resolve_execution_plan(
@@ -10187,12 +10760,12 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             worktree,
             _text(manifest.get("base_sha")),
         )
-        owned_paths = [
+        changed_owned_paths = [
             path
             for path in changed_paths
             if _path_is_owned(path, list(manifest.get("owned_paths") or []))
         ]
-        if not owned_paths:
+        if not changed_owned_paths:
             raise APError("Cannot issue a review assignment before the task has an owned diff.")
         reviewer = _text(args.reviewer)
         if not reviewer or any(char in reviewer for char in "\0\r\n"):
@@ -10201,7 +10774,19 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
         owning_fixer = _text((manifest.get("writer_lease") or {}).get("holder")) or owner
         if reviewer in {owner, owning_fixer}:
             raise APError("Independent reviewer must differ from lifecycle owner and owning fixer.")
-        fingerprint = _task_review_fingerprint(worktree, manifest, worktree_cfg)
+        snapshot = _task_review_snapshot(
+            worktree,
+            manifest,
+            worktree_cfg,
+            include_patch=True,
+        )
+        fingerprint = _text(snapshot.get("fingerprint"))
+        patch = snapshot.get("patch")
+        if not isinstance(patch, bytes) or not patch:
+            raise APError("Cannot issue a review assignment for an empty immutable diff snapshot.")
+        artifact_sha256 = _text(snapshot.get("patch_sha256"))
+        artifact_path = _review_diff_artifact_path(control_repo, task_id, fingerprint)
+        _persist_review_diff_artifact(artifact_path, patch, artifact_sha256)
         depth, review_timeout = _task_review_policy(worktree_cfg, worktree, manifest)
         issued = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
         deadline = issued + _dt.timedelta(seconds=review_timeout)
@@ -10214,12 +10799,19 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             "scope": f"Review the task-owned diff for {task_id}",
             "depends_on": [owning_fixer],
             "acceptance": [
-                "Review only the assigned stable diff and supplied evidence.",
+                "Verify diff_artifact_sha256 and review only the immutable diff artifact.",
                 "Return the complete 16-field reviewer result bound to diff_fingerprint.",
             ],
+            "execution_mode": _text(manifest.get("execution_mode")),
+            "task_branch": _text(manifest.get("task_branch")),
+            "worktree_path": str(worktree.resolve()),
+            "owned_paths": list(manifest.get("owned_paths") or []),
             "diff_base": _text(manifest.get("base_sha")),
             "diff_head": _resolve_commit(worktree, "HEAD"),
             "diff_fingerprint": fingerprint,
+            "diff_artifact_path": str(artifact_path.resolve()),
+            "diff_artifact_sha256": artifact_sha256,
+            "diff_artifact_format": _REVIEW_DIFF_ARTIFACT_FORMAT,
             "owning_fixer": owning_fixer,
             "review_depth": depth,
             "timeout_seconds": review_timeout,
@@ -10228,11 +10820,7 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             "scope_revision": int(manifest.get("scope_revision") or 1),
         }
         _validate_orchestration_contract("assignment", assignment)
-        assignment_path = (
-            _task_state_root(control_repo)
-            / "reviews"
-            / f"{task_id}-{fingerprint}.assignment.json"
-        )
+        assignment_path = _review_assignment_path(control_repo, task_id, fingerprint)
         prior_review = manifest.get("review") or {}
         if (
             _text(prior_review.get("diff_fingerprint")) == fingerprint
@@ -10246,16 +10834,46 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             raise APError(
                 "The single review attempt for this diff fingerprint is already complete or consumed."
             )
-        existing_assignment = _read_json_object(assignment_path)
+        if assignment_path.exists() or assignment_path.is_symlink():
+            if (
+                _text(prior_review.get("diff_fingerprint")) == fingerprint
+                and _text(prior_review.get("assignment_sha256"))
+            ):
+                existing_assignment = _load_bound_review_assignment(
+                    control_repo,
+                    manifest,
+                    assignment_path,
+                )
+            else:
+                existing_assignment = _read_private_review_json(
+                    assignment_path,
+                    "assignment",
+                )
+        else:
+            existing_assignment = None
         if existing_assignment:
             _validate_orchestration_contract("assignment", existing_assignment)
             expected_fields = {
+                "contract_version": assignment["contract_version"],
                 "task_id": task_id,
+                "role": "reviewer",
                 "base_sha": assignment["base_sha"],
+                "scope": assignment["scope"],
+                "depends_on": assignment["depends_on"],
+                "acceptance": assignment["acceptance"],
+                "execution_mode": assignment["execution_mode"],
+                "task_branch": assignment["task_branch"],
+                "worktree_path": assignment["worktree_path"],
+                "owned_paths": assignment["owned_paths"],
                 "diff_base": assignment["diff_base"],
                 "diff_head": assignment["diff_head"],
                 "diff_fingerprint": fingerprint,
+                "diff_artifact_path": assignment["diff_artifact_path"],
+                "diff_artifact_sha256": assignment["diff_artifact_sha256"],
+                "diff_artifact_format": assignment["diff_artifact_format"],
                 "owning_fixer": owning_fixer,
+                "review_depth": assignment["review_depth"],
+                "timeout_seconds": assignment["timeout_seconds"],
                 "scope_revision": assignment["scope_revision"],
             }
             mismatched = [
@@ -10273,10 +10891,33 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
                     "This diff fingerprint already has a reviewer assignment; "
                     "the single review attempt cannot be reassigned."
                 )
+            existing_issued = _parse_iso_timestamp(
+                existing_assignment.get("issued_at"),
+                "issued_at",
+            )
+            _validate_review_diff_artifact(control_repo, existing_assignment)
             existing_deadline = _parse_iso_timestamp(
                 existing_assignment.get("deadline_at"),
                 "deadline_at",
             )
+            if int((existing_deadline - existing_issued).total_seconds()) != review_timeout:
+                raise APError("Existing review assignment deadline does not match its fixed timeout.")
+            if _text(prior_review.get("diff_fingerprint")) == fingerprint:
+                expected_prior_fields = {
+                    "assignment_path": str(assignment_path),
+                    "issued_at": existing_assignment["issued_at"],
+                    "deadline_at": existing_assignment["deadline_at"],
+                }
+                prior_mismatches = [
+                    field
+                    for field, expected in expected_prior_fields.items()
+                    if prior_review.get(field) != expected
+                ]
+                if prior_mismatches:
+                    raise APError(
+                        "Existing review assignment does not match its manifest timing: "
+                        + ", ".join(prior_mismatches)
+                    )
             if _dt.datetime.now(_dt.timezone.utc) > existing_deadline:
                 raise APError(
                     "Review attempt timed out and is blocked for this diff fingerprint; "
@@ -10305,11 +10946,12 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             assignment["deadline_at"] = deadline.isoformat()
             assignment["timeout_seconds"] = int((deadline - issued).total_seconds())
             _validate_orchestration_contract("assignment", assignment)
-            _write_json_object(assignment_path, assignment)
+            _write_private_json(assignment_path, assignment)
             depth = _text(assignment.get("review_depth"))
             review_timeout = int(assignment.get("timeout_seconds") or 0)
         else:
-            _write_json_object(assignment_path, assignment)
+            _write_private_json(assignment_path, assignment)
+        assignment_sha256 = _review_assignment_file_sha256(assignment_path)
         manifest["review_depth"] = depth
         manifest["review_timeout_seconds"] = review_timeout
         review_state = {
@@ -10321,6 +10963,10 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             "reviewed_at": "",
             "reason": "review assignment issued",
             "assignment_path": str(assignment_path),
+            "assignment_sha256": assignment_sha256,
+            "diff_artifact_path": assignment["diff_artifact_path"],
+            "diff_artifact_sha256": assignment["diff_artifact_sha256"],
+            "diff_artifact_format": assignment["diff_artifact_format"],
             "issued_at": assignment["issued_at"],
             "deadline_at": assignment["deadline_at"],
         }
@@ -10344,12 +10990,34 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
         print(f"[review-assignment] assignment={assignment_path}")
 
 
+def cmd_review_artifact(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    assignment_path = Path(args.file).resolve()
+    task_id = _validate_task_id(assignment_path.parent.name)
+    manifest = _load_task_manifest(repo, task_id)
+    assignment = _load_bound_review_assignment(repo, manifest, assignment_path)
+    assigned_worktree = Path(_text(assignment.get("worktree_path"))).resolve()
+    if assigned_worktree != repo:
+        raise APError(
+            f"Review artifact must be read from its assigned worktree: expected={assigned_worktree}, current={repo}."
+        )
+    if _dt.datetime.now(_dt.timezone.utc) >= _parse_iso_timestamp(
+        assignment.get("deadline_at"),
+        "deadline_at",
+    ):
+        raise APError("Review assignment deadline expired before diff artifact access.")
+    payload = _validate_review_diff_artifact(repo, assignment)
+    sys.stdout.flush()
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
+
+
 def _write_private_json(path: Path, payload: dict) -> None:
-    _write_json_object(path, payload)
-    try:
-        path.chmod(0o600)
-    except OSError as exc:
-        raise APError(f"Cannot protect Git-local review state: {path}: {exc}") from exc
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    _write_private_bytes(path, encoded)
 
 
 def _review_runtime_paths(
@@ -10357,9 +11025,10 @@ def _review_runtime_paths(
     task_id: str,
     fingerprint: str,
 ) -> tuple[Path, Path]:
-    root = _task_state_root(control_repo) / "reviews"
-    stem = f"{_validate_task_id(task_id)}-{fingerprint}"
-    return root / f"{stem}.result.json", root / f"{stem}.run.json"
+    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
+        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
+    root = _task_review_dir(control_repo, task_id, create=True)
+    return root / f"{fingerprint}.result.json", root / f"{fingerprint}.run.json"
 
 
 def _review_command_sha256(command: list[str]) -> str:
@@ -10455,11 +11124,16 @@ def cmd_review_run(args: argparse.Namespace) -> None:
     manifest = _load_task_manifest(control_repo, task_id)
     review = manifest.get("review") or {}
     assignment_path = Path(_text(review.get("assignment_path"))).resolve()
-    assignment = _read_json_object(assignment_path)
-    if not assignment:
-        raise APError("Review assignment file is missing or invalid.")
-    _validate_orchestration_contract("assignment", assignment)
+    assignment = _load_bound_review_assignment(
+        control_repo,
+        manifest,
+        assignment_path,
+    )
     fingerprint = _text(assignment.get("diff_fingerprint"))
+    assignment_sha256 = _text((manifest.get("review") or {}).get("assignment_sha256"))
+    _validate_review_diff_artifact(control_repo, assignment)
+    if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
+        raise APError("Review assignment is stale; the task-owned working tree changed before Reviewer start.")
     result_path, receipt_path = _review_runtime_paths(control_repo, task_id, fingerprint)
 
     command_override = _text(getattr(args, "runner_command_json", ""))
@@ -10483,6 +11157,9 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         "reviewer": reviewer,
         "diff_fingerprint": fingerprint,
         "assignment_path": str(assignment_path),
+        "assignment_sha256": assignment_sha256,
+        "diff_artifact_path": _text(assignment.get("diff_artifact_path")),
+        "diff_artifact_sha256": _text(assignment.get("diff_artifact_sha256")),
         "result_path": str(result_path),
         "command_sha256": command_sha256,
         "status": "starting",
@@ -10496,6 +11173,14 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         current_review = dict(manifest.get("review") or {})
         if _text(current_review.get("diff_fingerprint")) != fingerprint:
             raise APError("Review assignment became stale before Reviewer runtime start.")
+        assignment = _load_bound_review_assignment(
+            control_repo,
+            manifest,
+            assignment_path,
+        )
+        _validate_review_diff_artifact(control_repo, assignment)
+        if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
+            raise APError("Review assignment is stale; the task-owned working tree changed before Reviewer start.")
         if _text(current_review.get("runtime_state")) or receipt_path.exists():
             raise APError(
                 "The supervised Reviewer runtime has already started for this diff fingerprint."
@@ -10523,6 +11208,9 @@ def cmd_review_run(args: argparse.Namespace) -> None:
     env.update(
         {
             "AUTOCODING_REVIEW_ASSIGNMENT": str(assignment_path),
+            "AUTOCODING_REVIEW_ASSIGNMENT_SHA256": assignment_sha256,
+            "AUTOCODING_REVIEW_DIFF_ARTIFACT": _text(assignment.get("diff_artifact_path")),
+            "AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256": _text(assignment.get("diff_artifact_sha256")),
             "AUTOCODING_REVIEW_RESULT": str(result_path),
             "AUTOCODING_REVIEW_DEADLINE": _text(assignment.get("deadline_at")),
             "AUTOCODING_REVIEW_TIMEOUT_SECONDS": str(int(assignment.get("timeout_seconds") or 0)),
@@ -10711,7 +11399,16 @@ def cmd_task_review(args: argparse.Namespace) -> None:
         assigned_review = manifest.get("review") or {}
         if bool(manifest.get("review_required")) and not all(
             _text(assigned_review.get(field))
-            for field in ("assignment_path", "reviewer", "diff_fingerprint", "deadline_at")
+            for field in (
+                "assignment_path",
+                "assignment_sha256",
+                "reviewer",
+                "diff_fingerprint",
+                "diff_artifact_path",
+                "diff_artifact_sha256",
+                "diff_artifact_format",
+                "deadline_at",
+            )
         ):
             raise APError(
                 "Review-required tasks must use review-assignment before task-review."
@@ -10731,23 +11428,29 @@ def cmd_task_review(args: argparse.Namespace) -> None:
         assignment_path = _text(assigned_review.get("assignment_path"))
         assignment: Optional[dict] = None
         if assignment_path:
-            expected_assignment_path = (
-                _task_state_root(control_repo)
-                / "reviews"
-                / f"{task_id}-{fingerprint}.assignment.json"
+            expected_assignment_path = _review_assignment_path(
+                control_repo,
+                task_id,
+                fingerprint,
             ).resolve()
             if Path(assignment_path).resolve() != expected_assignment_path:
                 raise APError("Review assignment path does not match Git-local task state.")
-            assignment = _read_json_object(expected_assignment_path)
-            if not assignment:
-                raise APError("Review assignment file is missing or invalid.")
-            _validate_orchestration_contract("assignment", assignment)
+            assignment = _load_bound_review_assignment(
+                control_repo,
+                manifest,
+                expected_assignment_path,
+            )
             expected_assignment_fields = {
                 "task_id": task_id,
                 "base_sha": _text(manifest.get("base_sha")),
                 "diff_base": _text(manifest.get("base_sha")),
                 "diff_head": current_head,
                 "diff_fingerprint": fingerprint,
+                "diff_artifact_path": str(
+                    _review_diff_artifact_path(control_repo, task_id, fingerprint).resolve()
+                ),
+                "diff_artifact_sha256": _text(assigned_review.get("diff_artifact_sha256")),
+                "diff_artifact_format": _REVIEW_DIFF_ARTIFACT_FORMAT,
                 "node_id": reviewer,
                 "owning_fixer": _text((manifest.get("writer_lease") or {}).get("holder")),
                 "issued_at": _text(assigned_review.get("issued_at")),
@@ -10763,6 +11466,7 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                     "Review assignment does not match the recorded task state: "
                     + ", ".join(mismatched)
                 )
+            _validate_review_diff_artifact(control_repo, assignment)
             if int(assignment.get("scope_revision") or 0) != int(
                 manifest.get("scope_revision") or 1
             ):
@@ -10809,6 +11513,9 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                 "task_id": task_id,
                 "reviewer": reviewer,
                 "diff_fingerprint": fingerprint,
+                "assignment_sha256": _text(assigned_review.get("assignment_sha256")),
+                "diff_artifact_path": _text(assignment.get("diff_artifact_path")),
+                "diff_artifact_sha256": _text(assignment.get("diff_artifact_sha256")),
                 "result_path": str(expected_result_path),
                 "status": "completed",
                 "verdict": _text(args.verdict),
@@ -10847,6 +11554,10 @@ def cmd_task_review(args: argparse.Namespace) -> None:
             "reviewed_at": _now_iso(),
             "reason": "",
             "assignment_path": assignment_path,
+            "assignment_sha256": _text(assigned_review.get("assignment_sha256")),
+            "diff_artifact_path": _text(assigned_review.get("diff_artifact_path")),
+            "diff_artifact_sha256": _text(assigned_review.get("diff_artifact_sha256")),
+            "diff_artifact_format": _text(assigned_review.get("diff_artifact_format")),
             "issued_at": _text(assigned_review.get("issued_at")),
             "deadline_at": deadline_at,
             "review_depth": _text(manifest.get("review_depth")),
@@ -11327,6 +12038,22 @@ def _worktree_branches(repo: Path) -> set[str]:
     return branches
 
 
+def _worktree_task_ids(repo: Path) -> set[str]:
+    task_ids: set[str] = set()
+    for line in run(["git", "worktree", "list", "--porcelain"], cwd=repo).stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        worktree = Path(line[len("worktree ") :].strip())
+        payload = _active_task_manifest(worktree) if worktree.exists() else None
+        if not payload:
+            continue
+        try:
+            task_ids.add(_validate_task_id(_text(payload.get("task_id"))))
+        except APError:
+            continue
+    return task_ids
+
+
 def cmd_task_prune(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
@@ -11410,8 +12137,27 @@ def cmd_task_prune(args: argparse.Namespace) -> None:
             worktree = Path(_text(manifest.get("worktree_path")))
             if worktree.exists():
                 continue
-            path.unlink(missing_ok=True)
+            _delete_task_manifest(repo, manifest)
         run(["git", "worktree", "prune"], cwd=repo, check=False)
+
+        active_worktree_tasks = _worktree_task_ids(repo)
+        review_root = _task_review_root(repo)
+        _cleanup_stale_review_snapshots(review_root, legacy_root=True)
+        for review_dir in sorted(review_root.iterdir()) if review_root.exists() else []:
+            if not review_dir.is_dir() or review_dir.is_symlink():
+                continue
+            try:
+                orphan_task_id = _validate_task_id(review_dir.name)
+            except APError:
+                continue
+            if _task_registry_path(repo, orphan_task_id).exists() or orphan_task_id in active_worktree_tasks:
+                continue
+            with _repo_lock(repo, f"task-{orphan_task_id}", timeout_s=timeout_s):
+                if _task_registry_path(repo, orphan_task_id).exists():
+                    continue
+                if orphan_task_id in _worktree_task_ids(repo):
+                    continue
+                _delete_task_review_artifacts(repo, orphan_task_id)
 
     if args.json:
         print(json.dumps({"removed": removed, "skipped": skipped}, ensure_ascii=False, indent=2))
@@ -11536,9 +12282,25 @@ def _push_current_task(repo: Path, manifest: dict, expected_commit: str = "") ->
 def _clear_direct_task(repo: Path, manifest: dict) -> None:
     active_path = _worktree_manifest_path(repo)
     active = _read_json_object(active_path)
+    removed_active = False
     if active and _text(active.get("task_uuid")) == _text(manifest.get("task_uuid")):
-        active_path.unlink(missing_ok=True)
-    _delete_task_manifest(repo, manifest)
+        try:
+            active_path.unlink(missing_ok=True)
+            removed_active = True
+        except OSError as exc:
+            raise APError(f"Cannot remove direct task checkout state: {active_path}: {exc}") from exc
+    try:
+        _delete_task_manifest(repo, manifest)
+    except APError as exc:
+        if removed_active and active:
+            try:
+                _write_json_object(active_path, active)
+            except (APError, OSError) as restore_exc:
+                raise APError(
+                    f"Direct task cleanup failed ({exc}) and its checkout state could not be restored: "
+                    f"{restore_exc}"
+                ) from restore_exc
+        raise
 
 
 def _cmd_direct_commit_push_locked(
@@ -11626,6 +12388,7 @@ def _cmd_direct_commit_push_locked(
         unstaged = _unstaged_task_paths(repo)
         if unstaged:
             raise APError("Direct-task files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged))
+        _require_staged_review_matches(repo, cfg, manifest)
         _extend_final_gate_receipt(
             repo,
             cfg,
@@ -11769,6 +12532,7 @@ def _cmd_commit_push_locked(
         raise APError(
             "Task-owned files changed while staging; refusing to commit:\n- " + "\n- ".join(unstaged)
         )
+    _require_staged_review_matches(repo, cfg, manifest)
     manifest = _require_task_context(repo, cfg, args.task_id)
     _extend_final_gate_receipt(repo, cfg, manifest, plan, base_ref)
 
@@ -12038,6 +12802,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--reviewer", required=True)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_review_assignment)
+
+    s = sp.add_parser(
+        "review-artifact",
+        help="Verify and emit the immutable Git-local diff artifact for a reviewer assignment",
+    )
+    s.add_argument("--file", required=True)
+    s.set_defaults(func=cmd_review_artifact)
 
     s = sp.add_parser(
         "review-run",

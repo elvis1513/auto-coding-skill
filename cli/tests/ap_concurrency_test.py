@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -213,6 +214,41 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
     def commit_push(self, repo: Path, task_id: str, message: str) -> subprocess.CompletedProcess[str]:
         self.approve_task(repo, task_id)
         return self.ap(repo, "commit-push", task_id, "--msg", message)
+
+    def artifact_reviewer_runner(self, root: Path, *tokens: str) -> str:
+        fake_reviewer = root / "fake-artifact-reviewer.py"
+        fake_reviewer.write_text(
+            "import hashlib, json, os, pathlib, subprocess, sys\n"
+            "if os.environ.get('CODEX_THREAD_ID'):\n"
+            "    raise SystemExit(9)\n"
+            "assignment_path = pathlib.Path(os.environ['AUTOCODING_REVIEW_ASSIGNMENT'])\n"
+            "assignment_bytes = assignment_path.read_bytes()\n"
+            "if hashlib.sha256(assignment_bytes).hexdigest() != os.environ['AUTOCODING_REVIEW_ASSIGNMENT_SHA256']:\n"
+            "    raise SystemExit(10)\n"
+            "assignment = json.loads(assignment_bytes)\n"
+            "artifact_path = pathlib.Path(assignment['diff_artifact_path'])\n"
+            "emitted = subprocess.run([sys.executable, sys.argv[1], '--repo', str(pathlib.Path.cwd()), "
+            "'review-artifact', '--file', str(assignment_path)], capture_output=True, check=False)\n"
+            "if emitted.returncode != 0:\n"
+            "    raise SystemExit(11)\n"
+            "payload = emitted.stdout\n"
+            "actual = hashlib.sha256(payload).hexdigest()\n"
+            "if actual != assignment['diff_artifact_sha256']:\n"
+            "    raise SystemExit(12)\n"
+            "if os.environ.get('AUTOCODING_REVIEW_DIFF_ARTIFACT') != str(artifact_path):\n"
+            "    raise SystemExit(13)\n"
+            "if os.environ.get('AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256') != actual:\n"
+            "    raise SystemExit(14)\n"
+            "if int(os.environ['AUTOCODING_REVIEW_TIMEOUT_SECONDS']) not in (90, 300):\n"
+            "    raise SystemExit(15)\n"
+            "for token in sys.argv[2:]:\n"
+            "    if token.encode('utf-8') not in payload:\n"
+            "        raise SystemExit(16)\n"
+            "print(json.dumps({'verdict': 'approved', 'summary': 'artifact reviewed', "
+            "'evidence': ['diff_artifact_sha256=' + actual]}))\n",
+            encoding="utf-8",
+        )
+        return json.dumps([sys.executable, str(fake_reviewer), str(AP_SCRIPT), *tokens])
 
     def task_worktree(self, repo: Path, task_id: str) -> Path:
         wanted = f"refs/heads/codex/{task_id}"
@@ -779,7 +815,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertNotIn("initialization is incomplete", output)
 
     def test_continue_direct_can_adopt_owned_changes_for_new_review_lifecycle(self) -> None:
-        _, repo, remote = self.make_repo("adaptive", require_review=False)
+        root, repo, remote = self.make_repo("adaptive", require_review=False)
         claim = self.claim_direct(repo, "shared.txt")
         (repo / "shared.txt").write_text("continued direct\n", encoding="utf-8")
         started = self.ap(
@@ -810,9 +846,35 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, missing_reviewer.returncode)
         self.assertIn("explicit --reviewer", missing_reviewer.stdout + missing_reviewer.stderr)
-        pushed = self.commit_push(repo, "DIRECT-CONTINUE", "DIRECT-CONTINUE: update")
+        runner = self.artifact_reviewer_runner(root, "continued direct")
+        reviewed = json.loads(
+            self.ap(
+                repo,
+                "review-run",
+                "DIRECT-CONTINUE",
+                "--reviewer",
+                "direct-reviewer",
+                "--runner-command-json",
+                runner,
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("approved", reviewed["verdict"])
+        assignment_path = Path(
+            json.loads(
+                self.registry_manifest_path(repo, "DIRECT-CONTINUE").read_text(encoding="utf-8")
+            )["review"]["assignment_path"]
+        )
+        pushed = self.ap(
+            repo,
+            "commit-push",
+            "DIRECT-CONTINUE",
+            "--msg",
+            "DIRECT-CONTINUE: update",
+        )
         self.assertIn("execution_mode=direct", pushed.stdout)
         self.assertEqual("continued direct", git_output(remote, "show", "refs/heads/dev:shared.txt"))
+        self.assertFalse(assignment_path.parent.exists())
 
         claim = self.claim_direct(repo, "shared.txt")
         (repo / "shared.txt").write_text("owned again\n", encoding="utf-8")
@@ -901,28 +963,219 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertEqual(90, assignment["timeout_seconds"])
         self.assertEqual(1, assignment["scope_revision"])
         self.assertTrue(Path(first["assignment_path"]).is_file())
+        assignment_path = Path(first["assignment_path"])
+        artifact_path = Path(assignment["diff_artifact_path"])
+        artifact = artifact_path.read_bytes()
+        self.assertEqual(assignment_path.parent, artifact_path.parent)
+        self.assertEqual(0o600, assignment_path.stat().st_mode & 0o777)
+        self.assertEqual(0o600, artifact_path.stat().st_mode & 0o777)
+        self.assertEqual(hashlib.sha256(artifact).hexdigest(), assignment["diff_artifact_sha256"])
+        self.assertEqual("git-binary-patch-v1", assignment["diff_artifact_format"])
+        self.assertIn(b"review me", artifact)
+        emitted = self.ap(
+            worktree,
+            "review-artifact",
+            "--file",
+            str(assignment_path),
+        )
+        self.assertEqual(artifact, emitted.stdout.encode("utf-8"))
         issued = datetime.fromisoformat(assignment["issued_at"])
         deadline = datetime.fromisoformat(assignment["deadline_at"])
         self.assertEqual(90, int((deadline - issued).total_seconds()))
 
+        artifact_path.write_bytes(artifact + b"tampered\n")
+        tampered = self.ap(
+            worktree,
+            "review-assignment",
+            "REVIEW-DEADLINE",
+            "--reviewer",
+            "reviewer-1",
+            check=False,
+        )
+        self.assertNotEqual(0, tampered.returncode)
+        self.assertIn("SHA-256 mismatch", tampered.stdout + tampered.stderr)
+
+    def test_review_assignment_hash_binding_rejects_assignment_file_tampering(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-ASSIGNMENT-HASH", "shared.txt")
+        (worktree / "shared.txt").write_text("hash-bound review\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-ASSIGNMENT-HASH",
+                "--reviewer",
+                "reviewer-hash",
+                "--json",
+            ).stdout
+        )
+        assignment_path = Path(issued["assignment_path"])
+        original = assignment_path.read_bytes()
+        manifest = json.loads(
+            self.registry_manifest_path(repo, "REVIEW-ASSIGNMENT-HASH").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            hashlib.sha256(original).hexdigest(),
+            manifest["review"]["assignment_sha256"],
+        )
+
+        assignment_path.write_bytes(original + b" \n")
+        rejected = self.ap(
+            worktree,
+            "review-assignment",
+            "REVIEW-ASSIGNMENT-HASH",
+            "--reviewer",
+            "reviewer-hash",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("assignment SHA-256 mismatch", rejected.stdout + rejected.stderr)
+
+    def test_review_assignment_rejects_symlinked_review_root(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-SYMLINK", "shared.txt")
+        (worktree / "shared.txt").write_text("must stay git local\n", encoding="utf-8")
+        review_root = self.registry_manifest_path(repo, "REVIEW-SYMLINK").parent.parent / "reviews"
+        task_review_dir = review_root / "REVIEW-SYMLINK"
+        if task_review_dir.exists():
+            task_review_dir.rmdir()
+        if review_root.exists():
+            review_root.rmdir()
+        outside = root / "outside-reviews"
+        outside.mkdir()
+        review_root.symlink_to(outside, target_is_directory=True)
+
+        rejected = self.ap(
+            worktree,
+            "review-assignment",
+            "REVIEW-SYMLINK",
+            "--reviewer",
+            "reviewer-symlink",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("symlinked Git-local review storage", rejected.stdout + rejected.stderr)
+        self.assertFalse((outside / "REVIEW-SYMLINK").exists())
+
+    def test_review_snapshot_covers_git_states_without_mutating_main_index_or_objects(self) -> None:
+        _, repo, _ = self.make_repo()
+        (repo / "delete-me.txt").write_text("delete me\n", encoding="utf-8")
+        git(repo, "add", "delete-me.txt")
+        git(repo, "commit", "-qm", "add deletion fixture")
+        git(repo, "push", "-q", "origin", "dev")
+        worktree = self.start_task(repo, "REVIEW-GIT-STATES", ".")
+        (worktree / "delete-me.txt").unlink()
+        shared = worktree / "shared.txt"
+        shared.write_text("executable review\n", encoding="utf-8")
+        shared.chmod(shared.stat().st_mode | 0o111)
+        (worktree / "binary-review.bin").write_bytes(b"\x00\x01binary-review\xff" * 32)
+        (worktree / "review-link").symlink_to("shared.txt")
+        index_path = Path(git_output(worktree, "rev-parse", "--git-path", "index"))
+        if not index_path.is_absolute():
+            index_path = (worktree / index_path).resolve()
+        index_before = index_path.read_bytes()
+        objects_before = git_output(worktree, "count-objects", "-v")
+
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-GIT-STATES",
+                "--reviewer",
+                "reviewer-git-states",
+                "--json",
+            ).stdout
+        )
+        patch = Path(issued["assignment"]["diff_artifact_path"]).read_bytes()
+        self.assertIn(b"deleted file mode 100644", patch)
+        self.assertIn(b"old mode 100644", patch)
+        self.assertIn(b"new mode 100755", patch)
+        self.assertIn(b"new file mode 120000", patch)
+        self.assertIn(b"GIT binary patch", patch)
+        self.assertEqual(index_before, index_path.read_bytes())
+        self.assertEqual(objects_before, git_output(worktree, "count-objects", "-v"))
+        self.assertFalse(list(Path(issued["assignment_path"]).parent.glob(".snapshot-*")))
+
+    def test_review_snapshot_stops_and_cleans_when_stream_limit_is_exceeded(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-SIZE-LIMIT", "shared.txt")
+        # The input itself stays below the test limit while the Git patch
+        # headers plus body exceed it, exercising the streaming PIPE cutoff.
+        (worktree / "shared.txt").write_text("small\n", encoding="utf-8")
+        previous = os.environ.get("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES")
+        os.environ["AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES"] = "128"
+        try:
+            rejected = self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-SIZE-LIMIT",
+                "--reviewer",
+                "reviewer-size",
+                check=False,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES", None)
+            else:
+                os.environ["AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES"] = previous
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("safety limit", rejected.stdout + rejected.stderr)
+        review_dir = (
+            self.registry_manifest_path(repo, "REVIEW-SIZE-LIMIT").parent.parent
+            / "reviews"
+            / "REVIEW-SIZE-LIMIT"
+        )
+        self.assertFalse(list(review_dir.glob(".snapshot-*")))
+        self.assertFalse(list(review_dir.glob("*.assignment.json")))
+        self.assertFalse(list(review_dir.glob("*.patch")))
+
+    def test_review_snapshot_rejects_oversized_input_before_creating_temp_objects(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-INPUT-LIMIT", "shared.txt")
+        (worktree / "shared.txt").write_text("x" * 4096 + "\n", encoding="utf-8")
+        objects_before = git_output(worktree, "count-objects", "-v")
+        previous = os.environ.get("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES")
+        os.environ["AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES"] = "128"
+        try:
+            rejected = self.ap(
+                worktree,
+                "review-assignment",
+                "REVIEW-INPUT-LIMIT",
+                "--reviewer",
+                "reviewer-input-size",
+                check=False,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES", None)
+            else:
+                os.environ["AUTOCODING_REVIEW_ARTIFACT_MAX_BYTES"] = previous
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("snapshot input exceeds", rejected.stdout + rejected.stderr)
+        review_dir = (
+            self.registry_manifest_path(repo, "REVIEW-INPUT-LIMIT").parent.parent
+            / "reviews"
+            / "REVIEW-INPUT-LIMIT"
+        )
+        self.assertFalse(review_dir.exists())
+        self.assertEqual(objects_before, git_output(worktree, "count-objects", "-v"))
+
     def test_review_run_supervises_separate_process_and_records_result_once(self) -> None:
         root, repo, _ = self.make_repo()
-        worktree = self.start_task(repo, "REVIEW-RUN", "shared.txt")
-        (worktree / "shared.txt").write_text("review me\n", encoding="utf-8")
-        fake_reviewer = root / "fake-reviewer.py"
-        fake_reviewer.write_text(
-            "import json, os, pathlib, sys\n"
-            "if os.environ.get('CODEX_THREAD_ID'):\n"
-            "    raise SystemExit(9)\n"
-            "assignment_path = pathlib.Path(os.environ['AUTOCODING_REVIEW_ASSIGNMENT'])\n"
-            "assignment = json.loads(assignment_path.read_text(encoding='utf-8'))\n"
-            "if int(os.environ['AUTOCODING_REVIEW_TIMEOUT_SECONDS']) not in (90, 300):\n"
-            "    raise SystemExit(10)\n"
-            "print(json.dumps({'verdict': 'approved', 'summary': 'runtime reviewed', "
-            "'evidence': ['assignment=' + assignment['task_id']]}))\n",
+        worktree = self.start_task(repo, "REVIEW-RUN", ".")
+        (worktree / "shared.txt").write_text("staged tracked review token\n", encoding="utf-8")
+        git(worktree, "add", "shared.txt")
+        (worktree / "untracked-review.txt").write_text(
+            "untracked review token\n",
             encoding="utf-8",
         )
-        runner = json.dumps([sys.executable, str(fake_reviewer)])
+        runner = self.artifact_reviewer_runner(
+            root,
+            "staged tracked review token",
+            "untracked review token",
+        )
         completed = self.ap(
             worktree,
             "review-run",
@@ -935,7 +1188,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         result = json.loads(completed.stdout)
         self.assertEqual("approved", result["verdict"])
-        self.assertEqual("runtime reviewed", result["summary"])
+        self.assertEqual("artifact reviewed", result["summary"])
 
         status = json.loads(
             self.ap(worktree, "task-status", "REVIEW-RUN", "--json").stdout
@@ -1062,6 +1315,9 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["review"]["issued_at"] = assignment["issued_at"]
         manifest["review"]["deadline_at"] = assignment["deadline_at"]
+        manifest["review"]["assignment_sha256"] = hashlib.sha256(
+            assignment_path.read_bytes()
+        ).hexdigest()
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
         slow_reviewer = root / "slow-reviewer.py"
@@ -1163,6 +1419,9 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["review"]["issued_at"] = assignment["issued_at"]
         manifest["review"]["deadline_at"] = assignment["deadline_at"]
+        manifest["review"]["assignment_sha256"] = hashlib.sha256(
+            assignment_path.read_bytes()
+        ).hexdigest()
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
         renewed = self.ap(
@@ -1724,6 +1983,12 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         worktree = self.start_task(repo, "INTEGRATE-1")
         (worktree / "integrated.txt").write_text("integrated\n", encoding="utf-8")
         self.commit_push(worktree, "INTEGRATE-1", "INTEGRATE-1: ready")
+        review_dir = Path(
+            json.loads(
+                self.registry_manifest_path(repo, "INTEGRATE-1").read_text(encoding="utf-8")
+            )["review"]["assignment_path"]
+        ).parent
+        self.assertTrue(review_dir.is_dir())
         task_commit = git_output(worktree, "rev-parse", "HEAD")
         self.assertEqual("c", commit_hook_marker.read_text(encoding="utf-8"))
         self.assertFalse(
@@ -1747,6 +2012,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assert_local_branch(repo, "codex/INTEGRATE-1", False)
         self.assert_remote_branch(remote, "codex/INTEGRATE-1", False)
+        self.assertFalse(review_dir.exists())
         self.assertEqual("x", gate_marker.read_text(encoding="utf-8"), "push flow must run the fast gate exactly once")
         self.assertEqual("c", commit_hook_marker.read_text(encoding="utf-8"), "push flow must create exactly one hook-visible commit")
         self.assertEqual("p", push_hook_marker.read_text(encoding="utf-8"), "the final target push hook must run exactly once")
@@ -1870,6 +2136,31 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assert_local_branch(repo, "codex/PRUNE-REGISTERED", False)
         self.assert_remote_branch(remote, "codex/PRUNE-REGISTERED", False)
+
+    def test_task_prune_removes_orphan_git_local_review_artifacts(self) -> None:
+        _, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "PRUNE-REVIEW-ORPHAN", "shared.txt")
+        (worktree / "shared.txt").write_text("orphan review\n", encoding="utf-8")
+        issued = json.loads(
+            self.ap(
+                worktree,
+                "review-assignment",
+                "PRUNE-REVIEW-ORPHAN",
+                "--reviewer",
+                "reviewer-orphan",
+                "--json",
+            ).stdout
+        )
+        review_dir = Path(issued["assignment_path"]).parent
+        self.assertTrue(review_dir.is_dir())
+        git(repo, "worktree", "unlock", str(worktree))
+        git(repo, "worktree", "remove", "--force", str(worktree))
+        self.registry_manifest_path(repo, "PRUNE-REVIEW-ORPHAN").unlink()
+
+        self.ap(repo, "task-prune")
+
+        self.assertFalse(review_dir.exists())
+        self.assert_local_branch(repo, "codex/PRUNE-REVIEW-ORPHAN", False)
 
     def test_cleanup_blocks_unknown_ignored_data_but_allows_runtime_evidence(self) -> None:
         _, repo, remote = self.make_repo()
@@ -2388,6 +2679,11 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         worktree = self.start_task(repo, "REMOTE-RACE")
         (worktree / "payload.txt").write_text("ready\n", encoding="utf-8")
         self.commit_push(worktree, "REMOTE-RACE", "REMOTE-RACE: ready")
+        review_dir = Path(
+            json.loads(
+                self.registry_manifest_path(repo, "REMOTE-RACE").read_text(encoding="utf-8")
+            )["review"]["assignment_path"]
+        ).parent
         self.ap(repo, "task-integrate", "REMOTE-RACE", "--keep-worktree")
 
         attacker = root / "attacker"
@@ -2412,6 +2708,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         manifest_path = self.registry_manifest_path(repo, "REMOTE-RACE")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual("cleanup-pending", manifest["state"])
+        self.assertTrue(review_dir.is_dir())
 
         prune = self.ap(repo, "task-prune")
         self.assertIn("remote cleanup pending", prune.stdout + prune.stderr)
@@ -2421,6 +2718,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         git(remote, "update-ref", "-d", "refs/heads/codex/REMOTE-RACE", changed_remote_tip)
         self.ap(repo, "task-prune")
         self.assertFalse(manifest_path.exists())
+        self.assertFalse(review_dir.exists())
         self.assert_remote_branch(remote, "codex/REMOTE-RACE", False)
 
     def test_gate_mutation_aborts_before_staging_or_commit(self) -> None:

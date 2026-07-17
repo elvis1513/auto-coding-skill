@@ -52,10 +52,10 @@ Each parallel writer uses a task ID, worktree, lease, dependency SHAs, and disti
 with `agent-contract-check`; parallel fixers require reclassification with
 `--writers >1`.
 
-Use `reviewer` at `xhigh`: focused gets 90 seconds; parallel/cross-module or sensitive
-boundaries get 300. `review-run` creates the assignment, launches a separate read-only
-Codex process without the lifecycle-owner identity, terminates its process group at the
-deadline, and records only an exact HEAD/scope/fingerprint match. Timeout is `blocked`.
+Use `reviewer` at `xhigh`: focused gets 90 seconds; parallel/cross-module or sensitive boundaries get 300. `review-run` creates the assignment, launches a separate read-only
+Codex process without the lifecycle-owner identity, terminates its process group at the deadline, and records only an exact HEAD/scope/fingerprint match. Before the deadline,
+`review-assignment` freezes staged, unstaged, untracked, deleted, mode, symlink, and binary changes into a mode-0600 Git-local patch with assignment-bound path, format, and SHA-256.
+The Reviewer must run `python3 docs/tools/autopipeline/ap.py review-artifact --file <assignment.json>` and review that emitted patch instead of reconstructing a live Git diff. Timeout is `blocked`.
 `review-assignment` alone requires another deadline-capable host and cannot stop an
 in-app subagent. `agent-result-template` supplies all 16 fields; `review-run` safely
 normalizes presentation fields from the same analysis.

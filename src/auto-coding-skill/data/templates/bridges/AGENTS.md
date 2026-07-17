@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.5 -->
+<!-- auto-coding-skill:managed-agents:start version=4.2.6 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts,

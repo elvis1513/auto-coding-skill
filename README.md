@@ -9,7 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.3.1 preserves recursively nested project documentation assets of any
+Version 4.3.2 keeps upgrade history outside active `docs/`, so an upgrade that
+archives the previous managed AGENTS or ENGINEERING contract is immediately
+idempotent and `status` remains current. Version 4.3.1 preserves recursively nested project documentation assets of any
 file type, and gives project-owned Skill feedback a release-aware lifecycle with
 active/closed grouping, recheck and verification notices, and explicit routing
 of project preferences into the project overlay. Version 4.3.0 separates exact managed defaults from a byte-stable project
@@ -385,6 +387,14 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.2
+
+- Moved managed AGENTS and duplicate-workflow ENGINEERING history into
+  `.agents/archive/auto-coding-skill/<version>/` instead of `docs/archive/`.
+- Added an upgrade regression proving legacy 4.3.1 active-doc archives are moved
+  out of active docs without byte loss and post-upgrade `status` is immediately
+  current.
 
 ## What changed in 4.3.1
 

@@ -2,6 +2,11 @@
   "schema": "auto-coding-skill-feedback-resolutions/v1",
   "entries": [
     {
+      "signature": "sha256:73270c5822d44e9b2e8ff33ab06808496557d78a1a9adc3fa66b8389f23dcb96",
+      "disposition": "fixed",
+      "effective_skill_version": "4.3.2"
+    },
+    {
       "signature": "sha256:a5eeb5eb0ef5073dbeec726fa6c2016593b43eb1230171e3028f364c5b07bd86",
       "disposition": "project-config",
       "effective_skill_version": "4.3.1"

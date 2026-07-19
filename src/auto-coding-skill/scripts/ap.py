@@ -287,7 +287,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.1", "engineering": "4.3.1"},
+    "managed_versions": {"agents": "4.3.2", "engineering": "4.3.2"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -3029,7 +3029,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         archive_content = archive_header + engineering_plan["original"]
         archive_rel, archive_required = _select_project_archive_target(
             repo,
-            Path("docs/archive/workflow") / f"ENGINEERING.pre-{version}.md",
+            Path(".agents/archive/auto-coding-skill") / version / "workflow/ENGINEERING.md",
             archive_content.encode("utf-8"),
             legacy_digest_payload=engineering_plan["original"].encode("utf-8"),
         )
@@ -3089,9 +3089,14 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     canonical_agents = template_agents.read_text(encoding="utf-8") if template_agents.exists() else ""
     current_agents = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
     if canonical_agents and current_agents != canonical_agents:
+        agents_version_match = re.search(
+            r"auto-coding-skill:managed-agents:start\s+version=([0-9]+\.[0-9]+\.[0-9]+)",
+            canonical_agents,
+        )
+        agents_version = agents_version_match.group(1) if agents_version_match else "current"
         if current_agents:
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.3.1\n\n"
+                f"# Archived AGENTS.md before auto-coding-skill {agents_version}\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move project configuration into docs/project/auto-coding-skill.yaml and facts into docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
@@ -3099,7 +3104,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             archive_content = archive_header + current_agents
             archive_rel, archive_required = _select_project_archive_target(
                 repo,
-                Path("docs/archive/workflow/AGENTS.pre-4.3.1.md"),
+                Path(".agents/archive/auto-coding-skill") / agents_version / "AGENTS.md",
                 archive_content.encode("utf-8"),
                 legacy_digest_payload=current_agents.encode("utf-8"),
             )

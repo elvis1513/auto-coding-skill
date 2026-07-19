@@ -1723,10 +1723,10 @@ function engineeringArchivePlan(root, current, version){
     "",
   ].join("\n");
   const archiveOutput = `${archiveHeader}${current}`;
-  const archiveDir = path.join(root, "docs", "archive", "workflow");
+  const archiveDir = path.join(root, ".agents", "archive", "auto-coding-skill", version, "workflow");
   const selected = selectProjectArchiveTarget(
     root,
-    path.join(archiveDir, `ENGINEERING.pre-${version}.md`),
+    path.join(archiveDir, "ENGINEERING.md"),
     archiveOutput,
     { legacyDigestPayload: current },
   );
@@ -1765,10 +1765,16 @@ function planAgentsDocumentSync(project, assetSkill, policy = loadWorkflowMigrat
     "",
   ].join("\n");
   const archiveOutput = `${archiveHeader}${current}`;
-  const archiveDir = path.join(root, "docs", "archive", "workflow");
+  const archiveDir = path.join(
+    root,
+    ".agents",
+    "archive",
+    "auto-coding-skill",
+    templateRegion.version,
+  );
   const selected = selectProjectArchiveTarget(
     root,
-    path.join(archiveDir, `AGENTS.pre-${templateRegion.version}.md`),
+    path.join(archiveDir, "AGENTS.md"),
     archiveOutput,
     { legacyDigestPayload: current },
   );

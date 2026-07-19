@@ -109,6 +109,7 @@ _REVIEW_RUNTIME_RETRY_AFFECTED_MIN = (4, 2, 8)
 _REVIEW_RUNTIME_RETRY_AFFECTED_MAX = (4, 3, 2)
 _REVIEW_RUNTIME_RETRY_FIXED_IN = (4, 3, 4)
 _REVIEW_RUNTIME_RETRY_REPAIRED_IN = (4, 3, 5)
+_REVIEW_RUNTIME_RETRY_DEADLINE_FIXED_IN = (4, 3, 7)
 _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
 _REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
@@ -300,7 +301,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.6", "engineering": "4.3.6"},
+    "managed_versions": {"agents": "4.3.7", "engineering": "4.3.7"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -9801,6 +9802,7 @@ def _codex_reviewer_command(
     result_path: Path,
     *,
     review_depth: str = "deep",
+    effective_deadline: Optional[_dt.datetime] = None,
 ) -> list[str]:
     codex = shutil.which("codex")
     if not codex:
@@ -9835,12 +9837,22 @@ def _codex_reviewer_command(
             str(assignment_path),
         ]
     )
+    deadline_instruction = (
+        "Stay inside its identity and deadline. "
+        if effective_deadline is None
+        else (
+            "The supervisor-authorized effective deadline for this attempt is "
+            f"{effective_deadline.astimezone(_dt.timezone.utc).isoformat()}; it is also "
+            "bound in AUTOCODING_REVIEW_DEADLINE and supersedes the immutable "
+            "assignment deadline_at only for this audited retry. "
+        )
+    )
     prompt = (
         f"Review the exact assignment at {assignment_path}. "
         f"Before analysis, run `{artifact_command}`; it verifies diff_artifact_path, "
         "mode 0600, and diff_artifact_sha256, then emits the immutable patch. "
         "Review that emitted patch and never substitute a live git diff or diff_base..diff_head. "
-        "Stay inside its identity and deadline. Use "
+        f"{deadline_instruction}Use "
         f"`{template_command} --verdict approved` when useful, replacing `approved` "
         "with `changes-requested` or `blocked` when appropriate. "
         "Return only one JSON object as the final response; do not modify files."
@@ -14369,8 +14381,9 @@ def _load_review_runtime_retry_audit(
         _read_verified_private_review_file(path, _text(audit.get(f"{field}_sha256")), label)
     superseded_token = _text(audit.get("superseded_retry_token"))
     if superseded_token:
-        if superseded_token != "retry-v4.3.4":
-            raise APError("Reviewer runtime repair may supersede only retry-v4.3.4.")
+        if superseded_token not in {"retry-v4.3.4", "retry-v4.3.6"}:
+            raise APError("Reviewer runtime repair has an unsupported superseded retry.")
+        superseded_version = superseded_token.removeprefix("retry-v")
         superseded_audit_path = _review_runtime_retry_audit_path(
             control_repo,
             task_id,
@@ -14426,7 +14439,7 @@ def _load_review_runtime_retry_audit(
             ),
             "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
             "original_deadline_at": _text(assignment.get("deadline_at")),
-            "managed_runtime_version": "4.3.4",
+            "managed_runtime_version": superseded_version,
             "retry_result_path": str(superseded_result_path.resolve()),
             "retry_receipt_path": str(superseded_receipt_path.resolve()),
             "retry_event_log_path": str(superseded_event_path.resolve()),
@@ -14441,6 +14454,74 @@ def _load_review_runtime_retry_audit(
                 "Superseded Reviewer runtime retry audit does not match task state: "
                 + ", ".join(superseded_mismatched)
             )
+        if superseded_token == "retry-v4.3.6":
+            nested_token = _text(superseded_audit.get("superseded_retry_token"))
+            nested_audit_path = _review_runtime_retry_audit_path(
+                control_repo,
+                task_id,
+                fingerprint,
+                nested_token,
+                create=False,
+            ).resolve()
+            if (
+                nested_token != "retry-v4.3.4"
+                or Path(_text(superseded_audit.get("superseded_retry_audit_path"))).resolve()
+                != nested_audit_path
+            ):
+                raise APError("Nested Reviewer runtime retry audit path is invalid.")
+            nested_payload = _read_verified_private_review_file(
+                nested_audit_path,
+                _text(superseded_audit.get("superseded_retry_audit_sha256")),
+                "nested runtime retry audit",
+            )
+            try:
+                nested_audit = json.loads(nested_payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise APError("Nested Reviewer runtime retry audit is invalid JSON.") from exc
+            if (
+                not isinstance(nested_audit, dict)
+                or nested_audit.get("retry_token") != nested_token
+                or nested_audit.get("managed_runtime_version") != "4.3.4"
+                or nested_audit.get("task_id") != task_id
+                or nested_audit.get("diff_fingerprint") != fingerprint
+            ):
+                raise APError("Nested Reviewer runtime retry audit identity is invalid.")
+            nested_result_path, nested_receipt_path = _review_runtime_paths(
+                control_repo,
+                task_id,
+                fingerprint,
+                nested_token,
+                create=False,
+            )
+            nested_event_path = _review_runtime_event_log_path(
+                control_repo,
+                task_id,
+                fingerprint,
+                nested_token,
+                create=False,
+            )
+            nested_state = _text(superseded_audit.get("superseded_retry_state"))
+            if nested_state == "pending":
+                if any(
+                    path.exists() or path.is_symlink()
+                    for path in (nested_result_path, nested_receipt_path, nested_event_path)
+                ):
+                    raise APError("Nested pending Reviewer retry unexpectedly has runtime evidence.")
+            elif nested_state == "blocked":
+                for field, path, label in (
+                    ("superseded_retry_result", nested_result_path, "nested retry result"),
+                    ("superseded_retry_receipt", nested_receipt_path, "nested retry receipt"),
+                    ("superseded_retry_event_log", nested_event_path, "nested retry event log"),
+                ):
+                    if Path(_text(superseded_audit.get(f"{field}_path"))).resolve() != path.resolve():
+                        raise APError(f"Reviewer runtime repair {label} path is not canonical.")
+                    _read_verified_private_review_file(
+                        path,
+                        _text(superseded_audit.get(f"{field}_sha256")),
+                        label,
+                    )
+            else:
+                raise APError("Nested Reviewer runtime retry state is invalid.")
         superseded_state = _text(audit.get("superseded_retry_state"))
         if superseded_state == "pending":
             if any(
@@ -14899,6 +14980,63 @@ def _known_review_artifact_access_failure(
     return True
 
 
+def _known_review_retry_deadline_misread(
+    result: dict,
+    assignment: dict,
+    retry_audit: dict,
+) -> bool:
+    if (
+        _text(result.get("verdict")) != "blocked"
+        or _text(result.get("status")) != "blocked"
+        or list(result.get("findings") or [])
+        or list(result.get("changed_paths") or [])
+        or list(result.get("owned_paths") or [])
+        or _text(result.get("summary"))
+        != (
+            "The immutable artifact passed mode-0600 and SHA-256 verification, "
+            "but the assignment deadline expired before the deep review could be completed."
+        )
+    ):
+        return False
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) != 2:
+        return False
+    if evidence[0] != (
+        "review-artifact completed successfully for diff_artifact_sha256 "
+        f"{_text(assignment.get('diff_artifact_sha256'))}."
+    ):
+        return False
+    deadline_pattern = re.compile(
+        r"^Assignment deadline_at was "
+        + re.escape(_text(assignment.get("deadline_at")))
+        + r"; observed UTC time before completion was (.+)\.$"
+    )
+    match = deadline_pattern.fullmatch(_text(evidence[1]))
+    if not match:
+        return False
+    try:
+        original_deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+        observed = _parse_iso_timestamp(match.group(1), "observed reviewer time")
+        retry_deadline = _parse_iso_timestamp(
+            retry_audit.get("retry_deadline_at"),
+            "retry_deadline_at",
+        )
+    except APError:
+        return False
+    if not original_deadline < observed < retry_deadline:
+        return False
+    risks = result.get("risks")
+    return bool(
+        isinstance(risks, list)
+        and len(risks) == 1
+        and re.fullmatch(
+            r"The [1-9][0-9]*-line cross-module patch did not receive a complete "
+            r"substantive deep review within its bound deadline; no approval should be inferred\.",
+            _text(risks[0]),
+        )
+    )
+
+
 def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
@@ -14942,10 +15080,16 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
             raise APError("Managed Reviewer retry runtime must be newer than the task runtime.")
         review = dict(manifest.get("review") or {})
         existing_token = _review_attempt_token(review)
-        repairing_retry = existing_token == "retry-v4.3.4"
-        if existing_token and (
-            not repairing_retry or runtime_version_tuple < _REVIEW_RUNTIME_RETRY_REPAIRED_IN
-        ):
+        repairing_artifact_retry = (
+            existing_token == "retry-v4.3.4"
+            and runtime_version_tuple >= _REVIEW_RUNTIME_RETRY_REPAIRED_IN
+        )
+        repairing_deadline_retry = (
+            existing_token == "retry-v4.3.6"
+            and runtime_version_tuple >= _REVIEW_RUNTIME_RETRY_DEADLINE_FIXED_IN
+        )
+        repairing_retry = repairing_artifact_retry or repairing_deadline_retry
+        if existing_token and not repairing_retry:
             raise APError("A Reviewer runtime retry is already authorized for this diff fingerprint.")
         if not existing_token and any(
             _text(review.get(field)) for field in _REVIEW_RETRY_FIELDS
@@ -14991,9 +15135,10 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
             )
             if (
                 not superseded_audit
-                or _text(superseded_audit.get("managed_runtime_version")) != "4.3.4"
+                or _text(superseded_audit.get("managed_runtime_version"))
+                != existing_token.removeprefix("retry-v")
             ):
-                raise APError("Only the exact 4.3.4 managed retry may be repaired.")
+                raise APError("Only an exact managed retry generation may be repaired.")
             retry_paths = (*_review_runtime_paths(
                 control_repo,
                 task_id,
@@ -15008,7 +15153,8 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
                 create=False,
             ))
             if (
-                _text(review.get("verdict")) == "pending"
+                repairing_artifact_retry
+                and _text(review.get("verdict")) == "pending"
                 and _text(review.get("reason")) == "bounded managed runtime retry authorized"
                 and not any(field in review for field in _REVIEW_RUNTIME_FIELDS)
                 and not any(path.exists() or path.is_symlink() for path in retry_paths)
@@ -15024,7 +15170,7 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
                 superseded_state = "blocked"
             else:
                 raise APError(
-                    "The 4.3.4 Reviewer retry is not an untouched pending attempt or the exact procedural block."
+                    "The Reviewer retry is not an untouched eligible attempt or the exact procedural block."
                 )
         elif (
             _text(review.get("verdict")) != "blocked"
@@ -15088,12 +15234,18 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
             if not isinstance(result_payload, dict):
                 raise APError("Prior Reviewer result must contain one JSON object.")
             normalized_result = _normalize_reviewer_runtime_result(assignment, result_payload)
-            if result_payload != normalized_result or not _known_review_artifact_access_failure(
-                control_repo,
-                normalized_result,
-            ):
+            known_procedural_failure = (
+                _known_review_artifact_access_failure(control_repo, normalized_result)
+                if not repairing_deadline_retry
+                else _known_review_retry_deadline_misread(
+                    normalized_result,
+                    assignment,
+                    superseded_audit or {},
+                )
+            )
+            if result_payload != normalized_result or not known_procedural_failure:
                 raise APError(
-                    "Prior Reviewer result is not the exact non-substantive Git-local access failure."
+                    "Prior Reviewer result is not the exact eligible non-substantive failure."
                 )
 
         if superseded_audit:
@@ -15331,6 +15483,18 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         fingerprint,
         attempt_token,
     )
+    retry_audit = _load_review_runtime_retry_audit(
+        control_repo,
+        manifest,
+        assignment,
+        require_same_runtime=bool(attempt_token),
+    )
+    command_deadline = _effective_review_deadline(
+        control_repo,
+        manifest,
+        assignment,
+        require_same_runtime=bool(attempt_token),
+    )
 
     command_override = _text(getattr(args, "runner_command_json", ""))
     if command_override:
@@ -15355,6 +15519,7 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             assignment_path,
             result_path,
             review_depth=_text(assignment.get("review_depth")) or "focused",
+            effective_deadline=command_deadline if attempt_token else None,
         )
         runner_kind = "codex"
     command_sha256 = _review_command_sha256(command)
@@ -15387,12 +15552,6 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         "finished_at": "",
         "exit_code": None,
     }
-    retry_audit = _load_review_runtime_retry_audit(
-        control_repo,
-        manifest,
-        assignment,
-        require_same_runtime=bool(attempt_token),
-    )
     if retry_audit is not None:
         receipt.update(
             {
@@ -15429,6 +15588,8 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             assignment,
             require_same_runtime=bool(attempt_token),
         )
+        if deadline != command_deadline:
+            raise APError("Reviewer effective deadline changed before runtime start.")
         if _dt.datetime.now(_dt.timezone.utc) >= deadline:
             raise APError("Review assignment deadline expired before Reviewer runtime start.")
         if result_path.exists() or result_path.is_symlink():

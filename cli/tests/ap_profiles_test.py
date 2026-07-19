@@ -818,6 +818,14 @@ class AutoCodingProfileTests(unittest.TestCase):
                 assignment_path,
                 result_path,
                 review_depth="focused",
+                effective_deadline=ap._dt.datetime(
+                    2026,
+                    7,
+                    19,
+                    9,
+                    45,
+                    tzinfo=ap._dt.timezone.utc,
+                ),
             )
             deep = ap._codex_reviewer_command(
                 repo,
@@ -861,6 +869,9 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertNotIn("docs/tools/autopipeline/ap.py", prompt)
         self.assertIn("diff_artifact_sha256", prompt)
         self.assertIn("never substitute a live git diff", prompt)
+        self.assertIn("2026-07-19T09:45:00+00:00", prompt)
+        self.assertIn("AUTOCODING_REVIEW_DEADLINE", prompt)
+        self.assertIn("supersedes the immutable assignment deadline_at", prompt)
         developer_override = next(
             item for item in focused if item.startswith("developer_instructions=")
         )

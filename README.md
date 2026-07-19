@@ -9,7 +9,8 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.3.6 accepts the exact equivalent artifact-access wording observed in
+Version 4.3.7 binds the supervisor's effective retry deadline into the Reviewer
+prompt and repairs the exact 4.3.6 stale-deadline block once. Version 4.3.6 accepts the exact equivalent artifact-access wording observed in
 real 4.3.4 Reviewer evidence without broadening retry eligibility. Version 4.3.5 keeps retry artifact reads mutation-free and can repair the exact
 untouched or procedurally blocked 4.3.4 retry once without rewriting evidence.
 Version 4.3.4 adds one fail-closed, immutable-evidence retry for tasks whose
@@ -387,25 +388,27 @@ rerun and needs no force flag.
 
 The only migration exception is an active 4.2.8-4.3.2 task whose completed
 Reviewer result contains no findings and is blocked solely by the fixed
-`review-artifact` Git-local permission error. Run the managed 4.3.6 runtime from
+`review-artifact` Git-local permission error. Run the managed 4.3.7 runtime from
 outside the project install to authorize one audited retry, then immediately run
 the original Reviewer identity:
 
 ```bash
-python3 /absolute/managed/4.3.6/ap.py --repo /path/project \
+python3 /absolute/managed/4.3.7/ap.py --repo /path/project \
   review-runtime-retry T0001 --diff-fingerprint <SHA256> \
   --reason-code managed-review-artifact-access \
   --confirm-managed-runtime-retry
-python3 /absolute/managed/4.3.6/ap.py --repo /path/project \
+python3 /absolute/managed/4.3.7/ap.py --repo /path/project \
   review-run T0001 --reviewer <ORIGINAL_REVIEWER> --json
 ```
 
 The command preserves the original assignment, patch, result, receipt, and event
 log byte-for-byte. It refuses substantive findings, changed scope or fingerprint,
 tampered evidence, user overrides, duplicate retries, and unmanaged runtimes.
-If 4.3.4 already authorized the same retry, 4.3.5+ may supersede only an untouched
+If 4.3.4 already authorized the same retry, a fixed runtime may supersede only an untouched
 pending attempt or its exact non-substantive artifact-access block; both audit
-chains and any prior runtime files remain immutable.
+chains and any prior runtime files remain immutable. Version 4.3.7 may also
+supersede the exact 4.3.6 block that used the immutable assignment's old deadline
+after successfully reading the artifact; ordinary timeouts remain terminal.
 
 ```bash
 cd /path/a && autocoding init
@@ -418,6 +421,16 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.7
+
+- Passed the supervisor-authorized effective deadline in both the Reviewer prompt
+  and environment, explicitly superseding the immutable assignment deadline only
+  for an audit-bound retry.
+- Added one fail-closed repair for the exact 4.3.6 stale-deadline block. It requires
+  successful artifact verification, no findings or changed paths, an observed time
+  between the original and retry deadlines, and immutable evidence from every
+  prior generation.
 
 ## What changed in 4.3.6
 

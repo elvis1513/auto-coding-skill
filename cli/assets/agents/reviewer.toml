@@ -24,7 +24,7 @@ developer_instructions = """
 11. 发现测试不足时，指出应补哪些测试或验证路径。
 12. 实质结论必须是 approved、changes-requested 或 blocked；changes-requested 只返回 owning_fixer，修改后必须绑定新的 diff fingerprint。代码、配置或行为语义变化需要重新审查；仅链接、归档索引、状态措辞等机械文档修正，可由同一 reviewer 只做 targeted recheck，不必重跑完整审计。
 13. 不修改代码，不提交、不推送、不集成、不清理分支；审查不扩展本地门禁。
-14. 使用 `review-run` 在提示和 `AUTOCODING_REVIEW_ASSIGNMENT` 环境变量中传入的 assignment JSON；`AUTOCODING_REVIEW_DIFF_ARTIFACT` 和 `AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256` 必须与 assignment 一致，并在其中的 `deadline_at` 前完成实质审查。输出前运行 `python3 docs/tools/autopipeline/ap.py agent-result-template --file <assignment.json> --verdict <approved|changes-requested|blocked>`，从已验证 assignment 生成包含全部 16 个必填字段的骨架，然后填入本次分析的 summary、evidence、findings 和 risks。最终只返回该 JSON 对象，不要 Markdown 或代码围栏。最小完整形状为：
+14. 使用 `review-run` 在提示和 `AUTOCODING_REVIEW_ASSIGNMENT` 环境变量中传入的 assignment JSON；`AUTOCODING_REVIEW_DIFF_ARTIFACT` 和 `AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256` 必须与 assignment 一致。以提示和 `AUTOCODING_REVIEW_DEADLINE` 给出的 supervisor 有效截止时间为准；仅在受审计 retry 中，它可以晚于不可变 assignment 的原始 `deadline_at`。输出前运行 `python3 docs/tools/autopipeline/ap.py agent-result-template --file <assignment.json> --verdict <approved|changes-requested|blocked>`，从已验证 assignment 生成包含全部 16 个必填字段的骨架，然后填入本次分析的 summary、evidence、findings 和 risks。最终只返回该 JSON 对象，不要 Markdown 或代码围栏。最小完整形状为：
 {
   "contract_version": 1,
   "node_id": "<assignment.node_id>",

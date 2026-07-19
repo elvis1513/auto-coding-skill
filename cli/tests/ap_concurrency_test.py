@@ -198,7 +198,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=check,
         )
 
-    def managed_runtime(self, root: Path) -> Path:
+    def managed_runtime(self, root: Path, version: str = "4.3.5") -> Path:
         install_root = root / "managed-runtime"
         skill = install_root / ".agents" / "skills" / "auto-coding-skill"
         shutil.copytree(REPO_ROOT / "src" / "auto-coding-skill", skill)
@@ -206,7 +206,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         relative = ".agents/skills/auto-coding-skill/scripts/ap.py"
         manifest = {
             "schema_version": 1,
-            "skill_version": "4.3.4",
+            "skill_version": version,
             "manifest_path": ".agents/managed-install.json",
             "entries": [
                 {
@@ -216,7 +216,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                     "sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
                     "executable": bool(script.stat().st_mode & 0o111),
                     "scope": "shared",
-                    "version": "4.3.4",
+                    "version": version,
                 }
             ],
             "managed_namespaces": [],
@@ -1666,7 +1666,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             ).stdout
         )
         self.assertEqual("retry-authorized", authorized["status"])
-        self.assertEqual("retry-v4.3.4", authorized["retry_token"])
+        self.assertEqual("retry-v4.3.5", authorized["retry_token"])
         audit_path = Path(authorized["audit_path"])
         self.assertEqual(0o600, audit_path.stat().st_mode & 0o777)
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -1705,9 +1705,9 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )["tasks"][0]
         retry_review = status["review"]
         self.assertEqual("approved", retry_review["verdict"])
-        self.assertIn(".retry-v4.3.4.result.json", retry_review["runtime_result_path"])
+        self.assertIn(".retry-v4.3.5.result.json", retry_review["runtime_result_path"])
         retry_receipt = json.loads(Path(retry_review["runtime_receipt_path"]).read_text())
-        self.assertEqual("retry-v4.3.4", retry_receipt["runtime_retry_token"])
+        self.assertEqual("retry-v4.3.5", retry_receipt["runtime_retry_token"])
         self.assertEqual(authorized["audit_sha256"], retry_receipt["runtime_retry_audit_sha256"])
 
         repeated = self.ap_script(
@@ -1723,6 +1723,126 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, repeated.returncode)
+
+    def test_434_retry_artifact_access_block_gets_one_435_repair(self) -> None:
+        root, repo, _ = self.make_repo()
+        managed_434 = self.managed_runtime(root / "runtime-434", "4.3.4")
+        managed_435 = self.managed_runtime(root / "runtime-435", "4.3.5")
+        worktree = self.start_task(repo, "REVIEW-RETRY-REPAIR", "shared.txt")
+        (worktree / "shared.txt").write_text("repair retry payload\n", encoding="utf-8")
+        common_dir = Path(git_output(repo, "rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = (repo / common_dir).resolve()
+        state_root = common_dir / "auto-coding-skill"
+        blocked_reviewer = root / "repair-artifact-access-block.py"
+        blocked_reviewer.write_text(
+            "import json\n"
+            f"state_root = {str(state_root)!r}\n"
+            "print(json.dumps({"
+            "'verdict': 'blocked', "
+            "'summary': 'Review could not begin because review-artifact failed before emitting the immutable patch.', "
+            "'evidence': ['review-artifact exited 2: Cannot protect Git-local review storage at ' + state_root + ': Operation not permitted.'], "
+            "'risks': ['The immutable patch was not emitted or substantively reviewed.']}))\n",
+            encoding="utf-8",
+        )
+        blocked_runner = json.dumps([sys.executable, str(blocked_reviewer)])
+        self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-RETRY-REPAIR",
+            "--reviewer",
+            "repair-reviewer",
+            "--runner-command-json",
+            blocked_runner,
+            check=False,
+        )
+        manifest_path = self.registry_manifest_path(repo, "REVIEW-RETRY-REPAIR")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["skill_version"] = "4.3.2"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        fingerprint = manifest["review"]["diff_fingerprint"]
+        first_retry = json.loads(
+            self.ap_script(
+                worktree,
+                managed_434,
+                "review-runtime-retry",
+                "REVIEW-RETRY-REPAIR",
+                "--diff-fingerprint",
+                fingerprint,
+                "--reason-code",
+                "managed-review-artifact-access",
+                "--confirm-managed-runtime-retry",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("retry-v4.3.4", first_retry["retry_token"])
+        self.ap_script(
+            worktree,
+            managed_434,
+            "review-run",
+            "REVIEW-RETRY-REPAIR",
+            "--reviewer",
+            "repair-reviewer",
+            "--runner-command-json",
+            blocked_runner,
+            check=False,
+        )
+        blocked_status = json.loads(
+            self.ap_script(
+                worktree,
+                managed_434,
+                "task-status",
+                "REVIEW-RETRY-REPAIR",
+                "--json",
+            ).stdout
+        )["tasks"][0]
+        old_review = blocked_status["review"]
+        old_evidence_paths = [
+            Path(old_review["runtime_retry_audit_path"]),
+            Path(old_review["runtime_result_path"]),
+            Path(old_review["runtime_receipt_path"]),
+            Path(old_review["runtime_event_log_path"]),
+        ]
+        old_evidence = {path: path.read_bytes() for path in old_evidence_paths}
+
+        repaired = json.loads(
+            self.ap_script(
+                worktree,
+                managed_435,
+                "review-runtime-retry",
+                "REVIEW-RETRY-REPAIR",
+                "--diff-fingerprint",
+                fingerprint,
+                "--reason-code",
+                "managed-review-artifact-access",
+                "--confirm-managed-runtime-retry",
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("retry-v4.3.5", repaired["retry_token"])
+        repair_audit = json.loads(Path(repaired["audit_path"]).read_text(encoding="utf-8"))
+        self.assertEqual("retry-v4.3.4", repair_audit["superseded_retry_token"])
+        self.assertEqual("blocked", repair_audit["superseded_retry_state"])
+        reviewed = json.loads(
+            self.ap_script(
+                worktree,
+                managed_435,
+                "review-run",
+                "REVIEW-RETRY-REPAIR",
+                "--reviewer",
+                "repair-reviewer",
+                "--runner-command-json",
+                self.artifact_reviewer_runner(
+                    root,
+                    "repair retry payload",
+                    runtime_script=managed_435,
+                ),
+                "--json",
+            ).stdout
+        )
+        self.assertEqual("approved", reviewed["verdict"])
+        for path, original in old_evidence.items():
+            self.assertEqual(original, path.read_bytes(), str(path))
 
     def test_managed_retry_rejects_a_substantive_blocked_result(self) -> None:
         root, repo, _ = self.make_repo()

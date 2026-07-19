@@ -108,6 +108,7 @@ _REVIEW_RUNTIME_RETRY_REASON = "managed-review-artifact-access"
 _REVIEW_RUNTIME_RETRY_AFFECTED_MIN = (4, 2, 8)
 _REVIEW_RUNTIME_RETRY_AFFECTED_MAX = (4, 3, 2)
 _REVIEW_RUNTIME_RETRY_FIXED_IN = (4, 3, 4)
+_REVIEW_RUNTIME_RETRY_REPAIRED_IN = (4, 3, 5)
 _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
 _REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
@@ -299,7 +300,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.4", "engineering": "4.3.4"},
+    "managed_versions": {"agents": "4.3.5", "engineering": "4.3.5"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -14066,6 +14067,7 @@ def cmd_review_artifact(args: argparse.Namespace) -> None:
         assignment,
         require_environment=bool(_review_attempt_token(manifest.get("review") or {})),
         require_same_runtime=bool(_review_attempt_token(manifest.get("review") or {})),
+        verify_worktree_snapshot=False,
     )
     if _dt.datetime.now(_dt.timezone.utc) >= deadline:
         raise APError("Review assignment deadline expired before diff artifact access.")
@@ -14255,6 +14257,7 @@ def _load_review_runtime_retry_audit(
     *,
     require_environment: bool = False,
     require_same_runtime: bool = False,
+    verify_worktree_snapshot: bool = True,
 ) -> Optional[dict]:
     review = manifest.get("review") or {}
     token = _review_attempt_token(review)
@@ -14312,11 +14315,14 @@ def _load_review_runtime_retry_audit(
         raise APError(
             "Reviewer runtime retry audit does not match task state: " + ", ".join(mismatched)
         )
-    worktree = Path(_text(manifest.get("worktree_path"))).resolve()
-    if not worktree.exists() or _resolve_commit(worktree, "HEAD") != _text(assignment.get("diff_head")):
-        raise APError("Reviewer runtime retry task HEAD changed after authorization.")
-    if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
-        raise APError("Reviewer runtime retry diff changed after authorization.")
+    if verify_worktree_snapshot:
+        worktree = Path(_text(manifest.get("worktree_path"))).resolve()
+        if not worktree.exists() or _resolve_commit(worktree, "HEAD") != _text(
+            assignment.get("diff_head")
+        ):
+            raise APError("Reviewer runtime retry task HEAD changed after authorization.")
+        if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
+            raise APError("Reviewer runtime retry diff changed after authorization.")
     retry_result_path, retry_receipt_path = _review_runtime_paths(
         control_repo,
         task_id,
@@ -14361,6 +14367,106 @@ def _load_review_runtime_retry_audit(
         if path != expected_path:
             raise APError(f"Reviewer runtime retry {label} path is not canonical.")
         _read_verified_private_review_file(path, _text(audit.get(f"{field}_sha256")), label)
+    superseded_token = _text(audit.get("superseded_retry_token"))
+    if superseded_token:
+        if superseded_token != "retry-v4.3.4":
+            raise APError("Reviewer runtime repair may supersede only retry-v4.3.4.")
+        superseded_audit_path = _review_runtime_retry_audit_path(
+            control_repo,
+            task_id,
+            fingerprint,
+            superseded_token,
+            create=False,
+        ).resolve()
+        if Path(_text(audit.get("superseded_retry_audit_path"))).resolve() != superseded_audit_path:
+            raise APError("Superseded Reviewer retry audit path is not canonical.")
+        superseded_payload = _read_verified_private_review_file(
+            superseded_audit_path,
+            _text(audit.get("superseded_retry_audit_sha256")),
+            "superseded runtime retry audit",
+        )
+        try:
+            superseded_audit = json.loads(superseded_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise APError("Superseded Reviewer runtime retry audit is invalid JSON.") from exc
+        superseded_result_path, superseded_receipt_path = _review_runtime_paths(
+            control_repo,
+            task_id,
+            fingerprint,
+            superseded_token,
+            create=False,
+        )
+        superseded_event_path = _review_runtime_event_log_path(
+            control_repo,
+            task_id,
+            fingerprint,
+            superseded_token,
+            create=False,
+        )
+        superseded_expected = {
+            "schema": 1,
+            "reason_code": _REVIEW_RUNTIME_RETRY_REASON,
+            "task_id": task_id,
+            "task_uuid": _text(manifest.get("task_uuid")),
+            "owner": _text(manifest.get("owner")),
+            "reviewer": _text(review.get("reviewer")),
+            "task_skill_version": _text(manifest.get("skill_version")),
+            "base_sha": _text(manifest.get("base_sha")),
+            "diff_head": _text(assignment.get("diff_head")),
+            "diff_fingerprint": fingerprint,
+            "scope_revision": int(manifest.get("scope_revision") or 1),
+            "owned_paths": list(manifest.get("owned_paths") or []),
+            "retry_token": superseded_token,
+            "assignment_path": str(
+                _review_assignment_path(control_repo, task_id, fingerprint).resolve()
+            ),
+            "assignment_sha256": _text(review.get("assignment_sha256")),
+            "diff_artifact_path": str(
+                _review_diff_artifact_path(control_repo, task_id, fingerprint).resolve()
+            ),
+            "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
+            "original_deadline_at": _text(assignment.get("deadline_at")),
+            "managed_runtime_version": "4.3.4",
+            "retry_result_path": str(superseded_result_path.resolve()),
+            "retry_receipt_path": str(superseded_receipt_path.resolve()),
+            "retry_event_log_path": str(superseded_event_path.resolve()),
+        }
+        superseded_mismatched = [
+            field
+            for field, value in superseded_expected.items()
+            if not isinstance(superseded_audit, dict) or superseded_audit.get(field) != value
+        ]
+        if superseded_mismatched:
+            raise APError(
+                "Superseded Reviewer runtime retry audit does not match task state: "
+                + ", ".join(superseded_mismatched)
+            )
+        superseded_state = _text(audit.get("superseded_retry_state"))
+        if superseded_state == "pending":
+            if any(
+                path.exists() or path.is_symlink()
+                for path in (
+                    superseded_result_path,
+                    superseded_receipt_path,
+                    superseded_event_path,
+                )
+            ):
+                raise APError("Superseded pending Reviewer retry unexpectedly has runtime evidence.")
+        elif superseded_state == "blocked":
+            for field, path, label in (
+                ("superseded_retry_result", superseded_result_path, "superseded retry result"),
+                ("superseded_retry_receipt", superseded_receipt_path, "superseded retry receipt"),
+                ("superseded_retry_event_log", superseded_event_path, "superseded retry event log"),
+            ):
+                if Path(_text(audit.get(f"{field}_path"))).resolve() != path.resolve():
+                    raise APError(f"Reviewer runtime repair {label} path is not canonical.")
+                _read_verified_private_review_file(
+                    path,
+                    _text(audit.get(f"{field}_sha256")),
+                    label,
+                )
+        else:
+            raise APError("Reviewer runtime repair has an invalid superseded retry state.")
     issued = _parse_iso_timestamp(audit.get("retry_issued_at"), "retry_issued_at")
     deadline = _parse_iso_timestamp(audit.get("retry_deadline_at"), "retry_deadline_at")
     timeout_seconds = int(audit.get("retry_timeout_seconds") or 0)
@@ -14408,6 +14514,7 @@ def _effective_review_deadline(
     *,
     require_environment: bool = False,
     require_same_runtime: bool = False,
+    verify_worktree_snapshot: bool = True,
 ) -> _dt.datetime:
     audit = _load_review_runtime_retry_audit(
         control_repo,
@@ -14415,6 +14522,7 @@ def _effective_review_deadline(
         assignment,
         require_environment=require_environment,
         require_same_runtime=require_same_runtime,
+        verify_worktree_snapshot=verify_worktree_snapshot,
     )
     if audit is None:
         return _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
@@ -14831,8 +14939,16 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
         if runtime_version_tuple <= task_version_tuple:
             raise APError("Managed Reviewer retry runtime must be newer than the task runtime.")
         review = dict(manifest.get("review") or {})
-        if _review_attempt_token(review) or any(_text(review.get(field)) for field in _REVIEW_RETRY_FIELDS):
+        existing_token = _review_attempt_token(review)
+        repairing_retry = existing_token == "retry-v4.3.4"
+        if existing_token and (
+            not repairing_retry or runtime_version_tuple < _REVIEW_RUNTIME_RETRY_REPAIRED_IN
+        ):
             raise APError("A Reviewer runtime retry is already authorized for this diff fingerprint.")
+        if not existing_token and any(
+            _text(review.get(field)) for field in _REVIEW_RETRY_FIELDS
+        ):
+            raise APError("Reviewer runtime retry state is incomplete.")
         if _text(review.get("runtime_override_path")) or _text(review.get("runtime_override_sha256")):
             raise APError("Reviewer runtime retry cannot follow a user-authorized runtime override.")
         fingerprint = _task_review_fingerprint(worktree, manifest, _load_cfg(worktree))
@@ -14842,14 +14958,6 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
                 f"Reviewer runtime retry fingerprint mismatch: supplied={supplied or '(missing)'}, "
                 f"current={fingerprint}."
             )
-        if (
-            _text(review.get("verdict")) != "blocked"
-            or _text(review.get("runtime_state")) != "blocked"
-            or review.get("runtime_exit_code") != 0
-            or _text(review.get("runtime_failure_kind"))
-            or int(review.get("runtime_attempt_count") or 0) != 1
-        ):
-            raise APError("Prior Reviewer state is not the exact completed procedural block eligible for retry.")
         assignment_path = Path(_text(review.get("assignment_path"))).resolve()
         assignment = _load_bound_review_assignment(control_repo, manifest, assignment_path)
         _validate_review_diff_artifact(control_repo, assignment)
@@ -14871,55 +14979,139 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
                 "Prior Reviewer assignment no longer matches task state: "
                 + ", ".join(assignment_mismatches)
             )
-        prior_result_path, prior_receipt_path = _review_runtime_paths(
-            control_repo,
-            task_id,
-            fingerprint,
-            create=False,
-        )
-        prior_event_path = _review_runtime_event_log_path(
-            control_repo,
-            task_id,
-            fingerprint,
-            create=False,
-        )
-        if Path(_text(review.get("runtime_result_path"))).resolve() != prior_result_path.resolve():
-            raise APError("Prior Reviewer result path is not canonical.")
-        if Path(_text(review.get("runtime_receipt_path"))).resolve() != prior_receipt_path.resolve():
-            raise APError("Prior Reviewer receipt path is not canonical.")
-        if Path(_text(review.get("runtime_event_log_path"))).resolve() != prior_event_path.resolve():
-            raise APError("Prior Reviewer event log path is not canonical.")
-        receipt = _validate_bound_review_runtime_receipt(
-            control_repo,
-            manifest,
-            assignment,
-            prior_receipt_path,
-            "blocked",
-        )
-        attempts = receipt.get("attempts") or []
-        if (
-            int(receipt.get("schema") or 0) != 2
-            or _text(receipt.get("verdict")) != "blocked"
-            or receipt.get("exit_code") != 0
-            or _text(receipt.get("failure_kind"))
-            or len(attempts) != 1
-            or _text(attempts[0].get("status")) != "completed"
-            or attempts[0].get("exit_code") != 0
-        ):
-            raise APError("Prior Reviewer receipt is not the exact completed procedural block eligible for retry.")
-        try:
-            result_payload = json.loads(_read_bounded_reviewer_output(prior_result_path))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise APError("Prior Reviewer result is invalid JSON.") from exc
-        if not isinstance(result_payload, dict):
-            raise APError("Prior Reviewer result must contain one JSON object.")
-        normalized_result = _normalize_reviewer_runtime_result(assignment, result_payload)
-        if result_payload != normalized_result or not _known_review_artifact_access_failure(
-            control_repo,
-            normalized_result,
+        superseded_audit: Optional[dict] = None
+        superseded_state = ""
+        if repairing_retry:
+            superseded_audit = _load_review_runtime_retry_audit(
+                control_repo,
+                manifest,
+                assignment,
+            )
+            if (
+                not superseded_audit
+                or _text(superseded_audit.get("managed_runtime_version")) != "4.3.4"
+            ):
+                raise APError("Only the exact 4.3.4 managed retry may be repaired.")
+            retry_paths = (*_review_runtime_paths(
+                control_repo,
+                task_id,
+                fingerprint,
+                existing_token,
+                create=False,
+            ), _review_runtime_event_log_path(
+                control_repo,
+                task_id,
+                fingerprint,
+                existing_token,
+                create=False,
+            ))
+            if (
+                _text(review.get("verdict")) == "pending"
+                and _text(review.get("reason")) == "bounded managed runtime retry authorized"
+                and not any(field in review for field in _REVIEW_RUNTIME_FIELDS)
+                and not any(path.exists() or path.is_symlink() for path in retry_paths)
+            ):
+                superseded_state = "pending"
+            elif (
+                _text(review.get("verdict")) == "blocked"
+                and _text(review.get("runtime_state")) == "blocked"
+                and review.get("runtime_exit_code") == 0
+                and not _text(review.get("runtime_failure_kind"))
+                and int(review.get("runtime_attempt_count") or 0) == 1
+            ):
+                superseded_state = "blocked"
+            else:
+                raise APError(
+                    "The 4.3.4 Reviewer retry is not an untouched pending attempt or the exact procedural block."
+                )
+        elif (
+            _text(review.get("verdict")) != "blocked"
+            or _text(review.get("runtime_state")) != "blocked"
+            or review.get("runtime_exit_code") != 0
+            or _text(review.get("runtime_failure_kind"))
+            or int(review.get("runtime_attempt_count") or 0) != 1
         ):
             raise APError(
-                "Prior Reviewer result is not the exact non-substantive Git-local access failure."
+                "Prior Reviewer state is not the exact completed procedural block eligible for retry."
+            )
+
+        blocked_result_path: Optional[Path] = None
+        blocked_receipt_path: Optional[Path] = None
+        blocked_event_path: Optional[Path] = None
+        if not repairing_retry or superseded_state == "blocked":
+            blocked_result_path, blocked_receipt_path = _review_runtime_paths(
+                control_repo,
+                task_id,
+                fingerprint,
+                existing_token,
+                create=False,
+            )
+            blocked_event_path = _review_runtime_event_log_path(
+                control_repo,
+                task_id,
+                fingerprint,
+                existing_token,
+                create=False,
+            )
+            if Path(_text(review.get("runtime_result_path"))).resolve() != blocked_result_path.resolve():
+                raise APError("Prior Reviewer result path is not canonical.")
+            if Path(_text(review.get("runtime_receipt_path"))).resolve() != blocked_receipt_path.resolve():
+                raise APError("Prior Reviewer receipt path is not canonical.")
+            if Path(_text(review.get("runtime_event_log_path"))).resolve() != blocked_event_path.resolve():
+                raise APError("Prior Reviewer event log path is not canonical.")
+            receipt = _validate_bound_review_runtime_receipt(
+                control_repo,
+                manifest,
+                assignment,
+                blocked_receipt_path,
+                "blocked",
+            )
+            attempts = receipt.get("attempts") or []
+            if (
+                int(receipt.get("schema") or 0) != 2
+                or _text(receipt.get("verdict")) != "blocked"
+                or receipt.get("exit_code") != 0
+                or _text(receipt.get("failure_kind"))
+                or len(attempts) != 1
+                or _text(attempts[0].get("status")) != "completed"
+                or attempts[0].get("exit_code") != 0
+            ):
+                raise APError(
+                    "Prior Reviewer receipt is not the exact completed procedural block eligible for retry."
+                )
+            try:
+                result_payload = json.loads(_read_bounded_reviewer_output(blocked_result_path))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise APError("Prior Reviewer result is invalid JSON.") from exc
+            if not isinstance(result_payload, dict):
+                raise APError("Prior Reviewer result must contain one JSON object.")
+            normalized_result = _normalize_reviewer_runtime_result(assignment, result_payload)
+            if result_payload != normalized_result or not _known_review_artifact_access_failure(
+                control_repo,
+                normalized_result,
+            ):
+                raise APError(
+                    "Prior Reviewer result is not the exact non-substantive Git-local access failure."
+                )
+
+        if superseded_audit:
+            prior_result_path = Path(_text(superseded_audit.get("prior_result_path"))).resolve()
+            prior_receipt_path = Path(_text(superseded_audit.get("prior_receipt_path"))).resolve()
+            prior_event_path = Path(_text(superseded_audit.get("prior_event_log_path"))).resolve()
+            prior_result_sha256 = _text(superseded_audit.get("prior_result_sha256"))
+            prior_receipt_sha256 = _text(superseded_audit.get("prior_receipt_sha256"))
+            prior_event_sha256 = _text(superseded_audit.get("prior_event_log_sha256"))
+        else:
+            assert blocked_result_path and blocked_receipt_path and blocked_event_path
+            prior_result_path = blocked_result_path
+            prior_receipt_path = blocked_receipt_path
+            prior_event_path = blocked_event_path
+            prior_result_sha256 = _private_review_file_sha256(prior_result_path, "prior result")
+            prior_receipt_sha256 = _private_review_file_sha256(
+                prior_receipt_path, "prior runtime receipt"
+            )
+            prior_event_sha256 = _private_review_file_sha256(
+                prior_event_path, "prior event log"
             )
 
         token = f"retry-v{runtime_version}"
@@ -14975,22 +15167,18 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
             "diff_artifact_path": _text(review.get("diff_artifact_path")),
             "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
             "prior_result_path": str(prior_result_path),
-            "prior_result_sha256": _private_review_file_sha256(prior_result_path, "prior result"),
+            "prior_result_sha256": prior_result_sha256,
             "prior_receipt_path": str(prior_receipt_path),
-            "prior_receipt_sha256": _private_review_file_sha256(
-                prior_receipt_path, "prior runtime receipt"
-            ),
+            "prior_receipt_sha256": prior_receipt_sha256,
             "prior_event_log_path": str(prior_event_path),
-            "prior_event_log_sha256": _private_review_file_sha256(
-                prior_event_path, "prior event log"
-            ),
+            "prior_event_log_sha256": prior_event_sha256,
             "prior_review_state_sha256": hashlib.sha256(
                 json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
                     "utf-8"
                 )
             ).hexdigest(),
-            "prior_verdict": "blocked",
-            "prior_runtime_state": "blocked",
+            "prior_verdict": _text(review.get("verdict")),
+            "prior_runtime_state": _text(review.get("runtime_state")) or "pending",
             "managed_runtime_version": runtime_version,
             "managed_runtime_script_path": identity["script_path"],
             "managed_runtime_script_sha256": identity["script_sha256"],
@@ -15000,6 +15188,37 @@ def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
             "retry_receipt_path": str(retry_receipt_path),
             "retry_event_log_path": str(retry_event_path),
         }
+        if superseded_audit:
+            audit.update(
+                {
+                    "superseded_retry_token": existing_token,
+                    "superseded_retry_audit_path": _text(
+                        review.get("runtime_retry_audit_path")
+                    ),
+                    "superseded_retry_audit_sha256": _text(
+                        review.get("runtime_retry_audit_sha256")
+                    ),
+                    "superseded_retry_state": superseded_state,
+                }
+            )
+            if superseded_state == "blocked":
+                assert blocked_result_path and blocked_receipt_path and blocked_event_path
+                audit.update(
+                    {
+                        "superseded_retry_result_path": str(blocked_result_path),
+                        "superseded_retry_result_sha256": _private_review_file_sha256(
+                            blocked_result_path, "superseded retry result"
+                        ),
+                        "superseded_retry_receipt_path": str(blocked_receipt_path),
+                        "superseded_retry_receipt_sha256": _private_review_file_sha256(
+                            blocked_receipt_path, "superseded retry receipt"
+                        ),
+                        "superseded_retry_event_log_path": str(blocked_event_path),
+                        "superseded_retry_event_log_sha256": _private_review_file_sha256(
+                            blocked_event_path, "superseded retry event log"
+                        ),
+                    }
+                )
         _create_private_json(audit_path, audit, "runtime retry audit")
         audit_sha256 = _private_review_file_sha256(audit_path, "runtime retry audit")
         next_review = {

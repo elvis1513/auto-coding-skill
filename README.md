@@ -9,6 +9,8 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
+Version 4.3.5 keeps retry artifact reads mutation-free and can repair the exact
+untouched or procedurally blocked 4.3.4 retry once without rewriting evidence.
 Version 4.3.4 adds one fail-closed, immutable-evidence retry for tasks whose
 4.2.8-4.3.2 Reviewer was consumed solely by the fixed Git-local artifact access
 defect. Version 4.3.3 resolves the first multi-project feedback batch: read-only
@@ -384,22 +386,25 @@ rerun and needs no force flag.
 
 The only migration exception is an active 4.2.8-4.3.2 task whose completed
 Reviewer result contains no findings and is blocked solely by the fixed
-`review-artifact` Git-local permission error. Run the managed 4.3.4 runtime from
+`review-artifact` Git-local permission error. Run the managed 4.3.5 runtime from
 outside the project install to authorize one audited retry, then immediately run
 the original Reviewer identity:
 
 ```bash
-python3 /absolute/managed/4.3.4/ap.py --repo /path/project \
+python3 /absolute/managed/4.3.5/ap.py --repo /path/project \
   review-runtime-retry T0001 --diff-fingerprint <SHA256> \
   --reason-code managed-review-artifact-access \
   --confirm-managed-runtime-retry
-python3 /absolute/managed/4.3.4/ap.py --repo /path/project \
+python3 /absolute/managed/4.3.5/ap.py --repo /path/project \
   review-run T0001 --reviewer <ORIGINAL_REVIEWER> --json
 ```
 
 The command preserves the original assignment, patch, result, receipt, and event
 log byte-for-byte. It refuses substantive findings, changed scope or fingerprint,
 tampered evidence, user overrides, duplicate retries, and unmanaged runtimes.
+If 4.3.4 already authorized the same retry, 4.3.5 may supersede only an untouched
+pending attempt or its exact non-substantive artifact-access block; both audit
+chains and any prior runtime files remain immutable.
 
 ```bash
 cd /path/a && autocoding init
@@ -412,6 +417,16 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.5
+
+- Stopped read-only `review-artifact` from recomputing the live task snapshot;
+  the writable supervisor remains responsible for the immediately pre-launch
+  HEAD, scope, and fingerprint check.
+- Added one fail-closed repair for `retry-v4.3.4` when it is still untouched or
+  ended only in the known Git-local permission block. The repair publishes a new
+  audit and tokenized evidence while retaining and revalidating the full 4.3.4
+  audit chain.
 
 ## What changed in 4.3.4
 

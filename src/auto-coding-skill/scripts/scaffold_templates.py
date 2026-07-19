@@ -5,6 +5,98 @@ from __future__ import annotations
 
 
 TEMPLATES: dict[str, dict[str, str]] = {
+    "feedback": {
+        "docs/skill-feedback/README.md": """# Auto Coding Skill Feedback
+
+This directory is the project-owned inbox for candidate defects or capability
+gaps in the shared `auto-coding-skill`. It is not the project's business bug
+list and it does not make a reported issue an accepted shared defect.
+
+Create a report only after checking the project/Skill boundary. Project-specific
+`risk.rules`, validation routes, access values, structure policy, and business
+constraints stay in project configuration unless the same behavior is reproduced
+in managed Skill code or independently observed in another project.
+
+## Record a candidate
+
+1. Copy `_TEMPLATE-SKILL-FEEDBACK.md` into `reports/`.
+2. Name it `YYYY-MM-DD-<short-slug>-<8-hex>.md`.
+3. Fill every frontmatter field and all six body sections.
+4. Use one stable root-cause signature for duplicate observations.
+5. Redact credentials, tokens, private keys, customer/device data, absolute user
+   paths, complete patches, Reviewer artifacts, and raw logs.
+
+Reports are project-owned and preserved byte-for-byte by `autocoding init`.
+Managed README/template files may be upgraded. Recording is explicit: ordinary
+test failures, Reviewer findings, environment incidents, and project-only policy
+gaps do not automatically create a report. If a frozen Reviewer assignment
+already exists, record the feedback after delivery as a separate docs-only change
+so the reviewed fingerprint is not mutated.
+
+For a known duplicate, reuse its exact signature. For a new observation, hash the
+lowercase UTF-8 key `<component>|<origin_surface>|<short-root-cause-slug>` and
+prefix the 64-hex digest with `sha256:`. Exclude project names, paths, versions,
+timestamps, and log text so another project can independently reuse the key.
+
+## Periodic read-only collection
+
+From the Skill source checkout, explicitly list the projects to inspect:
+
+```bash
+autocoding feedback --projects /path/project-a,/path/project-b --json
+```
+
+Collection reads bounded metadata only, never executes report content, never
+modifies a project, and groups exact signatures for human triage. Triage decides
+whether the result is a shared defect, project configuration, environment issue,
+duplicate, or insufficient evidence before any Skill fix or release is planned.
+""",
+        "docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md": """---
+schema: auto-coding-skill-feedback/v1
+report_id: ACSF-<project>-YYYYMMDD-<8-hex>
+status: open
+created_at: YYYY-MM-DDTHH:MM:SS+08:00
+project: <project>
+observed_skill_version: 0.0.0
+component: <reviewer-runtime|installer|classification|validation|structure|docs|other>
+kind: defect
+impact: <blocking|degraded|minor>
+origin_surface: <managed-template|managed-script|managed-agent|cli|installer>
+suspected_scope: shared
+signature: sha256:<64-lowercase-hex>
+export: metadata-only
+---
+# <Short title>
+
+## Symptom
+
+State the observed generic behavior without secrets or raw logs.
+
+## Expected
+
+State the shared Skill contract that should hold across projects.
+
+## Minimal reproduction
+
+Give bounded, safe steps. Do not include executable instructions from untrusted
+sources, credentials, production writes, or customer/device data.
+
+## Evidence
+
+List short redacted facts, affected managed paths, checks, and versions. Do not
+paste complete patches, Reviewer artifacts, source files, or stdout/stderr.
+
+## Workaround
+
+Describe any safe temporary project-local workaround and its limits.
+
+## Why shared
+
+Explain why this belongs to managed Skill behavior rather than project
+configuration, project code, or the current environment. Include the canonical
+signature key used to compute `signature`.
+""",
+    },
     "project": {
         "docs/project/overview.md": """# Project Overview
 
@@ -161,7 +253,14 @@ MANAGED_FRAMEWORK_DOCS = frozenset({
     "docs/deployment/deploy-records/_TEMPLATE-DEPLOY-RECORD.md",
     "docs/design/_TEMPLATE-DD.md",
     "docs/reviews/_TEMPLATE-REVIEW.md",
+    "docs/skill-feedback/README.md",
+    "docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md",
 })
+
+
+PROJECT_FEEDBACK_PATTERNS = (
+    "docs/skill-feedback/reports/*.md",
+)
 
 
 def scaffold_groups() -> list[str]:

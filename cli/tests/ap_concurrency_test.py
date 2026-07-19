@@ -817,7 +817,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         _, repo, _ = self.make_repo("adaptive", require_review=False)
         engineering = repo / "docs" / "ENGINEERING.md"
         text = engineering.read_text(encoding="utf-8")
-        engineering.write_text(text.replace("front-pass", "", 1), encoding="utf-8")
+        engineering.write_text(text.replace("front-pass", "CHANGE_ME", 1), encoding="utf-8")
         git(repo, "add", "docs/ENGINEERING.md")
         git(repo, "commit", "-qm", "invalidate access for preflight test")
         git(repo, "push", "-q", "origin", "dev")

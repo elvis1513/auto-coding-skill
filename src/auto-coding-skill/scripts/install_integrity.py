@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from scaffold_templates import MANAGED_FRAMEWORK_DOCS, templates_for
+from scaffold_templates import MANAGED_FRAMEWORK_DOCS, PROJECT_FEEDBACK_PATTERNS, templates_for
 
 
 SCHEMA_VERSION = 1
@@ -189,9 +189,9 @@ def build_manifest(skill_root: Path, agents_root: Path, version: str) -> dict[st
     engineering = skill_root / "data/templates/ENGINEERING.md"
     entries.append(_entry(
         target="docs/ENGINEERING.md",
-        source="skill/data/templates/ENGINEERING.md#managed-workflow",
-        strategy="managed-workflow",
-        data=managed_workflow_region(engineering.read_text(encoding="utf-8")).encode("utf-8"),
+        source="skill/data/templates/ENGINEERING.md",
+        strategy="exact",
+        data=engineering.read_bytes(),
         executable=bool(engineering.stat().st_mode & 0o111),
         scope="project",
         version=version,
@@ -225,12 +225,14 @@ def build_manifest(skill_root: Path, agents_root: Path, version: str) -> dict[st
             ".agents/archive/**",
             ".agents/agents/* (except paths listed in entries)",
             "docs/project/**",
+            "docs/project/auto-coding-skill.yaml",
             "docs/architecture/structure-standard.md",
             "docs/architecture/adr/[0-9]*.md",
             "docs/design/*.md",
             "docs/interfaces/*.md",
             "docs/deployment/deploy-records/*.md",
             "docs/reviews/*.md",
+            *PROJECT_FEEDBACK_PATTERNS,
         ],
     }
 

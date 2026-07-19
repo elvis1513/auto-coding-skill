@@ -9,6 +9,10 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
+Version 4.3.0 separates exact managed defaults from a byte-stable project
+configuration overlay, migrates legacy specialization with semantic proof, and
+adds project-owned shared-Skill feedback inboxes with bounded read-only
+multi-project triage. Upgrades now use recoverable, owner-bound transactions.
 Version 4.2.8 makes the supervised Reviewer observable and recoverable without
 weakening review semantics: it streams private event metadata, distinguishes
 startup failure from analysis timeout, retries one no-event startup, and supports
@@ -63,20 +67,70 @@ The project install contains:
 .agents/skills/auto-coding-skill/
 .agents/agents/
 docs/ENGINEERING.md
+docs/project/auto-coding-skill.yaml
 docs/tools/autopipeline/ap.py
 AGENTS.md (fully managed canonical repository contract)
 ```
 
 `autocoding init` also installs the exact shared documentation tree under
-`docs/{architecture,bugs,deployment,design,interfaces,project,reviews,testing}`.
+`docs/{architecture,bugs,deployment,design,interfaces,project,reviews,skill-feedback,testing}`.
 Managed templates are replaced; the scaffolded project structure standard,
 mutable project docs, and valid architecture, ADR, interface, DD, review, or
-deploy-record documents are preserved; unrelated
+deploy-record documents plus `docs/skill-feedback/reports/*.md` are preserved;
+unrelated
 directories are archived under `.agents/archive/`. Re-running init is the complete upgrade operation;
-`sync` and project-local `upgrade` are compatibility commands, not required steps.
+`sync` is the explicit multi-project equivalent. Project-local
+`ap.py upgrade --dry-run` remains a read-only legacy diagnostic; its old write
+mode is retired so upgrades cannot bypass the transactional installer.
+Multi-project sync completes all read-only preflights before its first write;
+after that boundary, each project has its own recoverable transaction, so a
+later host I/O failure does not roll back projects that already completed.
 
-Fill the project/Jenkins/GitLab/Nexus URL, username, and password fields under
-`access.*`, then configure one real fast validation command and run:
+`docs/ENGINEERING.md` is the exact managed default layer. Project-specific
+access, commands, validation routes, risk rules, structure policy, and other
+supported values belong in `docs/project/auto-coding-skill.yaml`. Runtime commands
+recursively overlay project mappings on managed defaults; project scalar and list
+values replace defaults, while code-enforced safety invariants remain mandatory.
+Ordinary init, sync, and upgrade operations never rewrite an existing overlay.
+The first compatible upgrade extracts the semantic difference from the previous
+managed default, verifies equivalence, and creates the overlay before replacing
+managed files.
+
+## Shared Skill feedback
+
+Every initialized project receives:
+
+```text
+docs/skill-feedback/
+├── README.md
+├── _TEMPLATE-SKILL-FEEDBACK.md
+└── reports/                         # created when the first report is added
+    └── YYYY-MM-DD-<slug>-<8-hex>.md
+```
+
+The README and template are managed; reports are project-owned and upgrades
+preserve them byte-for-byte. A report is a candidate observation only. Create one
+after distinguishing managed Skill behavior from project `risk.rules`, validation
+routes, access values, structure policy, business code, and environment failures.
+Do not automatically turn test failures or Reviewer findings into reports, and do
+not include credentials, customer/device data, complete patches, Reviewer
+artifacts, raw logs, or absolute user paths.
+
+Periodic triage is explicit and read-only:
+
+```bash
+autocoding feedback --projects /path/geestock,/path/geesight,/path/xjmate --json
+```
+
+The collector scans only bounded report metadata from the listed projects,
+executes nothing from the documents, changes no repository, and groups exact
+root-cause signatures. Human triage still decides whether an observation is a
+shared defect, project configuration, environment issue, duplicate, or missing
+evidence before fixes and a release are planned.
+
+Fill the project/Jenkins/GitLab/Nexus URL, username, and password overrides under
+`access.*` in `docs/project/auto-coding-skill.yaml`, then configure one real fast
+validation command and run:
 
 ```bash
 python3 docs/tools/autopipeline/ap.py doctor
@@ -319,6 +373,29 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.0
+
+- Made `docs/ENGINEERING.md` the exact managed default layer and added
+  `docs/project/auto-coding-skill.yaml` as the higher-priority project-owned
+  overlay. Mappings merge recursively; explicit project scalars and lists replace
+  defaults, while managed workflow identity and code-enforced safety invariants
+  remain protected.
+- Added one-time semantic migration from the previous manifest-bound default.
+  Initialization creates the overlay without overwriting an existing one, proves
+  the reconstructed effective configuration is equivalent, archives the legacy
+  document, and then converges the managed default byte-for-byte.
+- Added `docs/skill-feedback/` with managed guidance/template and preserved
+  project-owned reports. `autocoding feedback --projects ... --json` performs an
+  explicit bounded metadata-only read and groups exact root-cause signatures for
+  later human triage.
+- Replaced partial upgrade writes with owner-bound, recoverable installation
+  transactions, staged/installed hash checks, active-installer rejection, safe
+  project-file operations, and fail-closed effective-configuration validation.
+  Project-local `ap.py upgrade --write` is retired in favor of transactional
+  `autocoding init` or explicit multi-project `sync`.
+- Batched protected executable-mode convergence so the safer installer retains
+  practical upgrade latency while preserving symlink/reparse checks.
 
 ## What changed in 4.2.8
 

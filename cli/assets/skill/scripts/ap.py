@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import datetime as _dt
 import fnmatch
+import hmac
 import io
 import json
 import os
@@ -35,9 +36,30 @@ import uuid
 from pathlib import Path
 from typing import Iterator, Optional, List
 
-from core import APError, ensure_git_repo, copy_tree, run, load_yaml, find_config, run_shell, http_get_status, require_yaml
+from core import (
+    APError,
+    PROJECT_CONFIG_PATH,
+    PROJECT_CONFIG_SCHEMA,
+    copy_tree,
+    ensure_git_repo,
+    http_get_status,
+    load_effective_config,
+    load_managed_config,
+    load_project_overrides,
+    merge_project_config,
+    parse_managed_config_payload,
+    parse_project_overrides_payload,
+    require_yaml,
+    run,
+    run_shell,
+)
 from install_integrity import verify_managed_install
-from scaffold_templates import MANAGED_FRAMEWORK_DOCS, scaffold_groups, templates_for
+from scaffold_templates import (
+    MANAGED_FRAMEWORK_DOCS,
+    PROJECT_FEEDBACK_PATTERNS,
+    scaffold_groups,
+    templates_for,
+)
 
 
 _JENKINS_CRUMB_CACHE: dict[tuple[str, str], dict[str, str]] = {}
@@ -78,6 +100,72 @@ _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
 _REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _REVIEW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_FEEDBACK_SCHEMA = "auto-coding-skill-feedback/v1"
+_FEEDBACK_COLLECTION_SCHEMA = "auto-coding-skill-feedback-collection/v1"
+_FEEDBACK_REPORT_MAX_BYTES = 16 * 1024
+_FEEDBACK_PROJECT_MAX_REPORTS = 100
+_FEEDBACK_PROJECT_MAX_ENTRIES = 200
+_FEEDBACK_COLLECTION_MAX_BYTES = 1024 * 1024
+_FEEDBACK_COLLECTION_MAX_REPORTS = 500
+_FEEDBACK_COLLECTION_MAX_PROJECTS = 100
+_PROJECT_CONFIG_RELATIVE = PROJECT_CONFIG_PATH
+_INSTALL_TRANSACTION_RELATIVE = Path(".agents/.auto-coding-skill-install-transaction")
+_EFFECTIVE_CONFIG_PATHS = {
+    "docs/ENGINEERING.md",
+    _PROJECT_CONFIG_RELATIVE.as_posix(),
+}
+_FEEDBACK_FIELDS = (
+    "schema",
+    "report_id",
+    "status",
+    "created_at",
+    "project",
+    "observed_skill_version",
+    "component",
+    "kind",
+    "impact",
+    "origin_surface",
+    "suspected_scope",
+    "signature",
+    "export",
+)
+_FEEDBACK_STATUSES = {"open", "needs-evidence", "accepted", "duplicate", "resolved", "rejected"}
+_FEEDBACK_KINDS = {"defect", "gap"}
+_FEEDBACK_IMPACTS = {"blocking", "degraded", "minor"}
+_FEEDBACK_ORIGIN_SURFACES = {
+    "managed-template",
+    "managed-script",
+    "managed-agent",
+    "cli",
+    "installer",
+}
+_FEEDBACK_HEADINGS = (
+    "Symptom",
+    "Expected",
+    "Minimal reproduction",
+    "Evidence",
+    "Workaround",
+    "Why shared",
+)
+_FEEDBACK_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_FEEDBACK_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_FEEDBACK_SIGNATURE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FEEDBACK_FILENAME_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\.md$"
+)
+_FEEDBACK_SENSITIVE_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(r"\bAuthorization\s*:\s*Bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"https?://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE),
+    re.compile(r"(?:^|[\s`])/(?:Users|home)/[^/\s]+/"),
+    re.compile(r"\b[A-Za-z]:\\Users\\[^\\\s]+\\", re.IGNORECASE),
+)
+_FEEDBACK_SEMVER_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 _DEEP_REVIEW_CATEGORIES = {
     "api",
     "auth",
@@ -168,7 +256,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.2.8", "engineering": "4.2.8"},
+    "managed_versions": {"agents": "4.3.0", "engineering": "4.3.0"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -263,7 +351,7 @@ def _join_url(base: str, path: str) -> str:
     base = str(base or "").strip().rstrip("/")
     path = str(path or "").strip()
     if not base or not path:
-        raise APError("Health URL config incomplete. Fill base url and path in docs/ENGINEERING.md.")
+        raise APError("Health URL config incomplete. Fill the project configuration overlay.")
     if not path.startswith("/"):
         path = "/" + path
     return base + path
@@ -391,7 +479,7 @@ def _require_http_url(field: str, value: object) -> str:
     raw = _text(value).rstrip("/")
     parsed = urllib.parse.urlparse(raw)
     if not _is_explicit_fill(raw) or parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise APError(f"Missing or invalid {field}; fill an http/https URL in docs/ENGINEERING.md.")
+        raise APError(f"Missing or invalid {field}; fill an http/https URL in the project configuration overlay.")
     return raw
 
 
@@ -619,7 +707,7 @@ def _jenkins_api_get_json(
                     f"Jenkins API request failed: {url}\n"
                     f"HTTP 403\n{body or '(empty response body)'}\n"
                     "Jenkins may require crumb/CSRF handling, but no crumb issuer endpoint was available. "
-                    "Fill jenkins.base_url in docs/ENGINEERING.md if needed."
+                    "Fill jenkins.base_url in the project configuration overlay if needed."
                 ) from exc
         else:
             raise APError(
@@ -727,7 +815,7 @@ def _resolve_jenkins_job_url(
             return _jenkins_job_url_from_name(base_url, requested_name)
         raise APError(
             f"Cannot resolve Jenkins job URL for job '{requested_name}'. "
-            "Pass --job-url, or fill the selected Jenkins endpoint in docs/ENGINEERING.md."
+            "Pass --job-url, or fill the selected Jenkins endpoint in the project configuration overlay."
         )
     if configured_url:
         return configured_url.rstrip("/")
@@ -842,257 +930,476 @@ def _inferred_gate_commands(repo: Path) -> dict[str, str]:
     return {}
 
 
-def _initialize_engineering_defaults(path: Path, repo: Path) -> None:
-    if not path.exists():
-        return
-    text = path.read_text(encoding="utf-8")
-    updated = text.replace(
-        'project:\n  name: ""',
-        f"project:\n  name: {json.dumps(repo.name, ensure_ascii=False)}",
-        1,
-    )
-    for key, gate_command in _inferred_gate_commands(repo).items():
-        for default_value in ['""', '"git diff --check"']:
-            candidate = updated.replace(
-                f"  {key}: {default_value}",
-                f"  {key}: {json.dumps(gate_command)}",
-                1,
-            )
-            if candidate != updated:
-                updated = candidate
-                break
-    if updated != text:
-        path.write_text(updated, encoding="utf-8")
-
-
 def _mapping(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+_NO_CONFIG_DIFF = object()
 
 
-def _copy_scalar_path(source: dict, target: dict, path: tuple[str, ...]) -> None:
-    current: object = source
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            return
-        current = current[key]
-    destination = target
-    for key in path[:-1]:
-        destination = destination[key]
-    expected = destination[path[-1]]
-    compatible = (
-        (isinstance(expected, bool) and isinstance(current, bool))
-        or (isinstance(expected, str) and isinstance(current, str))
-        or (
-            isinstance(expected, (int, float))
-            and not isinstance(expected, bool)
-            and isinstance(current, (int, float))
-            and not isinstance(current, bool)
+def _config_values_equal(left: object, right: object) -> bool:
+    """Compare parsed configuration without Python's bool/number coercions."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _config_values_equal(left[key], right[key]) for key in left
         )
-    )
-    if compatible:
-        destination[path[-1]] = current
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _config_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
 
 
-def _normalize_validation_routes(value: object) -> list[dict]:
-    routes: list[dict] = []
-    if not isinstance(value, list):
-        return routes
-    for raw in value:
-        if not isinstance(raw, dict):
-            continue
-        route: dict = {}
-        name = _text(raw.get("name"))
-        paths = _string_list(raw.get("paths"))
-        commands = [_command_name(item) for item in _string_list(raw.get("commands"))]
-        commands = [item for item in commands if item]
-        if name:
-            route["name"] = name
-        if paths:
-            route["paths"] = paths
-        exclude = _string_list(raw.get("exclude"))
-        if exclude:
-            route["exclude"] = exclude
-        if commands:
-            route["commands"] = commands
-        timeout = raw.get("timeout_seconds")
-        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
-            route["timeout_seconds"] = timeout
-        if paths and commands:
-            routes.append(route)
-    return routes
+def _config_semantic_diff(current: object, base: object, path: tuple[str, ...] = ()) -> object:
+    """Return only project-owned values, excluding the managed release identity."""
+    if path == ("workflow", "skill_version"):
+        return _NO_CONFIG_DIFF
+    if isinstance(current, dict) and isinstance(base, dict):
+        result: dict = {}
+        for key, value in current.items():
+            field_path = (*path, str(key))
+            if key not in base:
+                if field_path != ("workflow", "skill_version"):
+                    result[key] = json.loads(json.dumps(value))
+                continue
+            difference = _config_semantic_diff(value, base[key], field_path)
+            if difference is not _NO_CONFIG_DIFF:
+                result[key] = difference
+        return result if result else _NO_CONFIG_DIFF
+    if not _config_values_equal(current, base):
+        return json.loads(json.dumps(current))
+    return _NO_CONFIG_DIFF
 
 
-def _normalize_risk_rules(value: object) -> list[dict]:
-    rules: list[dict] = []
-    if not isinstance(value, list):
-        return rules
-    for raw in value:
-        if not isinstance(raw, dict):
-            continue
-        rule: dict = {}
-        name = _text(raw.get("name"))
-        paths = _string_list(raw.get("paths"))
-        if name:
-            rule["name"] = name
-        if paths:
-            rule["paths"] = paths
-        profile = _text(raw.get("profile")).lower()
-        if profile in _WORKFLOW_PROFILES - {"auto"}:
-            rule["profile"] = profile
-        for key in ["review", "design"]:
-            value_text = _text(raw.get(key)).lower()
-            if value_text in {"required", "true", "yes", "false", "no"}:
-                rule[key] = value_text
-        if paths:
-            rules.append(rule)
-    return rules
+def _config_difference_conflicts(
+    difference: object,
+    current: object,
+    effective: object,
+    path: tuple[str, ...] = (),
+) -> list[str]:
+    """Find legacy project values not preserved exactly by an existing overlay."""
+    if difference is _NO_CONFIG_DIFF:
+        return []
+    if isinstance(difference, dict):
+        if not isinstance(current, dict) or not isinstance(effective, dict):
+            return [".".join(path) or "(root)"]
+        conflicts: list[str] = []
+        for key, value in difference.items():
+            field_path = (*path, str(key))
+            if key not in current or key not in effective:
+                conflicts.append(".".join(field_path))
+                continue
+            conflicts.extend(
+                _config_difference_conflicts(
+                    value,
+                    current[key],
+                    effective[key],
+                    field_path,
+                )
+            )
+        return conflicts
+    return [] if _config_values_equal(current, effective) else [".".join(path) or "(root)"]
 
 
-def _normalize_layer_rules(value: object) -> list[dict]:
-    rules: list[dict] = []
-    if not isinstance(value, list):
-        return rules
-    for raw in value:
-        if not isinstance(raw, dict):
-            continue
-        paths = _string_list(raw.get("paths"))
-        forbidden = _string_list(raw.get("forbidden_imports"))
-        if not paths or not forbidden:
-            continue
-        rule = {"paths": paths, "forbidden_imports": forbidden}
-        name = _text(raw.get("name"))
-        if name:
-            rule = {"name": name, **rule}
-        rules.append(rule)
-    return rules
+_INSTALLED_ENGINEERING_TEMPLATE = Path(
+    ".agents/skills/auto-coding-skill/data/templates/ENGINEERING.md"
+)
+_INSTALLED_MANIFEST = Path(".agents/managed-install.json")
 
 
-def _converged_engineering_document(repo: Path, template_path: Path) -> str:
-    template_cfg, template_body = _read_frontmatter_markdown(template_path)
-    engineering = repo / "docs" / "ENGINEERING.md"
-    current_cfg: dict = {}
-    if engineering.exists():
-        try:
-            current_cfg, _ = _read_frontmatter_markdown(engineering)
-        except Exception:
-            # Initialization is an authoritative reset. Malformed legacy policy
-            # must not prevent the current schema from taking effect.
-            current_cfg = {}
+def _installed_template_config(repo: Path) -> dict | None:
+    relative = _INSTALLED_ENGINEERING_TEMPLATE
+    payload = _safe_read_project_file(repo, relative, max_bytes=1024 * 1024)
+    if payload is None:
+        return None
+    manifest_payload = _safe_read_project_file(repo, _INSTALLED_MANIFEST, max_bytes=4 * 1024 * 1024)
+    if manifest_payload is None:
+        raise APError(
+            "Cannot trust the installed default template without .agents/managed-install.json; "
+            "no files were written."
+        )
 
-    converged = json.loads(json.dumps(template_cfg))
-    preserve_scalar_paths = [
-        ("project", "name"),
-        ("project", "repo_root"),
-        ("project", "stack"),
-        ("access", "project", "frontend", "url"),
-        ("access", "project", "frontend", "username"),
-        ("access", "project", "frontend", "password"),
-        ("access", "project", "backend", "url"),
-        ("access", "project", "backend", "username"),
-        ("access", "project", "backend", "password"),
-        ("access", "jenkins", "frontend", "url"),
-        ("access", "jenkins", "frontend", "username"),
-        ("access", "jenkins", "frontend", "password"),
-        ("access", "jenkins", "backend", "url"),
-        ("access", "jenkins", "backend", "username"),
-        ("access", "jenkins", "backend", "password"),
-        ("access", "gitlab", "url"),
-        ("access", "gitlab", "username"),
-        ("access", "gitlab", "password"),
-        ("access", "nexus", "frontend", "url"),
-        ("access", "nexus", "frontend", "username"),
-        ("access", "nexus", "frontend", "password"),
-        ("concurrency", "base_ref"),
-        ("concurrency", "target_branch"),
-        ("concurrency", "branch_prefix"),
-        ("concurrency", "worktree_root"),
-        ("concurrency", "cleanup_merged"),
-        ("concurrency", "delete_remote_branch"),
-        ("validation", "max_command_seconds"),
-        ("validation", "max_total_seconds"),
-        ("structure", "enabled"),
-        ("structure", "enforcement"),
-        ("structure", "architecture_standard"),
-        ("structure", "layer_rules", "enabled"),
-        ("structure", "layer_rules", "block"),
-        ("optimization", "completion_policy"),
-        ("optimization", "require_baseline_for_global_review"),
-        ("optimization", "report_accepted_debt_as_findings"),
-        ("docs", "api_docs_required"),
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if not isinstance(key, str) or key in result:
+                raise ValueError("invalid manifest mapping")
+            result[key] = value
+        return result
+
+    try:
+        manifest = json.loads(
+            manifest_payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise APError("Installed managed manifest is invalid; no files were written.") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("manifest_path") != _INSTALLED_MANIFEST.as_posix()
+        or not isinstance(manifest.get("entries"), list)
+    ):
+        raise APError("Installed managed manifest is invalid; no files were written.")
+    if len(manifest["entries"]) > 10000:
+        raise APError("Installed managed manifest has too many entries; no files were written.")
+    matches = [
+        entry
+        for entry in manifest["entries"]
+        if isinstance(entry, dict) and entry.get("path") == relative.as_posix()
     ]
-    for field_path in preserve_scalar_paths:
-        _copy_scalar_path(current_cfg, converged, field_path)
-
-    current_concurrency = _mapping(current_cfg.get("concurrency"))
-    isolation = _text(current_concurrency.get("isolation")).lower()
-    if isolation in {"adaptive", "worktree"}:
-        converged["concurrency"]["isolation"] = isolation
-    converged["concurrency"]["disposable_ignored"] = _string_list(
-        current_concurrency.get("disposable_ignored")
-    )
-
-    current_commands = _mapping(current_cfg.get("commands"))
-    current_validation = _mapping(current_cfg.get("validation"))
-    routes = _normalize_validation_routes(current_validation.get("routes"))
-    referenced_commands = {
-        command
-        for route in routes
-        for command in _string_list(route.get("commands"))
-    }
-    referenced_commands.add("project_fast")
-    commands = {
-        str(name): value.strip()
-        for name, value in current_commands.items()
-        if name in referenced_commands and isinstance(name, str) and isinstance(value, str) and value.strip()
-    }
-    inferred = _inferred_gate_commands(repo)
-    if not commands.get("project_fast") and inferred.get("project_fast"):
-        commands["project_fast"] = inferred["project_fast"]
-    converged["commands"].update(commands)
-
-    converged["validation"]["routes"] = routes
-    converged["risk"]["rules"] = _normalize_risk_rules(
-        _mapping(current_cfg.get("risk")).get("rules")
-    )
-    current_structure = _mapping(current_cfg.get("structure"))
-    for key in ("exclude", "allow_large_files", "reusable_tool_dirs"):
-        if isinstance(current_structure.get(key), list):
-            converged["structure"][key] = _string_list(current_structure.get(key))
-    for key in (
-        "max_file_lines_warn",
-        "max_file_lines_block",
-        "max_function_lines_warn",
-        "max_added_lines_to_large_file",
+    manifest_version = _text(manifest.get("skill_version"))
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", manifest_version):
+        raise APError("Installed managed manifest has an invalid Skill version; no files were written.")
+    if len(matches) != 1:
+        raise APError("Installed default template is not bound by the managed manifest; no files were written.")
+    entry = matches[0]
+    expected_hash = _text(entry.get("sha256"))
+    if (
+        entry.get("ownership") != "exact"
+        or entry.get("source") != "skill/data/templates/ENGINEERING.md"
+        or entry.get("version") != manifest_version
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+        or hashlib.sha256(payload).hexdigest() != expected_hash
     ):
-        value = current_structure.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            converged["structure"][key] = value
-    for key in (
-        "require_reuse_search",
-        "block_new_responsibility_in_large_file",
-        "block_warnings",
-    ):
-        value = current_structure.get(key)
-        if isinstance(value, bool):
-            converged["structure"][key] = value
-    converged["structure"]["accepted_debt_paths"] = _string_list(
-        current_structure.get("accepted_debt_paths")
+        raise APError("Installed default template failed its managed manifest identity check; no files were written.")
+    config = parse_managed_config_payload(payload)
+    config_version = _text(_mapping(config.get("workflow")).get("skill_version"))
+    if config_version != manifest_version:
+        raise APError("Installed default template version is not bound to its manifest; no files were written.")
+    return config
+
+
+def _render_project_overlay(overrides: dict) -> bytes:
+    document = {"schema": PROJECT_CONFIG_SCHEMA, "overrides": overrides}
+    dumped = require_yaml().safe_dump(document, allow_unicode=True, sort_keys=False)
+    payload = dumped.encode("utf-8")
+    # The installer must never create an overlay that its own runtime rejects.
+    parse_project_overrides_payload(payload)
+    return payload
+
+
+def _project_config_convergence_plan(repo: Path, template: Path) -> dict:
+    template_payload = template.read_bytes()
+    template_cfg = parse_managed_config_payload(template_payload)
+    try:
+        template_text = template_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise APError("Managed Skill template must be UTF-8.") from exc
+    current_payload = _safe_read_project_file(
+        repo,
+        Path("docs/ENGINEERING.md"),
+        max_bytes=1024 * 1024,
     )
-    current_layers = _mapping(current_structure.get("layer_rules"))
-    converged["structure"]["layer_rules"]["rules"] = _normalize_layer_rules(
-        current_layers.get("rules")
+    current_cfg: dict | None = None
+    current_text = ""
+    if current_payload is not None:
+        try:
+            current_text = current_payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise APError("Managed project configuration must be UTF-8.") from exc
+        current_cfg = parse_managed_config_payload(current_payload)
+
+    # Always validate an existing overlay before any installer write. Its bytes
+    # are project-owned and are never normalized by ordinary convergence.
+    overlay_payload = _safe_read_project_file(
+        repo,
+        _PROJECT_CONFIG_RELATIVE,
+        max_bytes=128 * 1024,
+    )
+    overrides = (
+        parse_project_overrides_payload(overlay_payload)
+        if overlay_payload is not None
+        else {}
+    )
+    old_base = None
+    if current_cfg is not None:
+        # A completed target document is self-identical to the trusted source
+        # template, so retry does not depend on the previous install manifest.
+        # Legacy/custom documents still require a manifest-bound old base.
+        old_base = (
+            template_cfg
+            if current_payload == template_payload
+            else _installed_template_config(repo)
+        )
+    overlay_output: bytes | None = None
+    migrated_paths: list[str] = []
+
+    if overlay_payload is None:
+        if current_cfg is not None and old_base is None:
+            current_version = _text(_mapping(current_cfg.get("workflow")).get("skill_version"))
+            template_version = _text(_mapping(template_cfg.get("workflow")).get("skill_version"))
+            if current_version != template_version:
+                raise APError(
+                    "Cannot migrate project configuration without its installed default template; "
+                    "no files were written. Restore the current .agents Skill copy or create the "
+                    "project overlay explicitly."
+                )
+            old_base = template_cfg
+        difference = (
+            _config_semantic_diff(current_cfg, old_base or template_cfg)
+            if current_cfg is not None
+            else _NO_CONFIG_DIFF
+        )
+        overrides = difference if isinstance(difference, dict) else {}
+        if current_cfg is not None:
+            semantic_base = old_base or template_cfg
+            current_version = _text(_mapping(current_cfg.get("workflow")).get("skill_version"))
+            base_version = _text(_mapping(semantic_base.get("workflow")).get("skill_version"))
+            if current_version != base_version:
+                raise APError(
+                    "Installed default template version does not match docs/ENGINEERING.md; "
+                    "no files were written."
+                )
+            if not _config_values_equal(
+                merge_project_config(semantic_base, overrides),
+                current_cfg,
+            ):
+                raise APError(
+                    "Project configuration migration could not prove semantic equivalence; "
+                    "no files were written."
+                )
+        project_cfg = overrides.setdefault("project", {})
+        if not isinstance(project_cfg, dict):
+            raise APError("Legacy project.project must be a mapping before configuration migration.")
+        if not _text(project_cfg.get("name")):
+            project_cfg["name"] = repo.name
+        if current_cfg is None:
+            inferred = _inferred_gate_commands(repo)
+            if inferred:
+                overrides.setdefault("commands", {}).update(inferred)
+        # Validate protected fields and merge behavior before writing the new file.
+        merge_project_config(template_cfg, overrides)
+        overlay_output = _render_project_overlay(overrides)
+        migrated_paths = sorted(_flatten_config_paths(overrides))
+    elif current_cfg is not None:
+        if old_base is None:
+            raise APError(
+                "Cannot verify an existing project overlay without the installed default template; "
+                "no files were written."
+            )
+        current_version = _text(_mapping(current_cfg.get("workflow")).get("skill_version"))
+        base_version = _text(_mapping(old_base.get("workflow")).get("skill_version"))
+        if current_version != base_version:
+            raise APError(
+                "Installed default template version does not match docs/ENGINEERING.md; "
+                "no files were written."
+            )
+        legacy_difference = _config_semantic_diff(current_cfg, old_base)
+        legacy_overrides = legacy_difference if isinstance(legacy_difference, dict) else {}
+        if not _config_values_equal(
+            merge_project_config(old_base, legacy_overrides),
+            current_cfg,
+        ):
+            raise APError(
+                "Legacy project configuration cannot be represented as additive overrides; "
+                "no files were written. Restore the deleted default field or create an explicit "
+                "project overlay after reconciling the intended value."
+            )
+        legacy_effective = merge_project_config(old_base, overrides)
+        conflicts = _config_difference_conflicts(
+            legacy_difference,
+            current_cfg,
+            legacy_effective,
+        )
+        if conflicts:
+            raise APError(
+                "Existing project overlay conflicts with legacy project configuration; "
+                "no files were written. Preserve these paths exactly in "
+                "docs/project/auto-coding-skill.yaml: "
+                + ", ".join(sorted(conflicts))
+            )
+        merge_project_config(template_cfg, overrides)
+
+    return {
+        "engineering_output": template_text,
+        "engineering_current": current_text,
+        "overlay_current": overlay_payload,
+        "overlay_output": overlay_output,
+        "migrated_paths": migrated_paths,
+    }
+
+
+def _flatten_config_paths(value: object, prefix: tuple[str, ...] = ()) -> list[str]:
+    if not isinstance(value, dict) or not value:
+        return [".".join(prefix)] if prefix else []
+    result: list[str] = []
+    for key, nested in value.items():
+        result.extend(_flatten_config_paths(nested, (*prefix, str(key))))
+    return result
+
+
+def _sha256_payload(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+_ARCHIVE_TARGET_ATTEMPTS = 64
+
+
+def _select_project_archive_target(
+    repo: Path,
+    preferred: str | Path,
+    payload: bytes,
+    *,
+    legacy_digest_payload: bytes | None = None,
+) -> tuple[Path, bool]:
+    """Select an archive path without ever treating different bytes as archived."""
+    preferred_rel = _safe_project_relative_path(preferred)
+    payload_digest = hashlib.sha256(payload).hexdigest()
+    legacy_digest = hashlib.sha256(
+        payload if legacy_digest_payload is None else legacy_digest_payload
+    ).hexdigest()[:12]
+    preferred_suffix = preferred_rel.suffix
+    legacy_candidate = preferred_rel.with_name(
+        f"{preferred_rel.stem}-{legacy_digest}{preferred_suffix}"
+    )
+    path_digest = hashlib.sha256(preferred_rel.as_posix().encode("utf-8")).hexdigest()[:12]
+    compact_stem = f".autocoding-archive-{path_digest}-{payload_digest}"
+
+    candidates = [preferred_rel]
+    try:
+        if len(os.fsencode(legacy_candidate.name)) <= 240:
+            candidates.append(legacy_candidate)
+    except UnicodeEncodeError:
+        pass
+    candidates.append(preferred_rel.with_name(f"{compact_stem}{preferred_suffix}"))
+    candidates.extend(
+        preferred_rel.with_name(f"{compact_stem}-{attempt}{preferred_suffix}")
+        for attempt in range(2, _ARCHIVE_TARGET_ATTEMPTS + 1)
     )
 
-    if not _text(_mapping(converged.get("project")).get("name")):
-        converged["project"]["name"] = repo.name
-    dumped = require_yaml().safe_dump(converged, allow_unicode=True, sort_keys=False).strip()
-    return f"---\n{dumped}\n---\n{template_body.lstrip()}"
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        archived = _safe_read_project_file(repo, candidate)
+        if archived is None:
+            return candidate, True
+        if archived == payload:
+            return candidate, False
+    raise APError(
+        "Cannot allocate a collision-free project archive target without overwriting "
+        f"different content: {preferred_rel.as_posix()}"
+    )
+
+
+def cmd_project_config_prepare(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
+    plan = _project_config_convergence_plan(repo, template)
+    write = bool(args.write)
+    current = plan["engineering_current"].encode("utf-8")
+    engineering_output = plan["engineering_output"].encode("utf-8")
+    overlay = plan["overlay_output"] or plan["overlay_current"]
+    if overlay is None:
+        raise APError("Project configuration prepare did not produce an overlay; no files were written.")
+    finalize_required = bool(current and current != engineering_output)
+    if finalize_required:
+        template_cfg = parse_managed_config_payload(engineering_output)
+        version = _text(_mapping(template_cfg.get("workflow")).get("skill_version")) or "current"
+        archive_payload = (
+            f"# Archived ENGINEERING.md before auto-coding-skill {version}\n\n"
+            "Historical and non-authoritative. Project configuration was migrated to "
+            "docs/project/auto-coding-skill.yaml.\n\n---\n\n"
+        ).encode("utf-8") + current
+        _select_project_archive_target(
+            repo,
+            Path(".agents/archive/auto-coding-skill") / version / "docs/ENGINEERING.md",
+            archive_payload,
+            legacy_digest_payload=current,
+        )
+    actions: list[dict] = []
+    if plan["overlay_output"] is not None:
+        actions.append({"action": "create", "path": _PROJECT_CONFIG_RELATIVE.as_posix()})
+        if write:
+            _safe_create_project_file(repo, _PROJECT_CONFIG_RELATIVE, overlay)
+    if not current:
+        actions.append({"action": "create", "path": "docs/ENGINEERING.md"})
+        if write:
+            _safe_write_project_file(repo, Path("docs/ENGINEERING.md"), engineering_output)
+    elif finalize_required:
+        actions.append({
+            "action": "defer-replace",
+            "path": "docs/ENGINEERING.md",
+            "detail": "replace only after the effective-config runtime is installed",
+        })
+    result = {
+        "mode": "write" if write else "plan",
+        "actions": actions,
+        "finalize_required": finalize_required,
+        "engineering_before_sha256": _sha256_payload(current),
+        "overlay_sha256": _sha256_payload(overlay),
+        "template_sha256": _sha256_payload(engineering_output),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in actions:
+        print(f"[project-config-prepare] {item['action']}: {item['path']}")
+
+
+def cmd_project_config_finalize(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
+    template_payload = template.read_bytes()
+    current = _safe_read_project_file(repo, Path("docs/ENGINEERING.md"), max_bytes=1024 * 1024)
+    overlay = _safe_read_project_file(repo, _PROJECT_CONFIG_RELATIVE, max_bytes=128 * 1024)
+    expected = {
+        "engineering": _text(args.engineering_sha256),
+        "overlay": _text(args.overlay_sha256),
+        "template": _text(args.template_sha256),
+    }
+    if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in expected.values()):
+        raise APError("Project configuration finalize requires valid SHA-256 bindings.")
+    if current is None or overlay is None:
+        raise APError("Prepared project configuration inputs are missing; no files were written.")
+    actual = {
+        "engineering": _sha256_payload(current),
+        "overlay": _sha256_payload(overlay),
+        "template": _sha256_payload(template_payload),
+    }
+    mismatched = [name for name in expected if expected[name] != actual[name]]
+    if mismatched:
+        raise APError(
+            "Prepared project configuration changed before finalize; no files were written: "
+            + ", ".join(mismatched)
+        )
+    # Validate the final layers before replacing the legacy managed document.
+    template_cfg = parse_managed_config_payload(template_payload)
+    overrides = parse_project_overrides_payload(overlay)
+    merge_project_config(template_cfg, overrides)
+    version = _text(_mapping(template_cfg.get("workflow")).get("skill_version")) or "current"
+    archive_payload = (
+        f"# Archived ENGINEERING.md before auto-coding-skill {version}\n\n"
+        "Historical and non-authoritative. Project configuration was migrated to "
+        "docs/project/auto-coding-skill.yaml.\n\n---\n\n"
+    ).encode("utf-8") + current
+    archive, archive_required = _select_project_archive_target(
+        repo,
+        Path(".agents/archive/auto-coding-skill") / version / "docs/ENGINEERING.md",
+        archive_payload,
+        legacy_digest_payload=current,
+    )
+    actions: list[dict] = []
+    if archive_required:
+        actions.append({"action": "archive", "path": archive.as_posix()})
+        if args.write:
+            _safe_create_project_file(repo, archive, archive_payload)
+    if current != template_payload:
+        actions.append({"action": "replace", "path": "docs/ENGINEERING.md"})
+        if args.write:
+            _safe_write_project_file(repo, Path("docs/ENGINEERING.md"), template_payload)
+    result = {"mode": "write" if args.write else "plan", "actions": actions}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in actions:
+        print(f"[project-config-finalize] {item['action']}: {item['path']}")
 
 
 _PROJECT_ARTIFACT_PATTERNS = (
@@ -1101,11 +1408,1117 @@ _PROJECT_ARTIFACT_PATTERNS = (
     "docs/deployment/deploy-records/*.md",
     "docs/design/*.md",
     "docs/interfaces/*.md",
+    "docs/project/*.md",
+    _PROJECT_CONFIG_RELATIVE.as_posix(),
     "docs/reviews/*.md",
+    *PROJECT_FEEDBACK_PATTERNS,
 )
 
 
-def _is_allowed_project_doc(rel: Path) -> bool:
+def _safe_project_relative_path(rel: str | Path) -> Path:
+    value = Path(rel)
+    if value.is_absolute() or not value.parts or any(part in {"", ".", ".."} for part in value.parts):
+        raise APError(f"Unsafe project-relative path: {rel}")
+    return value
+
+
+def _is_windows_reparse_point(metadata: os.stat_result) -> bool:
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _project_path_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return int(metadata.st_dev), int(metadata.st_ino)
+
+
+def _validate_windows_project_directories(
+    relative: Path,
+    directories: list[tuple[Path, tuple[int, int]]],
+) -> None:
+    for directory, identity in directories:
+        metadata = directory.lstat()
+        if (
+            _is_windows_reparse_point(metadata)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or _project_path_identity(metadata) != identity
+        ):
+            raise APError(f"Project path parent changed during its safety check: {relative}")
+
+
+def _windows_project_path_snapshot(
+    repo: Path,
+    relative: Path,
+    *,
+    create_parents: bool,
+) -> tuple[Path, list[tuple[Path, tuple[int, int]]], bool]:
+    repo = Path(repo)
+    repo_metadata = repo.lstat()
+    if _is_windows_reparse_point(repo_metadata) or not stat.S_ISDIR(repo_metadata.st_mode):
+        raise APError(f"Project repository root must be a real directory: {relative}")
+
+    directories = [(repo, _project_path_identity(repo_metadata))]
+    current = repo
+    for index, part in enumerate(relative.parts[:-1]):
+        current = current / part
+        if not os.path.lexists(current):
+            if not create_parents:
+                _validate_windows_project_directories(relative, directories)
+                remaining = Path(*relative.parts[index + 1 :])
+                return current / remaining, directories, False
+            _validate_windows_project_directories(relative, directories)
+            try:
+                current.mkdir()
+            except FileExistsError:
+                # A concurrent creator is acceptable only when the result is
+                # still a real directory and all previously checked parents
+                # retain their identities.
+                pass
+        _validate_windows_project_directories(relative, directories)
+        metadata = current.lstat()
+        if _is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise APError(f"Project path component must be a real directory: {relative}")
+        directories.append((current, _project_path_identity(metadata)))
+
+    _validate_windows_project_directories(relative, directories)
+    return current / relative.parts[-1], directories, True
+
+
+def _fallback_safe_project_path(
+    repo: Path,
+    rel: str | Path,
+    *,
+    create_parents: bool = False,
+) -> Path:
+    relative = _safe_project_relative_path(rel)
+    try:
+        target, _, _ = _windows_project_path_snapshot(
+            Path(repo),
+            relative,
+            create_parents=create_parents,
+        )
+        return target
+    except APError:
+        raise
+    except OSError as exc:
+        raise APError(f"Cannot access project path safely: {relative}") from exc
+
+
+def _inject_project_file_parent_swap(repo: Path, relative: Path) -> None:
+    if os.environ.get("AUTOCODING_TEST_MODE") != "1":
+        return
+    if os.environ.get("AUTOCODING_TEST_PROJECT_FILE_SWAP_PATH") != relative.as_posix():
+        return
+    if relative.parent == Path("."):
+        raise APError("Project file parent-swap test requires a nested project path.")
+    external = Path(os.environ.get("AUTOCODING_TEST_PROJECT_FILE_SWAP_EXTERNAL", ""))
+    backup = Path(os.environ.get("AUTOCODING_TEST_PROJECT_FILE_SWAP_BACKUP", ""))
+    target = Path(repo) / relative.parent
+    if (
+        not external.is_absolute()
+        or not backup.is_absolute()
+        or not external.is_dir()
+        or external.is_symlink()
+        or os.path.lexists(backup)
+    ):
+        raise APError("Invalid project file parent-swap test fixture.")
+    target.rename(backup)
+    target.symlink_to(external, target_is_directory=True)
+
+
+@contextlib.contextmanager
+def _open_project_parent(repo: Path, rel: str | Path, *, create: bool = False):
+    relative = _safe_project_relative_path(rel)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    bindings: list[tuple[int, str, tuple[int, int]]] = []
+    root_identity: tuple[int, int] | None = None
+
+    def validate_bindings() -> None:
+        assert root_identity is not None
+        root_metadata = Path(repo).lstat()
+        if (
+            _is_windows_reparse_point(root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+            or _project_path_identity(root_metadata) != root_identity
+        ):
+            raise APError(f"Project repository root changed during its safety check: {relative}")
+        for parent_fd, name, identity in bindings:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISDIR(metadata.st_mode)
+                or _project_path_identity(metadata) != identity
+            ):
+                raise APError(f"Project path parent changed during its safety check: {relative}")
+
+    try:
+        current = os.open(repo, directory_flags)
+        descriptors.append(current)
+        root_metadata = os.fstat(current)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise APError(f"Project repository root must be a real directory: {relative}")
+        root_identity = _project_path_identity(root_metadata)
+        missing = False
+        for part in relative.parts[:-1]:
+            try:
+                metadata = os.stat(part, dir_fd=current, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create:
+                    missing = True
+                    break
+                os.mkdir(part, 0o755, dir_fd=current)
+                metadata = os.stat(part, dir_fd=current, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise APError(f"Project path component must be a real directory: {relative}")
+            next_descriptor = os.open(part, directory_flags, dir_fd=current)
+            opened = os.fstat(next_descriptor)
+            identity = _project_path_identity(opened)
+            if not stat.S_ISDIR(opened.st_mode) or identity != _project_path_identity(metadata):
+                os.close(next_descriptor)
+                raise APError(f"Project path parent changed during its safety check: {relative}")
+            bindings.append((current, part, identity))
+            descriptors.append(next_descriptor)
+            current = next_descriptor
+        _inject_project_file_parent_swap(Path(repo), relative)
+        validate_bindings()
+        yield (None if missing else current), relative.parts[-1]
+        validate_bindings()
+    except OSError as exc:
+        raise APError(f"Cannot access project path safely: {relative}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def _safe_read_project_file(
+    repo: Path,
+    rel: str | Path,
+    *,
+    max_bytes: int | None = None,
+) -> bytes | None:
+    relative = _safe_project_relative_path(rel)
+    if max_bytes is not None and max_bytes <= 0:
+        raise APError("max_bytes must be positive")
+    if os.name == "nt":
+        try:
+            target, directories, parents_exist = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=False,
+            )
+            if not parents_exist or not os.path.lexists(target):
+                _validate_windows_project_directories(relative, directories)
+                return None
+            metadata = target.lstat()
+            if _is_windows_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Project file must be a regular non-symlink file: {relative}")
+            identity = _project_path_identity(metadata)
+            if max_bytes is not None and metadata.st_size > max_bytes:
+                raise APError(f"Project file exceeds {max_bytes} bytes: {relative}")
+            with target.open("rb") as handle:
+                opened = os.fstat(handle.fileno())
+                checked = target.lstat()
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or _project_path_identity(opened) != identity
+                    or _is_windows_reparse_point(checked)
+                    or not stat.S_ISREG(checked.st_mode)
+                    or _project_path_identity(checked) != identity
+                ):
+                    raise APError(f"Project file changed during its safety check: {relative}")
+                _validate_windows_project_directories(relative, directories)
+                payload = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+                opened_after = os.fstat(handle.fileno())
+                checked_after = target.lstat()
+                if (
+                    not stat.S_ISREG(opened_after.st_mode)
+                    or _project_path_identity(opened_after) != identity
+                    or _is_windows_reparse_point(checked_after)
+                    or not stat.S_ISREG(checked_after.st_mode)
+                    or _project_path_identity(checked_after) != identity
+                ):
+                    raise APError(f"Project file changed while it was read: {relative}")
+                _validate_windows_project_directories(relative, directories)
+            if max_bytes is not None and len(payload) > max_bytes:
+                raise APError(f"Project file exceeds {max_bytes} bytes: {relative}")
+            return payload
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot read project file safely: {relative}") from exc
+    with _open_project_parent(repo, relative) as (parent_fd, leaf):
+        if parent_fd is None:
+            return None
+        descriptor = -1
+        try:
+            descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise APError(f"Project file must be a regular non-symlink file: {relative}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Project file must be a regular non-symlink file: {relative}")
+            if max_bytes is not None and metadata.st_size > max_bytes:
+                raise APError(f"Project file exceeds {max_bytes} bytes: {relative}")
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                payload = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+            if max_bytes is not None and len(payload) > max_bytes:
+                raise APError(f"Project file exceeds {max_bytes} bytes: {relative}")
+            return payload
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _open_project_directory(repo: Path, rel: str | Path):
+    relative = _safe_project_relative_path(rel)
+    if os.name == "nt":
+        try:
+            target, directories, complete = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=False,
+            )
+        except OSError as exc:
+            raise APError(f"Cannot access project directory safely: {relative}") from exc
+        if not complete or not os.path.lexists(target):
+            yield None
+            return
+        metadata = target.lstat()
+        if _is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise APError(f"Project directory must be a real directory: {relative}")
+        identity = _project_path_identity(metadata)
+        _validate_windows_project_directories(relative, directories)
+        try:
+            yield target
+        finally:
+            try:
+                checked = target.lstat()
+                _validate_windows_project_directories(relative, directories)
+            except OSError as exc:
+                raise APError(f"Project directory changed during its safety check: {relative}") from exc
+            if (
+                _is_windows_reparse_point(checked)
+                or not stat.S_ISDIR(checked.st_mode)
+                or _project_path_identity(checked) != identity
+            ):
+                raise APError(f"Project directory changed during its safety check: {relative}")
+        return
+    with _open_project_parent(repo, relative) as (parent_fd, leaf):
+        if parent_fd is None:
+            yield None
+            return
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            yield None
+            return
+        except OSError as exc:
+            raise APError(f"Project directory must be a real directory: {relative}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise APError(f"Project directory must be a real directory: {relative}")
+            yield descriptor
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _safe_write_project_file(repo: Path, rel: str | Path, payload: bytes) -> None:
+    relative = _safe_project_relative_path(rel)
+    if os.name == "nt":
+        temporary: Path | None = None
+        try:
+            target, directories, _ = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=True,
+            )
+            _inject_project_file_parent_swap(Path(repo), relative)
+            target_identity: tuple[int, int] | None = None
+            if os.path.lexists(target):
+                metadata = target.lstat()
+                if _is_windows_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+                    raise APError(f"Project file must be a regular non-symlink file: {relative}")
+                target_identity = _project_path_identity(metadata)
+            _validate_windows_project_directories(relative, directories)
+
+            temporary = target.with_name(f".{target.name}.autocoding-{uuid.uuid4().hex}")
+            with temporary.open("xb") as handle:
+                opened = os.fstat(handle.fileno())
+                checked = temporary.lstat()
+                temporary_identity = _project_path_identity(opened)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or _is_windows_reparse_point(checked)
+                    or not stat.S_ISREG(checked.st_mode)
+                    or _project_path_identity(checked) != temporary_identity
+                ):
+                    raise APError(f"Temporary project file is unsafe: {relative}")
+                _validate_windows_project_directories(relative, directories)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                opened_after = os.fstat(handle.fileno())
+                checked_after = temporary.lstat()
+                if (
+                    not stat.S_ISREG(opened_after.st_mode)
+                    or _project_path_identity(opened_after) != temporary_identity
+                    or _is_windows_reparse_point(checked_after)
+                    or not stat.S_ISREG(checked_after.st_mode)
+                    or _project_path_identity(checked_after) != temporary_identity
+                ):
+                    raise APError(f"Temporary project file changed while writing: {relative}")
+                _validate_windows_project_directories(relative, directories)
+
+            if target_identity is None:
+                if os.path.lexists(target):
+                    raise APError(f"Project file appeared while writing: {relative}")
+            else:
+                checked_target = target.lstat()
+                if (
+                    _is_windows_reparse_point(checked_target)
+                    or not stat.S_ISREG(checked_target.st_mode)
+                    or _project_path_identity(checked_target) != target_identity
+                ):
+                    raise APError(f"Project file changed while writing: {relative}")
+            _validate_windows_project_directories(relative, directories)
+            os.replace(temporary, target)
+            replaced = target.lstat()
+            if (
+                _is_windows_reparse_point(replaced)
+                or not stat.S_ISREG(replaced.st_mode)
+                or _project_path_identity(replaced) != temporary_identity
+            ):
+                raise APError(f"Project file changed after replacement: {relative}")
+            _validate_windows_project_directories(relative, directories)
+        except APError:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    temporary.unlink()
+            raise
+        except OSError as exc:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    temporary.unlink()
+            raise APError(f"Cannot write project file safely: {relative}") from exc
+        return
+    with _open_project_parent(repo, relative, create=True) as (parent_fd, leaf):
+        assert parent_fd is not None
+        temporary = f".{leaf}.autocoding-{uuid.uuid4().hex}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=parent_fd)
+            raise APError(f"Cannot write project file safely: {relative}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _safe_create_project_file(repo: Path, rel: str | Path, payload: bytes) -> None:
+    """Atomically publish a new project file without replacing a concurrent creator."""
+    relative = _safe_project_relative_path(rel)
+    if os.name == "nt":
+        temporary: Path | None = None
+        try:
+            target, directories, _ = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=True,
+            )
+            _inject_project_file_parent_swap(Path(repo), relative)
+            _validate_windows_project_directories(relative, directories)
+            temporary = target.with_name(f".{target.name}.autocoding-{uuid.uuid4().hex}")
+            with temporary.open("xb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temporary_metadata = os.fstat(handle.fileno())
+                checked_temporary = temporary.lstat()
+                temporary_identity = _project_path_identity(temporary_metadata)
+                if (
+                    not stat.S_ISREG(temporary_metadata.st_mode)
+                    or _is_windows_reparse_point(checked_temporary)
+                    or not stat.S_ISREG(checked_temporary.st_mode)
+                    or _project_path_identity(checked_temporary) != temporary_identity
+                ):
+                    raise APError(f"Temporary project file is unsafe: {relative}")
+                _validate_windows_project_directories(relative, directories)
+            try:
+                os.link(temporary, target, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise APError(f"Project file appeared before create-only publish: {relative}") from exc
+            checked_target = target.lstat()
+            if (
+                _is_windows_reparse_point(checked_target)
+                or not stat.S_ISREG(checked_target.st_mode)
+                or _project_path_identity(checked_target) != temporary_identity
+            ):
+                raise APError(f"Project file changed during create-only publish: {relative}")
+            _validate_windows_project_directories(relative, directories)
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot create project file safely: {relative}") from exc
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    temporary.unlink()
+        return
+
+    with _open_project_parent(repo, relative, create=True) as (parent_fd, leaf):
+        assert parent_fd is not None
+        temporary = f".{leaf}.autocoding-{uuid.uuid4().hex}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary_metadata = os.stat(
+                temporary,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if stat.S_ISLNK(temporary_metadata.st_mode) or not stat.S_ISREG(
+                temporary_metadata.st_mode
+            ):
+                raise APError(f"Temporary project file is unsafe: {relative}")
+            temporary_identity = _project_path_identity(temporary_metadata)
+            try:
+                os.link(
+                    temporary,
+                    leaf,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise APError(f"Project file appeared before create-only publish: {relative}") from exc
+            published = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(published.st_mode)
+                or not stat.S_ISREG(published.st_mode)
+                or _project_path_identity(published) != temporary_identity
+            ):
+                raise APError(f"Project file changed during create-only publish: {relative}")
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot create project file safely: {relative}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=parent_fd)
+
+
+def _safe_chmod_project_file(repo: Path, rel: str | Path, mode: int) -> None:
+    relative = _safe_project_relative_path(rel)
+    if mode < 0 or mode > 0o777:
+        raise APError(f"Project file mode must be between 000 and 777: {relative}")
+    if os.name == "nt":
+        try:
+            target, directories, complete = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=False,
+            )
+            _inject_project_file_parent_swap(Path(repo), relative)
+            if not complete or not os.path.lexists(target):
+                raise APError(f"Project file is missing: {relative}")
+            metadata = target.lstat()
+            if _is_windows_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Project file must be a regular non-symlink file: {relative}")
+            identity = _project_path_identity(metadata)
+            _validate_windows_project_directories(relative, directories)
+            os.chmod(target, mode, follow_symlinks=False)
+            checked = target.lstat()
+            _validate_windows_project_directories(relative, directories)
+            if (
+                _is_windows_reparse_point(checked)
+                or not stat.S_ISREG(checked.st_mode)
+                or _project_path_identity(checked) != identity
+            ):
+                raise APError(f"Project file changed while setting its mode: {relative}")
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot set project file mode safely: {relative}") from exc
+        return
+
+    with _open_project_parent(repo, relative) as (parent_fd, leaf):
+        if parent_fd is None:
+            raise APError(f"Project file is missing: {relative}")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Project file must be a regular non-symlink file: {relative}")
+            os.fchmod(descriptor, mode)
+            checked = os.fstat(descriptor)
+            if _project_path_identity(checked) != _project_path_identity(metadata):
+                raise APError(f"Project file changed while setting its mode: {relative}")
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot set project file mode safely: {relative}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+_INTERNAL_PROJECT_FILE_MAX_BYTES = 32 * 1024 * 1024
+_INTERNAL_PROJECT_CHMOD_MAX_BYTES = 1024 * 1024
+_INTERNAL_PROJECT_CHMOD_MAX_ENTRIES = 4096
+
+
+def cmd_project_file_safe(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    operation = _text(args.operation).lower()
+    relative: Path | None = None
+    if operation != "chmod-batch":
+        relative = _safe_project_relative_path(args.path)
+    if operation in {"write", "create"}:
+        assert relative is not None
+        payload = sys.stdin.buffer.read(_INTERNAL_PROJECT_FILE_MAX_BYTES + 1)
+        if len(payload) > _INTERNAL_PROJECT_FILE_MAX_BYTES:
+            raise APError(
+                f"Internal project file payload exceeds {_INTERNAL_PROJECT_FILE_MAX_BYTES} bytes: {relative}"
+            )
+        if operation == "create":
+            _safe_create_project_file(repo, relative, payload)
+        else:
+            _safe_write_project_file(repo, relative, payload)
+        if _text(args.mode):
+            try:
+                mode = int(_text(args.mode), 8)
+            except ValueError as exc:
+                raise APError("Internal project write requires an octal --mode") from exc
+            _safe_chmod_project_file(repo, relative, mode)
+    elif operation == "chmod":
+        assert relative is not None
+        try:
+            mode = int(_text(args.mode), 8)
+        except ValueError as exc:
+            raise APError("Internal project chmod requires an octal --mode") from exc
+        _safe_chmod_project_file(repo, relative, mode)
+    elif operation == "chmod-batch":
+        payload = sys.stdin.buffer.read(_INTERNAL_PROJECT_CHMOD_MAX_BYTES + 1)
+        if len(payload) > _INTERNAL_PROJECT_CHMOD_MAX_BYTES:
+            raise APError("Internal project chmod batch exceeds its size limit")
+        try:
+            entries = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise APError("Internal project chmod batch must be valid UTF-8 JSON") from exc
+        if not isinstance(entries, list) or len(entries) > _INTERNAL_PROJECT_CHMOD_MAX_ENTRIES:
+            raise APError("Internal project chmod batch has an invalid entry count")
+        mutations: list[tuple[Path, int]] = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or set(entry) != {"path", "mode"}:
+                raise APError(f"Internal project chmod batch entry {index} is invalid")
+            mode_text = entry.get("mode")
+            path_text = entry.get("path")
+            if not isinstance(mode_text, str) or not re.fullmatch(r"[0-7]{3}", mode_text):
+                raise APError(f"Internal project chmod batch entry {index} has an invalid mode")
+            if not isinstance(path_text, str) or not path_text:
+                raise APError(f"Internal project chmod batch entry {index} has an invalid path")
+            mutations.append(
+                (_safe_project_relative_path(path_text), int(mode_text, 8))
+            )
+        for mutation_path, mutation_mode in mutations:
+            _safe_chmod_project_file(repo, mutation_path, mutation_mode)
+    else:
+        raise APError(f"Unsupported internal project file operation: {operation}")
+    if args.json:
+        result = {"operation": operation, "ok": True}
+        if relative is not None:
+            result["path"] = relative.as_posix()
+        else:
+            result["entry_count"] = len(mutations)
+        print(json.dumps(result))
+
+
+def _directory_handle_identity(handle: int | Path) -> tuple[int, int]:
+    metadata = os.fstat(handle) if isinstance(handle, int) else handle.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (not isinstance(handle, int) and _is_windows_reparse_point(metadata))
+    ):
+        raise APError("Install I/O requires real project directories.")
+    return _project_path_identity(metadata)
+
+
+def _safe_ensure_project_directory(repo: Path, rel: str | Path) -> None:
+    relative = _safe_project_relative_path(rel)
+    if os.name == "nt":
+        try:
+            target, directories, _ = _windows_project_path_snapshot(
+                Path(repo),
+                relative,
+                create_parents=True,
+            )
+            _validate_windows_project_directories(relative, directories)
+            try:
+                target.mkdir()
+            except FileExistsError:
+                pass
+            metadata = target.lstat()
+            if _is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise APError(f"Project directory must be a real directory: {relative}")
+            _validate_windows_project_directories(relative, directories)
+        except APError:
+            raise
+        except OSError as exc:
+            raise APError(f"Cannot create project directory safely: {relative}") from exc
+        return
+    with _open_project_parent(repo, relative, create=True) as (parent_fd, leaf):
+        assert parent_fd is not None
+        try:
+            os.mkdir(leaf, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        metadata = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise APError(f"Project directory must be a real directory: {relative}")
+
+
+def _require_bound_project_directory(
+    repo: Path,
+    relative: Path,
+    handle: int | Path,
+    identity: tuple[int, int],
+) -> None:
+    opened = os.fstat(handle) if isinstance(handle, int) else handle.lstat()
+    if not stat.S_ISDIR(opened.st_mode) or _project_path_identity(opened) != identity:
+        raise APError(f"Install I/O directory handle changed: {relative}")
+    target = repo / relative
+    try:
+        current = target.lstat()
+    except OSError as exc:
+        raise APError(f"Install I/O project parent changed: {relative}") from exc
+    if (
+        _is_windows_reparse_point(current)
+        or not stat.S_ISDIR(current.st_mode)
+        or _project_path_identity(current) != identity
+    ):
+        raise APError(f"Install I/O project parent changed: {relative}")
+
+
+def _inject_install_io_parent_swap(repo: Path, phase: str) -> None:
+    if os.environ.get("AUTOCODING_TEST_MODE") != "1":
+        return
+    if os.environ.get("AUTOCODING_TEST_INSTALL_IO_SWAP_PHASE") != phase:
+        return
+    relative_text = os.environ.get("AUTOCODING_TEST_INSTALL_IO_SWAP_PARENT", "")
+    external_text = os.environ.get("AUTOCODING_TEST_INSTALL_IO_SWAP_EXTERNAL", "")
+    backup_text = os.environ.get("AUTOCODING_TEST_INSTALL_IO_SWAP_BACKUP", "")
+    relative = _safe_project_relative_path(relative_text)
+    target = repo / relative
+    external = Path(external_text)
+    backup = Path(backup_text)
+    if (
+        not external.is_absolute()
+        or not backup.is_absolute()
+        or not external.is_dir()
+        or external.is_symlink()
+        or os.path.lexists(backup)
+    ):
+        raise APError("Invalid install I/O parent-swap test fixture.")
+    target.rename(backup)
+    target.symlink_to(external, target_is_directory=True)
+
+
+def _open_directory_at(parent_fd: int, name: str) -> int:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise APError(f"Install I/O path must be a real directory: {name}")
+    return descriptor
+
+
+def _remove_tree_at(parent_fd: int, name: str, *, missing_ok: bool = False) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise APError(f"Install I/O refuses a symlink or non-directory tree: {name}")
+    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        raise APError("This Python runtime cannot remove project trees without symlink attacks.")
+    shutil.rmtree(name, dir_fd=parent_fd)
+
+
+def _copy_file_between_fds(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    source_fd = -1
+    destination_fd = -1
+    temporary = f".{destination_name}.autocoding-{uuid.uuid4().hex}"
+    try:
+        source_fd = os.open(
+            source_name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=source_parent_fd,
+        )
+        source_metadata = os.fstat(source_fd)
+        if not stat.S_ISREG(source_metadata.st_mode):
+            raise APError(f"Install I/O source must be a regular file: {source_name}")
+        destination_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IMODE(source_metadata.st_mode),
+            dir_fd=destination_parent_fd,
+        )
+        while True:
+            block = os.read(source_fd, 1024 * 1024)
+            if not block:
+                break
+            view = memoryview(block)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        os.fsync(destination_fd)
+        os.close(destination_fd)
+        destination_fd = -1
+        os.replace(
+            temporary,
+            destination_name,
+            src_dir_fd=destination_parent_fd,
+            dst_dir_fd=destination_parent_fd,
+        )
+    except APError:
+        raise
+    except OSError as exc:
+        raise APError(f"Cannot copy install transaction file safely: {destination_name}") from exc
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=destination_parent_fd)
+
+
+def _copy_directory_contents_fd(source_fd: int, destination_fd: int) -> None:
+    for name in sorted(os.listdir(source_fd)):
+        metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+            os.mkdir(name, stat.S_IMODE(metadata.st_mode), dir_fd=destination_fd)
+            source_child = _open_directory_at(source_fd, name)
+            destination_child = _open_directory_at(destination_fd, name)
+            try:
+                _copy_directory_contents_fd(source_child, destination_child)
+            finally:
+                os.close(destination_child)
+                os.close(source_child)
+        elif stat.S_ISREG(metadata.st_mode):
+            _copy_file_between_fds(source_fd, name, destination_fd, name)
+        else:
+            raise APError(f"Install I/O refuses a non-regular tree entry: {name}")
+
+
+def _copy_directory_at(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    source_fd = _open_directory_at(source_parent_fd, source_name)
+    destination_fd = -1
+    try:
+        source_metadata = os.fstat(source_fd)
+        os.mkdir(destination_name, stat.S_IMODE(source_metadata.st_mode), dir_fd=destination_parent_fd)
+        destination_fd = _open_directory_at(destination_parent_fd, destination_name)
+        try:
+            _copy_directory_contents_fd(source_fd, destination_fd)
+        except BaseException:
+            os.close(destination_fd)
+            destination_fd = -1
+            with contextlib.suppress(OSError, APError):
+                _remove_tree_at(destination_parent_fd, destination_name, missing_ok=True)
+            raise
+        finally:
+            if destination_fd >= 0:
+                os.close(destination_fd)
+    finally:
+        os.close(source_fd)
+
+
+def _unlink_file_at(parent_fd: int, name: str, *, missing_ok: bool = False) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    if stat.S_ISDIR(metadata.st_mode):
+        raise APError(f"Install I/O refuses to unlink a directory as a file: {name}")
+    os.unlink(name, dir_fd=parent_fd)
+
+
+def _install_io_owner(repo: Path) -> dict:
+    payload = _safe_read_project_file(
+        repo,
+        _INSTALL_TRANSACTION_RELATIVE / "owner.json",
+        max_bytes=4096,
+    )
+    if payload is None:
+        raise APError("Install I/O requires a valid transaction owner.")
+    try:
+        owner = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APError("Install I/O transaction owner is invalid.") from exc
+    return _mapping(owner)
+
+
+def _require_install_io_access(repo: Path, operation: str) -> None:
+    owner = _install_io_owner(repo)
+    token = os.environ.get("AUTOCODING_INSTALL_TRANSACTION_TOKEN", "")
+    expected = _text(owner.get("token_sha256"))
+    if re.fullmatch(r"[0-9a-f]{64}", token) and re.fullmatch(r"[0-9a-f]{64}", expected):
+        actual = hashlib.sha256(token.encode("ascii")).hexdigest()
+        if hmac.compare_digest(actual, expected):
+            return
+    if operation in {"recover", "complete"}:
+        try:
+            pid = int(owner.get("pid"))
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError as exc:
+            raise APError("Install I/O recovery owner is still active.") from exc
+        except (TypeError, ValueError, OSError) as exc:
+            raise APError("Install I/O recovery owner cannot be verified.") from exc
+        raise APError("Install I/O recovery owner is still active.")
+    raise APError("Install I/O requires the active installer token.")
+
+
+def _cmd_install_io_posix(args: argparse.Namespace, repo: Path) -> None:
+    operation = _text(args.operation).lower()
+    if operation in {"switch", "recover"}:
+        _safe_ensure_project_directory(repo, Path(".agents/skills"))
+    if operation == "recover":
+        _safe_ensure_project_directory(repo, Path("docs"))
+    with contextlib.ExitStack() as stack:
+        agents = stack.enter_context(_open_project_directory(repo, Path(".agents")))
+        transaction = stack.enter_context(
+            _open_project_directory(repo, _INSTALL_TRANSACTION_RELATIVE)
+        )
+        if not isinstance(agents, int) or not isinstance(transaction, int):
+            raise APError("Install I/O project directories are missing.")
+        bindings: list[tuple[Path, int, tuple[int, int]]] = [
+            (Path(".agents"), agents, _directory_handle_identity(agents)),
+            (_INSTALL_TRANSACTION_RELATIVE, transaction, _directory_handle_identity(transaction)),
+        ]
+        skills: int | None = None
+        docs: int | None = None
+        if operation in {"switch", "recover"}:
+            skills = stack.enter_context(_open_project_directory(repo, Path(".agents/skills")))
+            if not isinstance(skills, int):
+                raise APError("Install I/O skills directory is missing.")
+            bindings.append((Path(".agents/skills"), skills, _directory_handle_identity(skills)))
+        if operation == "recover":
+            docs = stack.enter_context(_open_project_directory(repo, Path("docs")))
+            if not isinstance(docs, int):
+                raise APError("Install I/O docs directory is missing.")
+            bindings.append((Path("docs"), docs, _directory_handle_identity(docs)))
+
+        _inject_install_io_parent_swap(repo, operation)
+        for relative, handle, identity in bindings:
+            _require_bound_project_directory(repo, relative, handle, identity)
+
+        if operation == "switch":
+            assert skills is not None
+            _remove_tree_at(skills, "auto-coding-skill", missing_ok=True)
+            os.rename(
+                "new-skill",
+                "auto-coding-skill",
+                src_dir_fd=transaction,
+                dst_dir_fd=skills,
+            )
+            _copy_file_between_fds(transaction, "new-manifest.json", agents, "managed-install.json")
+        elif operation == "recover":
+            assert skills is not None and docs is not None
+            _remove_tree_at(skills, "auto-coding-skill", missing_ok=True)
+            if args.old_skill_present:
+                _copy_directory_at(transaction, "old-skill", skills, "auto-coding-skill")
+            if args.old_manifest_present:
+                _copy_file_between_fds(transaction, "old-manifest.json", agents, "managed-install.json")
+            else:
+                _unlink_file_at(agents, "managed-install.json", missing_ok=True)
+            if args.old_engineering_present:
+                _copy_file_between_fds(transaction, "old-ENGINEERING.md", docs, "ENGINEERING.md")
+            else:
+                _unlink_file_at(docs, "ENGINEERING.md", missing_ok=True)
+        elif operation == "complete":
+            completed = f".auto-coding-skill-install-completed-{os.getpid()}-{uuid.uuid4().hex}"
+            os.rename(
+                _INSTALL_TRANSACTION_RELATIVE.name,
+                completed,
+                src_dir_fd=agents,
+                dst_dir_fd=agents,
+            )
+            _remove_tree_at(agents, completed)
+        else:
+            raise APError(f"Unsupported install I/O operation: {operation}")
+
+
+def _cmd_install_io_windows(args: argparse.Namespace, repo: Path) -> None:
+    operation = _text(args.operation).lower()
+    if operation in {"switch", "recover"}:
+        _safe_ensure_project_directory(repo, Path(".agents/skills"))
+    if operation == "recover":
+        _safe_ensure_project_directory(repo, Path("docs"))
+    transaction = repo / _INSTALL_TRANSACTION_RELATIVE
+    skills = repo / ".agents" / "skills"
+    agents = repo / ".agents"
+    docs = repo / "docs"
+    snapshots: list[tuple[Path, tuple[int, int]]] = []
+    for directory in [agents, transaction, *([skills] if operation in {"switch", "recover"} else []), *([docs] if operation == "recover" else [])]:
+        metadata = directory.lstat()
+        if _is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise APError(f"Install I/O project directory is unsafe: {directory.relative_to(repo)}")
+        snapshots.append((directory, _project_path_identity(metadata)))
+    _inject_install_io_parent_swap(repo, operation)
+
+    def validate() -> None:
+        for directory, identity in snapshots:
+            metadata = directory.lstat()
+            if (
+                _is_windows_reparse_point(metadata)
+                or not stat.S_ISDIR(metadata.st_mode)
+                or _project_path_identity(metadata) != identity
+            ):
+                raise APError(f"Install I/O project parent changed: {directory.relative_to(repo)}")
+
+    validate()
+    if operation == "switch":
+        target = skills / "auto-coding-skill"
+        if os.path.lexists(target):
+            shutil.rmtree(target)
+        os.replace(transaction / "new-skill", target)
+        _safe_write_project_file(repo, Path(".agents/managed-install.json"), (transaction / "new-manifest.json").read_bytes())
+    elif operation == "recover":
+        target = skills / "auto-coding-skill"
+        if os.path.lexists(target):
+            shutil.rmtree(target)
+        if args.old_skill_present:
+            shutil.copytree(transaction / "old-skill", target, symlinks=True)
+        if args.old_manifest_present:
+            _safe_write_project_file(repo, Path(".agents/managed-install.json"), (transaction / "old-manifest.json").read_bytes())
+        elif os.path.lexists(agents / "managed-install.json"):
+            (agents / "managed-install.json").unlink()
+        if args.old_engineering_present:
+            _safe_write_project_file(repo, Path("docs/ENGINEERING.md"), (transaction / "old-ENGINEERING.md").read_bytes())
+        elif os.path.lexists(docs / "ENGINEERING.md"):
+            (docs / "ENGINEERING.md").unlink()
+    elif operation == "complete":
+        completed = agents / f".auto-coding-skill-install-completed-{os.getpid()}-{uuid.uuid4().hex}"
+        os.replace(transaction, completed)
+        shutil.rmtree(completed)
+    else:
+        raise APError(f"Unsupported install I/O operation: {operation}")
+    validate()
+
+
+def cmd_install_io(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    operation = _text(args.operation).lower()
+    _require_install_io_access(repo, operation)
+    if os.name == "nt":
+        _cmd_install_io_windows(args, repo)
+    else:
+        _cmd_install_io_posix(args, repo)
+    if args.json:
+        print(json.dumps({"operation": operation, "ok": True}))
+
+
+def _managed_scaffold_convergence(
+    repo: Path,
+    selected: dict[str, str],
+    version: str,
+    *,
+    write: bool,
+) -> list[dict]:
+    actions: list[dict] = []
+    for rel, canonical in sorted(selected.items()):
+        if rel not in MANAGED_FRAMEWORK_DOCS:
+            continue
+        current = _safe_read_project_file(repo, rel)
+        expected = canonical.encode("utf-8")
+        if current == expected:
+            continue
+        if current is not None:
+            archive_rel, archive_required = _select_project_archive_target(
+                repo,
+                Path(".agents") / "archive" / "auto-coding-skill" / version / rel,
+                current,
+                legacy_digest_payload=current,
+            )
+            if archive_required:
+                actions.append({"action": "archive", "path": archive_rel.as_posix()})
+                if write:
+                    _safe_create_project_file(repo, archive_rel, current)
+        actions.append({"action": "create" if current is None else "replace", "path": rel})
+        if write:
+            _safe_write_project_file(repo, rel, expected)
+    return actions
+
+
+def _is_allowed_project_doc(rel: Path, candidate: Path | None = None) -> bool:
+    if rel == _PROJECT_CONFIG_RELATIVE:
+        return candidate is None or (candidate.is_file() and not candidate.is_symlink())
+    if any(rel.match(pattern) for pattern in PROJECT_FEEDBACK_PATTERNS):
+        return candidate is None or (candidate.is_file() and not candidate.is_symlink())
     return any(rel.match(pattern) for pattern in _PROJECT_ARTIFACT_PATTERNS)
 
 
@@ -1113,44 +2526,48 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
     engineering = repo / "docs" / "ENGINEERING.md"
-    output = _converged_engineering_document(repo, template)
-    current = engineering.read_text(encoding="utf-8") if engineering.exists() else ""
-    changed = not bool(current)
-    if current:
-        try:
-            current_cfg, current_body = _parse_frontmatter_markdown_text(current, engineering)
-            output_cfg, output_body = _parse_frontmatter_markdown_text(output, engineering)
-            changed = current_cfg != output_cfg or current_body != output_body
-        except Exception:
-            changed = True
+    config_plan = _project_config_convergence_plan(repo, template)
+    output = config_plan["engineering_output"]
+    current = config_plan["engineering_current"]
+    changed = current != output
     actions: list[dict] = []
     version = _text(_mapping(_read_frontmatter_markdown(template)[0].get("workflow")).get("skill_version")) or "current"
+    managed_templates = templates_for("all")
+    managed_plan = _managed_scaffold_convergence(repo, managed_templates, version, write=False)
 
     def archive_previous(source_path: Path, content: str, label: str) -> None:
-        archive_root = repo / ".agents" / "archive" / "auto-coding-skill" / version
-        archive = archive_root / source_path.relative_to(repo)
-        if archive.exists() and archive.read_text(encoding="utf-8") != content:
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
-            archive = archive.with_name(f"{archive.stem}-{digest}{archive.suffix}")
-        if archive.exists():
+        archive = (
+            Path(".agents") / "archive" / "auto-coding-skill" / version
+            / source_path.relative_to(repo)
+        )
+        content_bytes = content.encode("utf-8")
+        archive, archive_required = _select_project_archive_target(
+            repo,
+            archive,
+            content_bytes,
+            legacy_digest_payload=content_bytes,
+        )
+        if not archive_required:
             return
-        actions.append({"action": "archive", "path": _repo_rel(repo, archive), "detail": label})
+        actions.append({"action": "archive", "path": archive.as_posix(), "detail": label})
         if args.write:
-            archive.parent.mkdir(parents=True, exist_ok=True)
-            archive.write_text(content, encoding="utf-8")
+            _safe_create_project_file(repo, archive, content_bytes)
 
     def archive_extra(source_path: Path, label: str) -> None:
-        content = source_path.read_bytes()
-        archive_root = repo / ".agents" / "archive" / "auto-coding-skill" / version
-        archive = archive_root / source_path.relative_to(repo)
-        if archive.exists() and archive.read_bytes() != content:
-            digest = hashlib.sha256(content).hexdigest()[:12]
-            archive = archive.with_name(f"{archive.stem}-{digest}{archive.suffix}")
-        if not archive.exists():
-            actions.append({"action": "archive", "path": _repo_rel(repo, archive), "detail": label})
+        source_rel = source_path.relative_to(repo)
+        content = _safe_read_project_file(repo, source_rel)
+        if content is None:
+            raise APError(f"Project file disappeared during convergence: {source_rel.as_posix()}")
+        archive, archive_required = _select_project_archive_target(
+            repo,
+            Path(".agents") / "archive" / "auto-coding-skill" / version / source_rel,
+            content,
+            legacy_digest_payload=content,
+        )
+        if archive_required:
+            actions.append({"action": "archive", "path": archive.as_posix(), "detail": label})
             if args.write:
-                archive.parent.mkdir(parents=True, exist_ok=True)
-                archive.write_bytes(content)
+                _safe_create_project_file(repo, archive, content)
 
     if changed and current:
         archive_header = (
@@ -1158,18 +2575,38 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
             "Historical and non-authoritative. Do not use this file as workflow policy.\n\n---\n\n"
         )
         archive_previous(engineering, archive_header + current, "previous project configuration")
+    if config_plan["overlay_output"] is not None:
+        actions.append({
+            "action": "create",
+            "path": _PROJECT_CONFIG_RELATIVE.as_posix(),
+            "detail": (
+                "project-owned effective-config overlay; migrated "
+                f"{len(config_plan['migrated_paths'])} value paths"
+            ),
+        })
+        if args.write:
+            _safe_create_project_file(
+                repo,
+                _PROJECT_CONFIG_RELATIVE,
+                config_plan["overlay_output"],
+            )
     if changed:
         actions.append({
             "action": "create" if not current else "replace",
             "path": "docs/ENGINEERING.md",
         })
         if args.write:
-            engineering.parent.mkdir(parents=True, exist_ok=True)
-            engineering.write_text(output, encoding="utf-8")
+            _safe_write_project_file(repo, Path("docs/ENGINEERING.md"), output.encode("utf-8"))
 
     for rel, canonical in sorted(templates_for("all").items()):
+        if rel in MANAGED_FRAMEWORK_DOCS:
+            continue
         target = repo / rel
-        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        existing_payload = _safe_read_project_file(repo, rel)
+        try:
+            existing = existing_payload.decode("utf-8") if existing_payload is not None else ""
+        except UnicodeDecodeError as exc:
+            raise APError(f"Project documentation must be UTF-8: {rel}") from exc
         managed = rel in MANAGED_FRAMEWORK_DOCS
         if existing and (not managed or existing == canonical):
             continue
@@ -1177,12 +2614,18 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
             archive_previous(target, existing, "previous managed documentation template")
         actions.append({"action": "create" if not existing else "replace", "path": rel})
         if args.write:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(canonical, encoding="utf-8")
+            _safe_write_project_file(repo, rel, canonical.encode("utf-8"))
+
+    actions.extend(
+        _managed_scaffold_convergence(repo, managed_templates, version, write=True)
+        if args.write
+        else managed_plan
+    )
 
     allowed_docs = {
         Path("docs/ENGINEERING.md"),
         Path("docs/tools/autopipeline/ap.py"),
+        _PROJECT_CONFIG_RELATIVE,
         *(Path(rel) for rel in templates_for("all")),
     }
     docs_root = repo / "docs"
@@ -1191,7 +2634,16 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
             if not candidate.is_file() and not candidate.is_symlink():
                 continue
             rel = candidate.relative_to(repo)
-            if rel in allowed_docs or _is_allowed_project_doc(rel):
+            if rel in allowed_docs or _is_allowed_project_doc(rel, candidate):
+                continue
+            if candidate.is_symlink() and any(rel.match(pattern) for pattern in PROJECT_FEEDBACK_PATTERNS):
+                actions.append({
+                    "action": "delete",
+                    "path": rel.as_posix(),
+                    "detail": "feedback reports must be regular non-symlink Markdown files",
+                })
+                if args.write:
+                    candidate.unlink()
                 continue
             archive_extra(candidate, "removed from the exact docs framework")
             actions.append({"action": "delete", "path": rel.as_posix()})
@@ -1218,119 +2670,6 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
         print("[project-converge] OK: already current")
 
 
-def _migrate_fast_development_defaults(cfg: dict, repo: Path) -> list[str]:
-    changed: list[str] = []
-
-    workflow_cfg = cfg.setdefault("workflow", {})
-    if not isinstance(workflow_cfg, dict):
-        workflow_cfg = {}
-        cfg["workflow"] = workflow_cfg
-    if _text(workflow_cfg.get("mode")).lower() != "dev":
-        workflow_cfg["mode"] = "dev"
-        changed.append("workflow.mode")
-    if _text(workflow_cfg.get("completion")).lower() != "push":
-        workflow_cfg["completion"] = "push"
-        changed.append("workflow.completion")
-    if _text(workflow_cfg.get("skill_version")) != "4.2.8":
-        workflow_cfg["skill_version"] = "4.2.8"
-        changed.append("workflow.skill_version")
-
-    commands_cfg = cfg.setdefault("commands", {})
-    if not isinstance(commands_cfg, dict):
-        commands_cfg = {}
-        cfg["commands"] = commands_cfg
-    current_changed_gate = _text(commands_cfg.get("gate_changed"))
-    project_fast = _text(commands_cfg.get("project_fast"))
-    inferred_fast = _inferred_gate_commands(repo).get("project_fast", "")
-    if not project_fast:
-        replacement = (
-            current_changed_gate
-            if current_changed_gate and current_changed_gate not in {"git diff --check", "npm test"}
-            else inferred_fast
-        )
-        commands_cfg["project_fast"] = replacement
-        changed.append("commands.project_fast")
-
-    gate_cfg = cfg.setdefault("gate", {})
-    if not isinstance(gate_cfg, dict):
-        gate_cfg = {}
-        cfg["gate"] = gate_cfg
-    for key in ["default_scope", "fallback_scope", "no_change_scope"]:
-        if _text(gate_cfg.get(key)).lower() != "changed":
-            gate_cfg[key] = "changed"
-            changed.append(f"gate.{key}")
-    if _bool_config(gate_cfg.get("full_on_unknown"), False):
-        gate_cfg["full_on_unknown"] = False
-        changed.append("gate.full_on_unknown")
-    if "full_on" in gate_cfg:
-        del gate_cfg["full_on"]
-        changed.append("gate.full_on")
-    raw_rules = gate_cfg.get("rules")
-    risk_cfg = cfg.setdefault("risk", {})
-    if not isinstance(risk_cfg, dict):
-        risk_cfg = {}
-        cfg["risk"] = risk_cfg
-    risk_rules = risk_cfg.setdefault("rules", [])
-    if not isinstance(risk_rules, list):
-        risk_rules = []
-        risk_cfg["rules"] = risk_rules
-    validation_cfg = cfg.setdefault("validation", {})
-    if not isinstance(validation_cfg, dict):
-        validation_cfg = {}
-        cfg["validation"] = validation_cfg
-    if _text(validation_cfg.get("on_unmapped")).lower() != "error":
-        validation_cfg["on_unmapped"] = "error"
-        changed.append("validation.on_unmapped")
-    for key, default_value in [
-        ("max_command_seconds", int(_RECOMMENDED_FINAL_COMMAND_SECONDS)),
-        ("max_total_seconds", int(_RECOMMENDED_FINAL_TOTAL_SECONDS)),
-    ]:
-        if key not in validation_cfg:
-            validation_cfg[key] = default_value
-            changed.append(f"validation.{key}")
-    validation_routes = validation_cfg.setdefault("routes", [])
-    if not isinstance(validation_routes, list):
-        validation_routes = []
-        validation_cfg["routes"] = validation_routes
-    if isinstance(raw_rules, list):
-        migrated_rules: list = []
-        for index, rule in enumerate(raw_rules):
-            if not isinstance(rule, dict):
-                migrated_rules.append(rule)
-                continue
-            migrated_rule = {
-                key: value
-                for key, value in rule.items()
-                if key in {"name", "paths", "profile", "review", "design"}
-            }
-            if migrated_rule and migrated_rule not in risk_rules:
-                risk_rules.append(migrated_rule)
-                changed.append(f"risk.rules[{len(risk_rules) - 1}]")
-            legacy_commands = _as_list(rule.get("commands"))
-            if legacy_commands and _as_list(rule.get("paths")):
-                route = {
-                    "name": _text(rule.get("name")) or f"migrated-{index + 1}",
-                    "paths": _as_list(rule.get("paths")),
-                    "commands": [_command_name(item) for item in legacy_commands if _command_name(item)],
-                }
-                if route["commands"] and route not in validation_routes:
-                    validation_routes.append(route)
-                    changed.append(f"validation.routes[{len(validation_routes) - 1}]")
-        if migrated_rules != raw_rules:
-            gate_cfg["rules"] = []
-            changed.append("gate.rules")
-
-    concurrency_cfg = cfg.setdefault("concurrency", {})
-    if not isinstance(concurrency_cfg, dict):
-        concurrency_cfg = {}
-        cfg["concurrency"] = concurrency_cfg
-    if _text(concurrency_cfg.get("isolation")).lower() != "adaptive":
-        concurrency_cfg["isolation"] = "adaptive"
-        changed.append("concurrency.isolation")
-
-    return changed
-
-
 def cmd_scaffold(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     group = str(args.group or "").strip().lower()
@@ -1344,15 +2683,14 @@ def cmd_scaffold(args: argparse.Namespace) -> None:
     force = bool(args.force)
     actions: list[dict] = []
     for rel, content in sorted(selected.items()):
-        path = repo / rel
-        if path.exists() and not force:
+        current = _safe_read_project_file(repo, rel)
+        if current is not None and not force:
             actions.append({"path": rel, "action": "exists"})
             continue
         action = "write" if write else "would-write"
         actions.append({"path": rel, "action": action})
         if write:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            _safe_write_project_file(repo, rel, content.encode("utf-8"))
 
     result = {"group": group, "mode": "write" if write else "plan", "actions": actions}
     if args.json:
@@ -1364,11 +2702,160 @@ def cmd_scaffold(args: argparse.Namespace) -> None:
         print("[scaffold] plan only; re-run with --write to create missing files")
 
 
+def cmd_managed_scaffold_converge(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    group = str(args.group or "").strip().lower()
+    selected = templates_for(group)
+    write = bool(args.write)
+    template = _skill_root() / "data" / "templates" / "ENGINEERING.md"
+    version = _text(_mapping(_read_frontmatter_markdown(template)[0].get("workflow")).get("skill_version")) or "current"
+    actions = _managed_scaffold_convergence(repo, selected, version, write=write)
+    result = {"group": group, "mode": "write" if write else "plan", "actions": actions}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in actions:
+        print(f"[managed-scaffold-converge] {item['action']}: {item['path']}")
+
+
+_CONFIG_STATUS_FIELDS: tuple[tuple[str, tuple[str, ...], bool, bool], ...] = (
+    ("workflow.skill_version", ("workflow", "skill_version"), False, True),
+    ("workflow.mode", ("workflow", "mode"), False, True),
+    ("workflow.profile", ("workflow", "profile"), False, True),
+    ("workflow.completion", ("workflow", "completion"), False, True),
+    ("project.name", ("project", "name"), False, True),
+    ("concurrency.isolation", ("concurrency", "isolation"), False, True),
+    ("concurrency.base_ref", ("concurrency", "base_ref"), False, True),
+    ("concurrency.target_branch", ("concurrency", "target_branch"), False, True),
+    ("concurrency.branch_prefix", ("concurrency", "branch_prefix"), False, True),
+    ("concurrency.worktree_root", ("concurrency", "worktree_root"), False, True),
+    ("concurrency.cleanup_merged", ("concurrency", "cleanup_merged"), False, True),
+    ("concurrency.delete_remote_branch", ("concurrency", "delete_remote_branch"), False, True),
+    ("concurrency.disposable_ignored", ("concurrency", "disposable_ignored"), True, False),
+    ("validation.on_unmapped", ("validation", "on_unmapped"), False, True),
+    ("validation.max_command_seconds", ("validation", "max_command_seconds"), False, True),
+    ("validation.max_total_seconds", ("validation", "max_total_seconds"), False, True),
+    ("validation.routes", ("validation", "routes"), True, False),
+    ("risk.rules", ("risk", "rules"), True, False),
+    ("docs.framework", ("docs", "framework"), False, True),
+    ("access.project.frontend.url", ("access", "project", "frontend", "url"), False, False),
+    ("access.project.frontend.username", ("access", "project", "frontend", "username"), False, False),
+    ("access.project.frontend.password", ("access", "project", "frontend", "password"), False, False),
+    ("access.project.backend.url", ("access", "project", "backend", "url"), False, False),
+    ("access.project.backend.username", ("access", "project", "backend", "username"), False, False),
+    ("access.project.backend.password", ("access", "project", "backend", "password"), False, False),
+    ("access.jenkins.frontend.url", ("access", "jenkins", "frontend", "url"), False, False),
+    ("access.jenkins.frontend.username", ("access", "jenkins", "frontend", "username"), False, False),
+    ("access.jenkins.frontend.password", ("access", "jenkins", "frontend", "password"), False, False),
+    ("access.jenkins.backend.url", ("access", "jenkins", "backend", "url"), False, False),
+    ("access.jenkins.backend.username", ("access", "jenkins", "backend", "username"), False, False),
+    ("access.jenkins.backend.password", ("access", "jenkins", "backend", "password"), False, False),
+    ("access.gitlab.url", ("access", "gitlab", "url"), False, False),
+    ("access.gitlab.username", ("access", "gitlab", "username"), False, False),
+    ("access.gitlab.password", ("access", "gitlab", "password"), False, False),
+    ("access.nexus.frontend.url", ("access", "nexus", "frontend", "url"), False, False),
+    ("access.nexus.frontend.username", ("access", "nexus", "frontend", "username"), False, False),
+    ("access.nexus.frontend.password", ("access", "nexus", "frontend", "password"), False, False),
+)
+
+
+def _config_value(cfg: dict, path: tuple[str, ...]) -> tuple[bool, object]:
+    current: object = cfg
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False, ""
+        current = current[key]
+    return True, current
+
+
+def _config_status_report(repo: Path) -> dict:
+    cfg = load_effective_config(repo)
+    fields: dict[str, dict] = {}
+    for label, path, sequence, expose_value in _CONFIG_STATUS_FIELDS:
+        present, value = _config_value(cfg, path)
+        if label.startswith("access.") or label in {"project.name", "docs.framework"}:
+            configured = isinstance(value, str) and _is_explicit_fill(value)
+        elif sequence:
+            configured = isinstance(value, list) and bool(value)
+        else:
+            configured = bool(present and (
+                len(value) > 0 if isinstance(value, (list, dict, str)) else value is not None
+            ))
+        state = {
+            "present": present,
+            "configured": bool(present and configured),
+        }
+        if sequence:
+            state["item_count"] = len(value) if isinstance(value, list) else -1
+        if expose_value and present and isinstance(value, (str, bool, int, float)):
+            state["value"] = value
+        fields[label] = state
+    commands = _mapping(cfg.get("commands"))
+    overlay_payload = _safe_read_project_file(
+        repo,
+        _PROJECT_CONFIG_RELATIVE,
+        max_bytes=128 * 1024,
+    )
+    contract = cmd_doctor(
+        argparse.Namespace(repo=str(repo), collect=True, quiet=True, record=False)
+    )
+    report = {
+        "schema": "auto-coding-skill/effective-config-status/v1",
+        "managed_version": _text(_mapping(cfg.get("workflow")).get("skill_version")),
+        "project_overlay": {
+            "path": _PROJECT_CONFIG_RELATIVE.as_posix(),
+            "present": overlay_payload is not None,
+            "schema": PROJECT_CONFIG_SCHEMA if overlay_payload is not None else "",
+        },
+        "project": {"name": _text(_mapping(cfg.get("project")).get("name"))},
+        "fields": fields,
+        "commands": {
+            "configured_names": sorted(
+                str(name)
+                for name, value in commands.items()
+                if isinstance(name, str) and isinstance(value, str) and value.strip()
+            )
+        },
+        "risk_rule_count": len(_mapping(cfg.get("risk")).get("rules") or [])
+        if isinstance(_mapping(cfg.get("risk")).get("rules") or [], list)
+        else -1,
+        "validation_route_count": len(_mapping(cfg.get("validation")).get("routes") or [])
+        if isinstance(_mapping(cfg.get("validation")).get("routes") or [], list)
+        else -1,
+        "policy_issues": _workflow_policy_issues(repo, cfg),
+        "contract_valid": not bool(contract["issues"]),
+        "contract_issues": contract["issues"],
+        "contract_advisories": contract["advisories"],
+    }
+    canonical = json.dumps(report, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    report["redacted_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return report
+
+
+def cmd_config_effective(args: argparse.Namespace) -> None:
+    report = _config_status_report(Path(args.repo).resolve())
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    print(f"[config] managed_version={report['managed_version'] or '(missing)'}")
+    print(
+        "[config] project_overlay="
+        + ("valid" if report["project_overlay"]["present"] else "missing")
+    )
+    print(f"[config] project={report['project']['name'] or '(missing)'}")
+    print(f"[config] contract_valid={str(report['contract_valid']).lower()}")
+    print(f"[config] redacted_sha256={report['redacted_sha256']}")
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     templates = _skill_root() / "data" / "templates"
+    config_convergence = _project_config_convergence_plan(
+        repo,
+        templates / "ENGINEERING.md",
+    )
 
-    planned_copies = [(templates / "ENGINEERING.md", repo / "docs" / "ENGINEERING.md")]
+    planned_copies: list[tuple[Path, Path]] = []
     for rel in _CORE_DOC_TEMPLATES:
         planned_copies.append((templates / "docs" / rel, repo / "docs" / rel))
 
@@ -1378,23 +2865,45 @@ def cmd_install(args: argparse.Namespace) -> None:
     tools_dir = repo / "docs" / "tools" / "autopipeline"
     planned_copies.append((templates / "tools" / "ap.py", tools_dir / "ap.py"))
 
-    conflicts: list[Path] = []
+    engineering = repo / "docs" / "ENGINEERING.md"
+    conflicts: list[Path] = [engineering] if config_convergence["engineering_current"] else []
+    planned_files: list[tuple[Path, Path]] = []
     for src, dst in planned_copies:
-        conflicts.extend(_copy_conflicts(src, dst))
+        if src.is_file():
+            planned_files.append((src, dst))
+            continue
+        for source_file in _iter_files(src):
+            planned_files.append((source_file, dst / source_file.relative_to(src)))
+    for _, dst in planned_files:
+        if _safe_read_project_file(repo, dst.relative_to(repo)) is not None:
+            conflicts.append(dst)
     if conflicts and not args.force:
         conflict_list = "\n".join(f"- {_repo_rel(repo, path)}" for path in conflicts[:20])
         extra = "" if len(conflicts) <= 20 else f"\n- ... and {len(conflicts) - 20} more"
         raise APError(
             "Install would overwrite existing files:\n"
             f"{conflict_list}{extra}\n"
-            "For existing projects, run `ap.py upgrade --dry-run` then `ap.py upgrade --write`. "
+            "For existing projects, run `autocoding init` or an explicit `autocoding sync`. "
             "Use `install --force` only when intentionally resetting generated docs/tooling."
         )
 
-    for src, dst in planned_copies:
-        copy_tree(src, dst)
+    for src, dst in planned_files:
+        _safe_write_project_file(repo, dst.relative_to(repo), src.read_bytes())
 
-    _initialize_engineering_defaults(repo / "docs" / "ENGINEERING.md", repo)
+    if config_convergence["overlay_output"] is not None:
+        _safe_create_project_file(
+            repo,
+            _PROJECT_CONFIG_RELATIVE,
+            config_convergence["overlay_output"],
+        )
+    _safe_write_project_file(
+        repo,
+        Path("docs/ENGINEERING.md"),
+        config_convergence["engineering_output"].encode("utf-8"),
+    )
+    cmd_scaffold(
+        argparse.Namespace(repo=str(repo), group="feedback", write=True, force=args.force, json=False)
+    )
     if args.full:
         cmd_scaffold(
             argparse.Namespace(repo=str(repo), group="all", write=True, force=args.force, json=False)
@@ -1404,7 +2913,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     print(f"[install] OK: {layout} scaffold installed into {repo}")
     print(
         "[install] Next: fill every access.* URL, username, and password in "
-        "docs/ENGINEERING.md, run doctor, and commit that file into Git."
+        "docs/project/auto-coding-skill.yaml, run doctor, and commit that file into Git."
     )
 
 
@@ -1412,11 +2921,25 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     write = bool(args.write) and not bool(args.dry_run)
+    if write:
+        raise APError(
+            "Project-local `ap.py upgrade --write` was retired in favor of the "
+            "transactional installer. Run `autocoding init` for one project or "
+            "`autocoding sync --projects <path[,path...]>` for explicit projects. "
+            "Use `ap.py upgrade --dry-run` only as a read-only legacy diagnostic."
+        )
     source_root = _find_skill_asset_root(repo)
     templates = source_root / "data" / "templates"
     template_engineering = templates / "ENGINEERING.md"
     template_agents = templates / "bridges" / "AGENTS.md"
     actions: list[dict] = []
+    managed_version = _text(
+        _mapping(_read_frontmatter_markdown(template_engineering)[0].get("workflow")).get("skill_version")
+    ) or "current"
+    feedback_templates = templates_for("feedback")
+    feedback_plan = _managed_scaffold_convergence(
+        repo, feedback_templates, managed_version, write=False
+    )
 
     registry = _task_state_root(repo) / "tasks"
     active_manifests = sorted(registry.glob("*.json")) if registry.exists() else []
@@ -1427,6 +2950,8 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             f"{names}. Finish, integrate, or clean them with the installed runtime first; "
             "workflow semantics must not change mid-task."
         )
+
+    config_convergence = _project_config_convergence_plan(repo, template_engineering)
 
     def add_action(kind: str, path: Path, action: str, detail: str = "") -> None:
         actions.append({
@@ -1477,20 +3002,21 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         archive_header = (
             f"# Archived ENGINEERING.md before auto-coding-skill {version} docs convergence\n\n"
             "This file is historical and non-authoritative. Known duplicate workflow sections\n"
-            "were removed from docs/ENGINEERING.md. Move any still-current project facts into\n"
-            "docs/ENGINEERING.md project-fact sections or docs/project/.\n\n---\n\n"
+            "were removed from docs/ENGINEERING.md. Move still-current configuration into\n"
+            "docs/project/auto-coding-skill.yaml and durable facts into docs/project/.\n\n---\n\n"
         )
         archive_content = archive_header + engineering_plan["original"]
-        archive_dir = repo / "docs" / "archive" / "workflow"
-        archive = archive_dir / f"ENGINEERING.pre-{version}.md"
-        if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
-            digest = hashlib.sha256(engineering_plan["original"].encode("utf-8")).hexdigest()[:12]
-            archive = archive_dir / f"ENGINEERING.pre-{version}-{digest}.md"
-        if not archive.exists():
+        archive_rel, archive_required = _select_project_archive_target(
+            repo,
+            Path("docs/archive/workflow") / f"ENGINEERING.pre-{version}.md",
+            archive_content.encode("utf-8"),
+            legacy_digest_payload=engineering_plan["original"].encode("utf-8"),
+        )
+        archive = repo / archive_rel
+        if archive_required:
             add_action("policy", archive, "archive", "before duplicate workflow section cleanup")
             if write:
-                archive.parent.mkdir(parents=True, exist_ok=True)
-                archive.write_text(archive_content, encoding="utf-8")
+                _safe_create_project_file(repo, archive_rel, archive_content.encode("utf-8"))
 
     tool_files = [
         (
@@ -1543,23 +3069,24 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     current_agents = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
     if canonical_agents and current_agents != canonical_agents:
         if current_agents:
-            archive_dir = repo / "docs" / "archive" / "workflow"
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.2.8\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.3.0\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
-                "Move any still-current project facts into docs/ENGINEERING.md or docs/project/,\n"
+                "Move project configuration into docs/project/auto-coding-skill.yaml and facts into docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
             )
             archive_content = archive_header + current_agents
-            archive = archive_dir / "AGENTS.pre-4.2.8.md"
-            if archive.exists() and archive.read_text(encoding="utf-8") != archive_content:
-                digest = hashlib.sha256(current_agents.encode("utf-8")).hexdigest()[:12]
-                archive = archive_dir / f"AGENTS.pre-4.2.8-{digest}.md"
-            if not archive.exists():
+            archive_rel, archive_required = _select_project_archive_target(
+                repo,
+                Path("docs/archive/workflow/AGENTS.pre-4.3.0.md"),
+                archive_content.encode("utf-8"),
+                legacy_digest_payload=current_agents.encode("utf-8"),
+            )
+            archive = repo / archive_rel
+            if archive_required:
                 add_action("policy", archive, "archive", "historical and non-authoritative")
                 if write:
-                    archive.parent.mkdir(parents=True, exist_ok=True)
-                    archive.write_text(archive_content, encoding="utf-8")
+                    _safe_create_project_file(repo, archive_rel, archive_content.encode("utf-8"))
         add_action("policy", agents_path, "replace", "fully managed canonical AGENTS.md")
         if write:
             agents_path.write_text(canonical_agents, encoding="utf-8")
@@ -1579,40 +3106,46 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
         else:
             add_action("doc", dst, "ok")
 
+    feedback_actions = (
+        _managed_scaffold_convergence(repo, feedback_templates, managed_version, write=True)
+        if write
+        else feedback_plan
+    )
+    for item in feedback_actions:
+        actions.append({
+            "kind": "doc",
+            "path": item["path"],
+            "action": item["action"],
+            "detail": "managed Skill feedback template",
+        })
+
     engineering = repo / "docs" / "ENGINEERING.md"
-    if engineering.exists() and template_engineering.exists():
-        planned_engineering = engineering_plan["output"] or engineering.read_text(encoding="utf-8")
-        planned_engineering = _sync_managed_workflow_text(
-            planned_engineering,
-            template_engineering.read_text(encoding="utf-8"),
+    if config_convergence["overlay_output"] is not None:
+        add_action(
+            "config",
+            repo / _PROJECT_CONFIG_RELATIVE,
+            "create",
+            f"migrate {len(config_convergence['migrated_paths'])} project-owned value paths",
         )
-        current_cfg, body = _parse_frontmatter_markdown_text(planned_engineering, engineering)
-        template_cfg, _ = _read_frontmatter_markdown(template_engineering)
-        merged_cfg = json.loads(json.dumps(current_cfg))
-        added_keys = _deep_merge_missing(merged_cfg, template_cfg)
-        migrated_keys = _migrate_fast_development_defaults(merged_cfg, repo)
-        body_migrated = planned_engineering != engineering_plan["original"]
-        if added_keys or migrated_keys or body_migrated:
-            detail_parts = []
-            if added_keys:
-                detail_parts.append("add " + ", ".join(added_keys))
-            if migrated_keys:
-                detail_parts.append("migrate " + ", ".join(migrated_keys))
-            if body_migrated:
-                detail_parts.append(
-                    "remove known legacy workflow "
-                    + ", ".join(item["id"] for item in engineering_plan["migrations"])
-                )
-            add_action("config", engineering, "merge", "; ".join(detail_parts))
-            if write:
-                _write_frontmatter_markdown(engineering, merged_cfg, body)
-        else:
-            add_action("config", engineering, "ok")
-    elif template_engineering.exists():
-        add_action("config", engineering, "create")
         if write:
-            copy_tree(template_engineering, engineering)
-            _initialize_engineering_defaults(engineering, repo)
+            _safe_create_project_file(
+                repo,
+                _PROJECT_CONFIG_RELATIVE,
+                config_convergence["overlay_output"],
+            )
+    engineering_output = config_convergence["engineering_output"]
+    engineering_current = config_convergence["engineering_current"]
+    if engineering_current != engineering_output:
+        add_action(
+            "config",
+            engineering,
+            "create" if not engineering_current else "replace",
+            "managed default configuration",
+        )
+        if write:
+            _safe_write_project_file(repo, Path("docs/ENGINEERING.md"), engineering_output.encode("utf-8"))
+    else:
+        add_action("config", engineering, "ok")
 
     result = {
         "source_root": str(source_root),
@@ -1794,8 +3327,58 @@ def cmd_check_matrix(args: argparse.Namespace) -> None:
 
 
 def _load_cfg(repo: Path) -> dict:
-    cfg_path = find_config(repo)
-    return load_yaml(cfg_path)
+    _require_no_install_transaction(repo)
+    return load_effective_config(repo)
+
+
+def _require_no_install_transaction(repo: Path, *, allow_installer: bool = False) -> None:
+    transaction = repo / _INSTALL_TRANSACTION_RELATIVE
+    if not os.path.lexists(transaction):
+        return
+    if allow_installer:
+        _require_active_install_transaction(repo)
+        return
+    raise APError(
+        "An interrupted auto-coding-skill install transaction requires recovery. "
+        "Run autocoding init or a single-project autocoding sync before using or modifying the project runtime."
+    )
+
+
+def _require_active_install_transaction(repo: Path) -> dict:
+    transaction = repo / _INSTALL_TRANSACTION_RELATIVE
+    if not os.path.lexists(transaction):
+        raise APError("Internal project mutation requires an active install transaction.")
+    token = os.environ.get("AUTOCODING_INSTALL_TRANSACTION_TOKEN", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise APError("Internal project mutation requires the active installer token.")
+    owner_payload = _safe_read_project_file(
+        repo,
+        _INSTALL_TRANSACTION_RELATIVE / "owner.json",
+        max_bytes=4096,
+    )
+    state_payload = _safe_read_project_file(
+        repo,
+        _INSTALL_TRANSACTION_RELATIVE / "state.json",
+        max_bytes=64 * 1024,
+    )
+    if owner_payload is None or state_payload is None:
+        raise APError("Internal project mutation requires a complete active install transaction.")
+    try:
+        owner = json.loads(owner_payload.decode("utf-8"))
+        state = json.loads(state_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APError("Active install transaction metadata is invalid.") from exc
+    actual = hashlib.sha256(token.encode("ascii")).hexdigest()
+    owner_hash = _text(_mapping(owner).get("token_sha256"))
+    state_owner_hash = _text(_mapping(state).get("owner_token_sha256"))
+    internal_hash = _text(_mapping(state).get("internal_token_sha256"))
+    if not all(
+        re.fullmatch(r"[0-9a-f]{64}", value)
+        and hmac.compare_digest(value, actual)
+        for value in (owner_hash, state_owner_hash, internal_hash)
+    ):
+        raise APError("Internal project mutation token does not match the active transaction.")
+    return _mapping(state)
 
 
 def _candidate_skill_roots(repo: Path) -> list[Path]:
@@ -2094,9 +3677,8 @@ def _workflow_document_plan(repo: Path, rel: str, policy: dict) -> dict:
             if not match or (_text(rule.get("id")), line) in seen_issues:
                 continue
             seen_issues.add((_text(rule.get("id")), line))
-            snippet = " ".join(match.group(0).strip().split())[:180]
             message = _text(rule.get("message")) or "conflicts with the fast development workflow"
-            issues.append(f"{rel}:{line} [{_text(rule.get('id'))}] {message}: {snippet}")
+            issues.append(f"{rel}:{line} [{_text(rule.get('id'))}] {message}")
 
     output = original
     for start, end, _, _, replacement, match_mode in sorted(known, reverse=True):
@@ -2158,11 +3740,11 @@ def _legacy_gate_config_issues(cfg: dict) -> list[str]:
     issues: list[str] = []
     gate_cfg = cfg.get("gate") or {}
     if not isinstance(gate_cfg, dict):
-        return ["docs/ENGINEERING.md frontmatter gate must be a mapping"]
+        return ["effective configuration gate must be a mapping"]
     if "full_on" in gate_cfg:
-        issues.append("docs/ENGINEERING.md frontmatter gate.full_on is legacy automatic full escalation; run ap.py upgrade")
+        issues.append("effective configuration gate.full_on is legacy automatic full escalation; run autocoding init")
     if _bool_config(gate_cfg.get("full_on_unknown"), False):
-        issues.append("docs/ENGINEERING.md frontmatter gate.full_on_unknown=true is legacy automatic full escalation; run ap.py upgrade")
+        issues.append("effective configuration gate.full_on_unknown=true is legacy automatic full escalation; run autocoding init")
     rules = gate_cfg.get("rules") or []
     if isinstance(rules, list):
         for index, rule in enumerate(rules):
@@ -2171,7 +3753,7 @@ def _legacy_gate_config_issues(cfg: dict) -> list[str]:
             for key in ["scope", "commands"]:
                 if key in rule:
                     issues.append(
-                        f"docs/ENGINEERING.md frontmatter gate.rules[{index}].{key} is legacy automatic gate escalation; run ap.py upgrade"
+                        f"effective configuration gate.rules[{index}].{key} is legacy automatic gate escalation; run autocoding init"
                     )
     return issues
 
@@ -2183,7 +3765,7 @@ def _workflow_policy_issues(repo: Path, cfg: Optional[dict] = None) -> list[str]
         for migration in plan["migrations"]:
             issues.append(
                 f"{plan['path']}:{migration['line']} [{migration['id']}] known legacy workflow rule; "
-                "run `ap.py upgrade --dry-run` then `ap.py upgrade --write`"
+                "run `autocoding init` or an explicit `autocoding sync`"
             )
     issues.extend(_legacy_gate_config_issues(cfg if cfg is not None else _load_cfg(repo)))
     return issues
@@ -2250,13 +3832,391 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _feedback_error(path: Path, message: str) -> APError:
+    return APError(f"Invalid Skill feedback report {path}: {message}")
+
+
+def _feedback_scalar(data: dict, field: str, path: Path) -> str:
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise _feedback_error(path, f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _feedback_created_at(value: object, path: Path) -> str:
+    if isinstance(value, _dt.datetime):
+        return value.isoformat()
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    if not isinstance(value, str) or not value.strip():
+        raise _feedback_error(path, "created_at must be an ISO-8601 date or timestamp")
+    raw = value.strip()
+    try:
+        if "T" in raw or " " in raw:
+            _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        else:
+            _dt.date.fromisoformat(raw)
+    except ValueError as exc:
+        raise _feedback_error(path, "created_at must be an ISO-8601 date or timestamp") from exc
+    return raw
+
+
+def _parse_feedback_report(payload: bytes, path: Path) -> dict:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _feedback_error(path, "file must be UTF-8") from exc
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\x00" in text:
+        raise _feedback_error(path, "file must be plain Markdown text")
+    if any(pattern.search(text) for pattern in _FEEDBACK_SENSITIVE_PATTERNS):
+        raise _feedback_error(path, "report contains sensitive or machine-specific evidence; redact it")
+    match = re.match(r"^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)(.*)$", text, flags=re.DOTALL)
+    if not match:
+        raise _feedback_error(path, "YAML frontmatter is required")
+    try:
+        data = require_yaml().safe_load(match.group(1))
+    except Exception as exc:
+        raise _feedback_error(path, "YAML frontmatter is not safe and valid") from exc
+    if not isinstance(data, dict):
+        raise _feedback_error(path, "YAML frontmatter must be a flat mapping")
+    if any(not isinstance(key, str) for key in data):
+        raise _feedback_error(path, "frontmatter field names must be strings")
+    unknown = sorted(set(data) - set(_FEEDBACK_FIELDS))
+    missing = [field for field in _FEEDBACK_FIELDS if field not in data]
+    if unknown:
+        raise _feedback_error(path, "unknown frontmatter fields are not allowed")
+    if missing:
+        raise _feedback_error(path, f"missing frontmatter fields: {', '.join(missing)}")
+    if any(isinstance(value, (dict, list, tuple, set)) for value in data.values()):
+        raise _feedback_error(path, "frontmatter values must be scalars")
+
+    metadata: dict[str, str] = {}
+    schema_value = _feedback_scalar(data, "schema", path)
+    if schema_value != _FEEDBACK_SCHEMA:
+        raise _feedback_error(path, f"schema must be {_FEEDBACK_SCHEMA}")
+    metadata["schema"] = schema_value
+    report_id = _feedback_scalar(data, "report_id", path)
+    if not _FEEDBACK_SAFE_ID_RE.fullmatch(report_id):
+        raise _feedback_error(path, "report_id must be a safe identifier")
+    metadata["report_id"] = report_id
+    status_value = _feedback_scalar(data, "status", path)
+    if status_value not in _FEEDBACK_STATUSES:
+        raise _feedback_error(path, "status is not supported")
+    metadata["status"] = status_value
+    metadata["created_at"] = _feedback_created_at(data.get("created_at"), path)
+    project_value = _feedback_scalar(data, "project", path)
+    if not _FEEDBACK_SAFE_ID_RE.fullmatch(project_value):
+        raise _feedback_error(path, "project must be a safe identifier")
+    metadata["project"] = project_value
+    version = _feedback_scalar(data, "observed_skill_version", path)
+    if not _FEEDBACK_SEMVER_RE.fullmatch(version):
+        raise _feedback_error(path, "observed_skill_version must be valid SemVer")
+    metadata["observed_skill_version"] = version
+    component = _feedback_scalar(data, "component", path)
+    if not _FEEDBACK_SLUG_RE.fullmatch(component):
+        raise _feedback_error(path, "component must be a lowercase kebab-case slug")
+    metadata["component"] = component
+    kind = _feedback_scalar(data, "kind", path)
+    if kind not in _FEEDBACK_KINDS:
+        raise _feedback_error(path, "kind is not supported")
+    metadata["kind"] = kind
+    impact = _feedback_scalar(data, "impact", path)
+    if impact not in _FEEDBACK_IMPACTS:
+        raise _feedback_error(path, "impact is not supported")
+    metadata["impact"] = impact
+    origin_surface = _feedback_scalar(data, "origin_surface", path)
+    if origin_surface not in _FEEDBACK_ORIGIN_SURFACES:
+        raise _feedback_error(path, "origin_surface is not supported")
+    metadata["origin_surface"] = origin_surface
+    suspected_scope = _feedback_scalar(data, "suspected_scope", path)
+    if suspected_scope != "shared":
+        raise _feedback_error(path, "suspected_scope must be shared")
+    metadata["suspected_scope"] = suspected_scope
+    signature = _feedback_scalar(data, "signature", path)
+    if not _FEEDBACK_SIGNATURE_RE.fullmatch(signature):
+        raise _feedback_error(path, "signature must be sha256 followed by 64 lowercase hex characters")
+    metadata["signature"] = signature
+    export_value = _feedback_scalar(data, "export", path)
+    if export_value != "metadata-only":
+        raise _feedback_error(path, "export must be metadata-only")
+    metadata["export"] = export_value
+
+    body_lines = match.group(2).splitlines()
+    titles = [line[2:].strip() for line in body_lines if line.startswith("# ")]
+    if len(titles) != 1 or not titles[0]:
+        raise _feedback_error(path, "body must contain exactly one non-empty level-one title")
+    for heading in _FEEDBACK_HEADINGS:
+        if body_lines.count(f"## {heading}") != 1:
+            raise _feedback_error(path, f"body must contain exactly one '## {heading}' heading")
+    heading_positions = [body_lines.index(f"## {heading}") for heading in _FEEDBACK_HEADINGS]
+    if heading_positions != sorted(heading_positions):
+        raise _feedback_error(path, "body headings must use the canonical order")
+    for index, heading in enumerate(_FEEDBACK_HEADINGS):
+        start = heading_positions[index] + 1
+        end = heading_positions[index + 1] if index + 1 < len(heading_positions) else len(body_lines)
+        if not any(line.strip() for line in body_lines[start:end]):
+            raise _feedback_error(path, f"body section '{heading}' must not be empty")
+    return metadata
+
+
+def _read_feedback_report(
+    directory_fd: int | Path,
+    name: str,
+    display_path: Path,
+) -> tuple[bytes, int, tuple[int, int]]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    target = directory_fd / name if isinstance(directory_fd, Path) else None
+    target_identity: tuple[int, int] | None = None
+    try:
+        if target is not None:
+            checked = target.lstat()
+            if _is_windows_reparse_point(checked) or not stat.S_ISREG(checked.st_mode):
+                raise _feedback_error(display_path, "report must be a regular non-symlink file")
+            target_identity = _project_path_identity(checked)
+        descriptor = (
+            os.open(target, flags)
+            if isinstance(directory_fd, Path)
+            else os.open(name, flags, dir_fd=directory_fd)
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (target_identity is not None and _project_path_identity(metadata) != target_identity)
+        ):
+            raise _feedback_error(display_path, "report must be a regular non-symlink file")
+        if target is not None:
+            checked = target.lstat()
+            if (
+                _is_windows_reparse_point(checked)
+                or not stat.S_ISREG(checked.st_mode)
+                or _project_path_identity(checked) != target_identity
+            ):
+                raise _feedback_error(display_path, "report changed during its safety check")
+        if metadata.st_size > _FEEDBACK_REPORT_MAX_BYTES:
+            raise _feedback_error(display_path, f"report exceeds {_FEEDBACK_REPORT_MAX_BYTES} bytes")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(_FEEDBACK_REPORT_MAX_BYTES + 1)
+        if target is not None:
+            checked = target.lstat()
+            if (
+                _is_windows_reparse_point(checked)
+                or not stat.S_ISREG(checked.st_mode)
+                or _project_path_identity(checked) != target_identity
+            ):
+                raise _feedback_error(display_path, "report changed while it was read")
+    except APError:
+        raise
+    except OSError as exc:
+        raise _feedback_error(display_path, "report could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(payload) > _FEEDBACK_REPORT_MAX_BYTES:
+        raise _feedback_error(display_path, f"report exceeds {_FEEDBACK_REPORT_MAX_BYTES} bytes")
+    return payload, len(payload), (int(metadata.st_dev), int(metadata.st_ino))
+
+
+def _feedback_project_root(raw: str) -> Path:
+    try:
+        root = Path(raw).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise APError(f"Skill feedback project does not exist: {raw}") from exc
+    if not root.is_dir():
+        raise APError(f"Skill feedback project is not a directory: {raw}")
+    return root
+
+
+def _feedback_configured_project(root: Path) -> str:
+    config = load_effective_config(root)
+    name = _text(_mapping(config.get("project")).get("name"))
+    if not _FEEDBACK_SAFE_ID_RE.fullmatch(name):
+        raise APError("Effective project.name must be a safe non-empty identifier for feedback")
+    return name
+
+
+def _collect_project_feedback(
+    root: Path,
+) -> tuple[list[dict], int, tuple[int, int] | None, set[tuple[int, int]], str | None]:
+    reports_relative = Path("docs/skill-feedback/reports")
+    configured_project = _feedback_configured_project(root)
+    with _open_project_directory(root, reports_relative) as directory_fd:
+        if directory_fd is None:
+            return [], 0, None, set(), configured_project
+        directory_metadata = (
+            directory_fd.stat() if isinstance(directory_fd, Path) else os.fstat(directory_fd)
+        )
+        directory_identity = (int(directory_metadata.st_dev), int(directory_metadata.st_ino))
+        try:
+            entries = os.listdir(directory_fd)
+        except OSError as exc:
+            raise APError("Cannot list Skill feedback reports safely") from exc
+        if len(entries) > _FEEDBACK_PROJECT_MAX_ENTRIES:
+            raise APError(
+                f"Skill feedback directory exceeds {_FEEDBACK_PROJECT_MAX_ENTRIES} entries"
+            )
+        candidates: list[str] = []
+        for name in entries:
+            if not name.endswith(".md"):
+                continue
+            if not _FEEDBACK_FILENAME_RE.fullmatch(name):
+                raise APError("Skill feedback directory contains an invalid Markdown filename")
+            try:
+                metadata = (
+                    (directory_fd / name).stat(follow_symlinks=False)
+                    if isinstance(directory_fd, Path)
+                    else os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                )
+            except OSError as exc:
+                raise APError("Cannot inspect Skill feedback report safely") from exc
+            if _is_windows_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+                raise APError(f"Skill feedback report must be a regular non-symlink file: {name}")
+            candidates.append(name)
+        candidates.sort()
+        if len(candidates) > _FEEDBACK_PROJECT_MAX_REPORTS:
+            raise APError(
+                f"Skill feedback project exceeds {_FEEDBACK_PROJECT_MAX_REPORTS} reports"
+            )
+
+        reports: list[dict] = []
+        total_bytes = 0
+        file_identities: set[tuple[int, int]] = set()
+        for name in candidates:
+            display_path = reports_relative / name
+            payload, size, file_identity = _read_feedback_report(directory_fd, name, display_path)
+            if file_identity in file_identities:
+                raise APError("Skill feedback project contains duplicate physical report files")
+            file_identities.add(file_identity)
+            report = _parse_feedback_report(payload, display_path)
+            if report["project"] != configured_project:
+                raise _feedback_error(
+                    display_path,
+                    "project must equal effective project.name",
+            )
+            report["source_path"] = display_path.as_posix()
+            report["size_bytes"] = size
+            reports.append(report)
+            total_bytes += size
+        return reports, total_bytes, directory_identity, file_identities, configured_project
+
+
+def cmd_feedback_collect(args: argparse.Namespace) -> None:
+    raw_projects = list(args.project or [])
+    if not raw_projects:
+        raise APError("feedback-collect requires at least one explicit --project")
+    roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for raw in raw_projects:
+        root = _feedback_project_root(raw)
+        key = str(root)
+        if key not in seen_roots:
+            seen_roots.add(key)
+            roots.append(root)
+    if len(roots) > _FEEDBACK_COLLECTION_MAX_PROJECTS:
+        raise APError(
+            f"Skill feedback collection exceeds {_FEEDBACK_COLLECTION_MAX_PROJECTS} projects"
+        )
+
+    reports: list[dict] = []
+    total_bytes = 0
+    source_projects: list[dict[str, str]] = []
+    seen_report_directories: set[tuple[int, int]] = set()
+    seen_report_files: set[tuple[int, int]] = set()
+    seen_configured_projects: set[str] = set()
+    for index, root in enumerate(roots, start=1):
+        source_id = f"project-{index}"
+        (
+            project_reports,
+            project_bytes,
+            directory_identity,
+            file_identities,
+            configured_project,
+        ) = _collect_project_feedback(root)
+        if directory_identity is not None:
+            if directory_identity in seen_report_directories:
+                raise APError("Explicit projects resolve to the same Skill feedback report directory")
+            seen_report_directories.add(directory_identity)
+        if seen_report_files.intersection(file_identities):
+            raise APError("Explicit projects contain the same physical Skill feedback report file")
+        seen_report_files.update(file_identities)
+        if configured_project is not None:
+            if configured_project in seen_configured_projects:
+                raise APError("Explicit projects must have distinct effective project.name values")
+            seen_configured_projects.add(configured_project)
+        source_descriptor = {"source_project": source_id}
+        if configured_project is not None:
+            source_descriptor["project"] = configured_project
+        source_projects.append(source_descriptor)
+        total_bytes += project_bytes
+        if total_bytes > _FEEDBACK_COLLECTION_MAX_BYTES:
+            raise APError(
+                f"Skill feedback collection exceeds {_FEEDBACK_COLLECTION_MAX_BYTES} bytes"
+            )
+        if len(reports) + len(project_reports) > _FEEDBACK_COLLECTION_MAX_REPORTS:
+            raise APError(
+                f"Skill feedback collection exceeds {_FEEDBACK_COLLECTION_MAX_REPORTS} reports"
+            )
+        for report in project_reports:
+            report["source_project"] = source_id
+        reports.extend(project_reports)
+
+    reports.sort(key=lambda item: (item["signature"], item["project"], item["report_id"], item["source_path"]))
+    grouped: dict[str, list[dict]] = {}
+    for report in reports:
+        grouped.setdefault(report["signature"], []).append(report)
+    groups: list[dict] = []
+    for signature, items in sorted(grouped.items()):
+        projects = sorted({item["project"] for item in items})
+        group_source_projects = sorted({item["source_project"] for item in items})
+        groups.append(
+            {
+                "signature": signature,
+                "report_count": len(items),
+                "project_count": len(group_source_projects),
+                "projects": projects,
+                "source_projects": group_source_projects,
+                "report_ids": [item["report_id"] for item in items],
+                "cross_project": len(group_source_projects) > 1,
+            }
+        )
+    cross_project = [group for group in groups if group["cross_project"]]
+    result = {
+        "schema": _FEEDBACK_COLLECTION_SCHEMA,
+        "projects": source_projects,
+        "report_count": len(reports),
+        "total_bytes": total_bytes,
+        "metadata": reports,
+        "groups": groups,
+        "cross_project": cross_project,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(
+        f"[feedback-collect] projects={len(roots)} reports={len(reports)} "
+        f"groups={len(groups)} cross_project={len(cross_project)} bytes={total_bytes}"
+    )
+    for group in groups:
+        print(
+            f"[feedback-collect] signature={group['signature']} "
+            f"cross_project={str(group['cross_project']).lower()} "
+            f"projects={','.join(group['projects'])} reports={','.join(group['report_ids'])}"
+        )
+
+
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _DIRECT_CLAIM_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _concurrency_cfg(cfg: dict) -> dict:
-    value = cfg.get("concurrency") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("concurrency")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("concurrency must be a mapping")
+    return value
 
 
 def _task_isolation(cfg: dict) -> str:
@@ -3948,6 +5908,7 @@ _DEFAULT_FULL_PATH_PATTERNS = [
     "compose*.yml",
     "compose*.yaml",
     "docs/ENGINEERING.md",
+    _PROJECT_CONFIG_RELATIVE.as_posix(),
     "docs/tools/autopipeline/**",
     "package.json",
     "**/package.json",
@@ -3967,18 +5928,30 @@ _DEFAULT_FULL_PATH_PATTERNS = [
 
 
 def _gate_cfg(cfg: dict) -> dict:
-    gate_cfg = cfg.get("gate") or {}
-    return gate_cfg if isinstance(gate_cfg, dict) else {}
+    gate_cfg = cfg.get("gate")
+    if gate_cfg is None:
+        return {}
+    if not isinstance(gate_cfg, dict):
+        raise APError("gate must be a mapping")
+    return gate_cfg
 
 
 def _risk_cfg(cfg: dict) -> dict:
-    value = cfg.get("risk") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("risk")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("risk must be a mapping")
+    return value
 
 
 def _validation_cfg(cfg: dict) -> dict:
-    value = cfg.get("validation") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("validation")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("validation must be a mapping")
+    return value
 
 
 def _positive_seconds(value: object, default: float, label: str) -> float:
@@ -4185,7 +6158,11 @@ def _cleanup_generated_noise(repo: Path, protected_paths: Optional[set[str]] = N
 
 
 def _docs_only(paths: list[str]) -> bool:
-    return bool(paths) and all(_path_matches(path, _DOC_PATH_PATTERNS) for path in paths)
+    return bool(paths) and all(
+        path not in _EFFECTIVE_CONFIG_PATHS
+        and _path_matches(path, _DOC_PATH_PATTERNS)
+        for path in paths
+    )
 
 
 def _tests_only(paths: list[str]) -> bool:
@@ -4199,13 +6176,46 @@ def _tests_only(paths: list[str]) -> bool:
 
 
 def _gate_rules(gate_cfg: dict) -> list[dict]:
-    rules = gate_cfg.get("rules") or []
-    return [rule for rule in rules if isinstance(rule, dict)]
+    rules = gate_cfg.get("rules", [])
+    if not isinstance(rules, list):
+        raise APError("gate.rules must be a list")
+    validated: list[dict] = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise APError(f"gate.rules[{index}] must be a mapping")
+        profile = _text(rule.get("profile")).lower()
+        if profile and profile not in _WORKFLOW_PROFILES - {"auto"}:
+            raise APError(
+                f"gate.rules[{index}].profile must be micro, standard, or high-risk"
+            )
+        if "scope" in rule:
+            raise APError(
+                f"gate.rules[{index}].scope is legacy automatic gate escalation; run autocoding init"
+            )
+        if "commands" in rule:
+            raise APError(
+                f"gate.rules[{index}].commands is legacy automatic gate escalation; run autocoding init"
+            )
+        validated.append(rule)
+    return validated
 
 
 def _risk_rules(cfg: dict) -> list[dict]:
-    rules = _risk_cfg(cfg).get("rules") or []
-    current = [rule for rule in rules if isinstance(rule, dict)]
+    rules = _risk_cfg(cfg).get("rules", [])
+    if not isinstance(rules, list):
+        raise APError("risk.rules must be a list")
+    current: list[dict] = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise APError(f"risk.rules[{index}] must be a mapping")
+        if not _as_list(rule.get("paths")):
+            raise APError(f"risk.rules[{index}].paths must not be empty")
+        profile = _text(rule.get("profile")).lower()
+        if profile and profile not in _WORKFLOW_PROFILES - {"auto"}:
+            raise APError(
+                f"risk.rules[{index}].profile must be micro, standard, or high-risk"
+            )
+        current.append(rule)
     # Keep reading 3.x gate.rules while projects migrate.  They remain planning
     # metadata only and never execute validation commands.
     return current or _gate_rules(_gate_cfg(cfg))
@@ -4230,8 +6240,19 @@ def _matching_risk_rules(paths: list[str], cfg: dict) -> list[dict]:
 
 
 def _validation_routes(cfg: dict) -> list[dict]:
-    routes = _validation_cfg(cfg).get("routes") or []
-    return [route for route in routes if isinstance(route, dict)]
+    routes = _validation_cfg(cfg).get("routes", [])
+    if not isinstance(routes, list):
+        raise APError("validation.routes must be a list")
+    validated: list[dict] = []
+    for index, route in enumerate(routes):
+        if not isinstance(route, dict):
+            raise APError(f"validation.routes[{index}] must be a mapping")
+        if not _as_list(route.get("paths")):
+            raise APError(f"validation.routes[{index}].paths must not be empty")
+        if not [_command_name(item) for item in _as_list(route.get("commands"))]:
+            raise APError(f"validation.routes[{index}].commands must not be empty")
+        validated.append(route)
+    return validated
 
 
 def _validation_route_matches(path: str, route: dict) -> bool:
@@ -4253,11 +6274,19 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
     command_names: list[str] = []
     command_timeouts: dict[str, float] = {}
     matched_routes: list[str] = []
+    builtins: list[str] = []
     coverage: dict[str, list[str]] = {}
     unmapped: list[str] = []
 
     for path in normalized:
         names: list[str] = []
+        if path in _EFFECTIVE_CONFIG_PATHS:
+            builtin_name = "effective-config"
+            names.append(builtin_name)
+            if builtin_name not in builtins:
+                builtins.append(builtin_name)
+            if builtin_name not in matched_routes:
+                matched_routes.append(builtin_name)
         for index, route in enumerate(routes):
             if not _validation_route_matches(path, route):
                 continue
@@ -4289,7 +6318,13 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
 
     validation_cfg = _validation_cfg(cfg)
     compatibility_command = ""
-    if not routes:
+    project_validation_paths = [
+        path
+        for path in normalized
+        if path not in _EFFECTIVE_CONFIG_PATHS
+        and not _path_matches(path, _DOC_PATH_PATTERNS)
+    ]
+    if not routes and project_validation_paths:
         compatibility_command = _command_name(validation_cfg.get("fallback_command"))
         if not compatibility_command and _configured_command(cfg, "gate_changed"):
             compatibility_command = "gate_changed"
@@ -4313,6 +6348,7 @@ def _validation_plan(cfg: dict, paths: list[str]) -> dict:
         "commands": command_names,
         "command_timeouts": command_timeouts,
         "matched_routes": matched_routes,
+        "builtins": builtins,
         "coverage": coverage,
         "unmapped": unmapped,
         "docs_only": _docs_only(normalized),
@@ -4328,9 +6364,9 @@ def _validate_validation_plan(cfg: dict, plan: dict) -> None:
         raise APError(
             "Changed code paths have no validation route:\n- "
             + "\n- ".join(plan["unmapped"])
-            + "\nAdd validation.routes entries in docs/ENGINEERING.md."
+            + "\nAdd validation.routes entries in docs/project/auto-coding-skill.yaml."
         )
-    if plan["paths"] and not plan["docs_only"] and not plan["commands"]:
+    if plan["paths"] and not plan["docs_only"] and not plan["commands"] and not plan["builtins"]:
         raise APError(
             "Changed code has no fast validation command. Add validation.routes with project-native commands."
         )
@@ -4448,6 +6484,14 @@ def _run_changed_gate(
     deadline: Optional[float] = None,
     command_timeout_s: Optional[float] = None,
 ) -> list[str]:
+    contract = cmd_doctor(
+        argparse.Namespace(repo=str(repo), collect=True, quiet=True, record=False)
+    )
+    if contract["issues"]:
+        raise APError(
+            "Effective project configuration contract is invalid:\n- "
+            + "\n- ".join(contract["issues"])
+        )
     plan = _validation_plan(cfg, paths)
     _validate_validation_plan(cfg, plan)
     if not paths:
@@ -4461,14 +6505,17 @@ def _run_changed_gate(
             "[validation] WARN: using 3.x compatibility fallback; migrate to validation.routes",
             file=sys.stderr,
         )
-    executed = _run_configured_command_list(
+    executed = list(plan["builtins"])
+    if plan["builtins"]:
+        print("[validation] effective project configuration contract is valid")
+    executed.extend(_run_configured_command_list(
         repo,
         cfg,
         plan["commands"],
         deadline=deadline,
         command_timeout_s=command_timeout_s,
         command_timeouts=plan["command_timeouts"],
-    )
+    ))
     print(
         "[validation] routes="
         + (", ".join(plan["matched_routes"]) or "(none)")
@@ -4495,6 +6542,7 @@ def cmd_validation_map_check(args: argparse.Namespace) -> None:
         "commands": plan["commands"],
         "command_timeouts": plan["command_timeouts"],
         "matched_routes": plan["matched_routes"],
+        "builtins": plan["builtins"],
         "coverage": plan["coverage"],
         "docs_only": plan["docs_only"],
     }
@@ -4711,18 +6759,30 @@ _DEFAULT_LAYER_RULES = {
 
 
 def _structure_cfg(cfg: dict) -> dict:
-    value = cfg.get("structure") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("structure")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("structure must be a mapping")
+    return value
 
 
 def _optimization_cfg(cfg: dict) -> dict:
-    value = cfg.get("optimization") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("optimization")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("optimization must be a mapping")
+    return value
 
 
 def _verification_cfg(cfg: dict) -> dict:
-    value = cfg.get("verification") or {}
-    return value if isinstance(value, dict) else {}
+    value = cfg.get("verification")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise APError("verification must be a mapping")
+    return value
 
 
 def _bool_config(value: object, default: bool = False) -> bool:
@@ -6582,14 +8642,24 @@ def _render_optimization_backlog(inventory: dict) -> str:
 def _update_accepted_debt_paths(repo: Path, cfg: dict, paths: list[str]) -> list[str]:
     if not paths:
         return []
-    engineering = find_config(repo)
-    current_cfg, body = _read_frontmatter_markdown(engineering)
-    structure_cfg = current_cfg.setdefault("structure", {})
-    existing = [str(item) for item in _as_list(structure_cfg.get("accepted_debt_paths")) if str(item).strip()]
+    overrides = json.loads(json.dumps(load_project_overrides(repo)))
+    effective_structure = _mapping(cfg.get("structure"))
+    existing = [
+        str(item)
+        for item in _as_list(effective_structure.get("accepted_debt_paths"))
+        if str(item).strip()
+    ]
     added = [path for path in paths if path not in existing]
     if added:
+        structure_cfg = overrides.setdefault("structure", {})
+        if not isinstance(structure_cfg, dict):
+            raise APError("Project structure override must be a mapping")
         structure_cfg["accepted_debt_paths"] = existing + added
-        _write_frontmatter_markdown(engineering, current_cfg, body)
+        overlay_payload = _render_project_overlay(overrides)
+        if _safe_read_project_file(repo, _PROJECT_CONFIG_RELATIVE) is None:
+            _safe_create_project_file(repo, _PROJECT_CONFIG_RELATIVE, overlay_payload)
+        else:
+            _safe_write_project_file(repo, _PROJECT_CONFIG_RELATIVE, overlay_payload)
     return added
 
 
@@ -6624,7 +8694,7 @@ def cmd_baseline_init(args: argparse.Namespace) -> None:
         accepted_added = _update_accepted_debt_paths(repo, cfg, accepted_paths)
         if accepted_added:
             actions.append({
-                "path": "docs/ENGINEERING.md",
+                "path": _PROJECT_CONFIG_RELATIVE.as_posix(),
                 "action": "merge",
                 "kind": "accepted_debt_paths",
                 "detail": ", ".join(accepted_added),
@@ -8627,7 +10697,7 @@ def cmd_agent_result_template(args: argparse.Namespace) -> None:
 def cmd_run(args: argparse.Namespace) -> None:
     """
     Run any configured gate command by name.
-    Commands are read from docs/ENGINEERING.md frontmatter.
+    Commands are read from the effective managed-default plus project-overlay configuration.
     """
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
@@ -8636,12 +10706,12 @@ def cmd_run(args: argparse.Namespace) -> None:
     if name not in commands:
         raise APError(
             f"Command not configured: commands.{name}. "
-            "Edit docs/ENGINEERING.md frontmatter. "
+            "Edit docs/project/auto-coding-skill.yaml. "
             f"Available: {', '.join(commands.keys()) or '(none)'}"
         )
     cmd = str(commands.get(name) or "").strip()
     if not cmd:
-        raise APError(f"Command is blank: commands.{name}. Edit docs/ENGINEERING.md frontmatter.")
+        raise APError(f"Command is blank: commands.{name}. Edit docs/project/auto-coding-skill.yaml.")
     print(f"[run] {name}: {cmd}")
     run_shell(cmd, cwd=repo)
     print(f"[run] OK: {name}")
@@ -8961,9 +11031,12 @@ def cmd_verify_jenkins(args: argparse.Namespace) -> None:
     print(f"[verify-jenkins] OK: {jenkinsfile}")
 
 
-def cmd_doctor(args: argparse.Namespace) -> None:
+def cmd_doctor(args: argparse.Namespace) -> dict | None:
     repo = Path(args.repo).resolve()
     cfg = _load_cfg(repo)
+    collect = bool(getattr(args, "collect", False))
+    quiet = bool(getattr(args, "quiet", False))
+    record = bool(getattr(args, "record", True))
     workflow_cfg = (cfg.get("workflow") or {})
     project_cfg = (cfg.get("project") or {})
     docs_cfg = (cfg.get("docs") or {})
@@ -8976,9 +11049,18 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     advisories: List[str] = []
     validation_errors.extend(_workflow_policy_issues(repo, cfg))
 
-    mode = str(workflow_cfg.get("mode") or "dev").strip().lower()
-    profile = str(workflow_cfg.get("profile") or "auto").strip().lower()
-    completion = str(workflow_cfg.get("completion") or "").strip().lower()
+    raw_mode = workflow_cfg.get("mode", "dev")
+    raw_profile = workflow_cfg.get("profile", "auto")
+    raw_completion = workflow_cfg.get("completion", "")
+    if not isinstance(raw_mode, str):
+        validation_errors.append("workflow.mode must be a string")
+    if not isinstance(raw_profile, str):
+        validation_errors.append("workflow.profile must be a string")
+    if not isinstance(raw_completion, str):
+        validation_errors.append("workflow.completion must be a string")
+    mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+    profile = raw_profile.strip().lower() if isinstance(raw_profile, str) else ""
+    completion = raw_completion.strip().lower() if isinstance(raw_completion, str) else ""
     skill_version = _text(workflow_cfg.get("skill_version"))
     if mode != "dev":
         missing.append("workflow.mode (must be dev; external verification is owner-managed)")
@@ -8988,24 +11070,42 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         missing.append("workflow.completion (must be push)")
     if skill_version.startswith("4.1") and _text(docs_cfg.get("framework")) != "engineering-centered":
         missing.append("docs.framework (must be engineering-centered for auto-coding-skill 4.1)")
-    isolation = _text(concurrency_cfg.get("isolation")).lower() or "adaptive"
-    if isolation not in {"adaptive", "worktree"}:
+    raw_isolation = concurrency_cfg.get("isolation", "adaptive")
+    if not isinstance(raw_isolation, str):
+        validation_errors.append("concurrency.isolation must be a string")
+        isolation = ""
+    else:
+        isolation = raw_isolation.strip().lower() or "adaptive"
+    if isolation and isolation not in {"adaptive", "worktree"}:
         validation_errors.append(
             "concurrency.isolation must be adaptive or worktree; legacy shared-checkout mode is unsupported"
         )
-    branch_prefix = _text(concurrency_cfg.get("branch_prefix")) or "codex/"
-    if not branch_prefix.endswith("/"):
+    raw_branch_prefix = concurrency_cfg.get("branch_prefix", "codex/")
+    if not isinstance(raw_branch_prefix, str):
+        validation_errors.append("concurrency.branch_prefix must be a string")
+        branch_prefix = ""
+    else:
+        branch_prefix = raw_branch_prefix.strip() or "codex/"
+    if branch_prefix and not branch_prefix.endswith("/"):
         validation_errors.append("concurrency.branch_prefix must end with '/'")
-    elif run(
+    elif branch_prefix and run(
         ["git", "check-ref-format", "--branch", f"{branch_prefix}TASK"],
         cwd=repo,
         check=False,
     ).returncode != 0:
         validation_errors.append("concurrency.branch_prefix does not form a valid Git branch")
-    if not str(project_cfg.get("name") or "").strip():
+    raw_project_name = project_cfg.get("name")
+    if raw_project_name is not None and not isinstance(raw_project_name, str):
+        validation_errors.append("project.name must be a string")
+    if not isinstance(raw_project_name, str) or not raw_project_name.strip():
         missing.append("project.name")
     missing.extend(_access_config_issues(cfg))
-    enforcement = _text(structure_cfg.get("enforcement")).lower()
+    raw_enforcement = structure_cfg.get("enforcement")
+    if raw_enforcement is not None and not isinstance(raw_enforcement, str):
+        validation_errors.append("structure.enforcement must be a string")
+        enforcement = ""
+    else:
+        enforcement = raw_enforcement.strip().lower() if isinstance(raw_enforcement, str) else ""
     if enforcement and enforcement not in {"advisory", "blocking"}:
         validation_errors.append("structure.enforcement must be advisory or blocking")
     raw_block_warnings = structure_cfg.get("block_warnings")
@@ -9017,7 +11117,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         )
     gate_cfg = _gate_cfg(cfg)
     if "full_on" in gate_cfg:
-        validation_errors.append("gate.full_on is legacy automatic full escalation; run ap.py upgrade")
+        validation_errors.append("gate.full_on is legacy automatic full escalation; run autocoding init")
     raw_rules = gate_cfg.get("rules") or []
     rules_valid = isinstance(raw_rules, list)
     if not rules_valid:
@@ -9038,12 +11138,12 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if "scope" in rule:
             rules_valid = False
             validation_errors.append(
-                f"gate.rules[{index}].scope is legacy automatic gate escalation; run ap.py upgrade"
+                f"gate.rules[{index}].scope is legacy automatic gate escalation; run autocoding init"
             )
         if "commands" in rule:
             rules_valid = False
             validation_errors.append(
-                f"gate.rules[{index}].commands is legacy automatic gate escalation; run ap.py upgrade"
+                f"gate.rules[{index}].commands is legacy automatic gate escalation; run autocoding init"
             )
 
     risk_rules = _risk_cfg(cfg).get("rules") or []
@@ -9063,8 +11163,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             )
 
     validation_cfg = _validation_cfg(cfg)
-    on_unmapped = _text(validation_cfg.get("on_unmapped")).lower() or "error"
-    if on_unmapped not in {"error", "fallback"}:
+    raw_on_unmapped = validation_cfg.get("on_unmapped", "error")
+    if not isinstance(raw_on_unmapped, str):
+        validation_errors.append("validation.on_unmapped must be a string")
+        on_unmapped = ""
+    else:
+        on_unmapped = raw_on_unmapped.strip().lower() or "error"
+    if on_unmapped and on_unmapped not in {"error", "fallback"}:
         validation_errors.append("validation.on_unmapped must be error or fallback")
     try:
         final_budget = _final_gate_budget(cfg)
@@ -9188,19 +11293,27 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     missing.extend(validation_errors)
 
     if missing:
-        _record_evidence(repo, cfg, "doctor", "fail", {"issues": missing})
+        if record:
+            _record_evidence(repo, cfg, "doctor", "fail", {"issues": missing})
+        if collect:
+            return {"issues": missing, "advisories": advisories}
         raise APError("Doctor found blocking config issues:\n- " + "\n- ".join(missing))
 
-    _record_evidence(
-        repo,
-        cfg,
-        "doctor",
-        "pass",
-        {"mode": mode, "completion": completion, "access_fields": len(_REQUIRED_ACCESS_FIELDS)},
-    )
-    for advisory in advisories:
-        print(f"[doctor] WARN: {advisory}")
-    print("[doctor] OK")
+    if record:
+        _record_evidence(
+            repo,
+            cfg,
+            "doctor",
+            "pass",
+            {"mode": mode, "completion": completion, "access_fields": len(_REQUIRED_ACCESS_FIELDS)},
+        )
+    if collect:
+        return {"issues": [], "advisories": advisories}
+    if not quiet:
+        for advisory in advisories:
+            print(f"[doctor] WARN: {advisory}")
+        print("[doctor] OK")
+    return None
 
 
 def cmd_verify_jenkins_build(args: argparse.Namespace) -> None:
@@ -10456,6 +12569,9 @@ def cmd_task_start(args: argparse.Namespace) -> None:
         or getattr(args, "force_lifecycle", False)
         or continue_direct
     )
+    # Validate legacy workflow policy before planning reads gate/risk rules so
+    # task-start reports the complete migration set and remains zero-write.
+    _require_workflow_policy_clean(repo, cfg)
     preflight_plan = _resolve_execution_plan(
         cfg,
         repo,
@@ -10478,12 +12594,11 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "only when classify requires isolation/review or the user explicitly requests it."
         )
 
-    _require_workflow_policy_clean(repo, cfg)
     configured_isolation = _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
         raise APError(
-            "Project initialization is incomplete; fill docs/ENGINEERING.md before starting work:\n- "
+            "Project initialization is incomplete; fill docs/project/auto-coding-skill.yaml before starting work:\n- "
             + "\n- ".join(access_issues)
         )
     remote, target_branch, base_ref = _task_remote_and_target(cfg, args)
@@ -13746,6 +15861,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_scaffold)
 
+    s = sp.add_parser("managed-scaffold-converge", help=argparse.SUPPRESS)
+    s.add_argument("group", choices=scaffold_groups())
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_managed_scaffold_converge)
+
     s = sp.add_parser("upgrade")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--write", action="store_true")
@@ -13756,6 +15877,49 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--write", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_project_converge)
+
+    s = sp.add_parser("project-config-prepare", help=argparse.SUPPRESS)
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_project_config_prepare)
+
+    s = sp.add_parser("project-config-finalize", help=argparse.SUPPRESS)
+    s.add_argument("--write", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--engineering-sha256", required=True)
+    s.add_argument("--overlay-sha256", required=True)
+    s.add_argument("--template-sha256", required=True)
+    s.set_defaults(func=cmd_project_config_finalize)
+
+    s = sp.add_parser("project-file-safe", help=argparse.SUPPRESS)
+    s.add_argument("operation", choices=["write", "create", "chmod", "chmod-batch"])
+    s.add_argument("--path", default="")
+    s.add_argument("--mode", default="")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_project_file_safe)
+
+    s = sp.add_parser("install-io", help=argparse.SUPPRESS)
+    s.add_argument("operation", choices=["switch", "recover", "complete"])
+    s.add_argument("--old-skill-present", action="store_true")
+    s.add_argument("--old-manifest-present", action="store_true")
+    s.add_argument("--old-engineering-present", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_install_io)
+
+    s = sp.add_parser(
+        "config-effective",
+        help="Show a redacted summary of managed defaults plus project overrides",
+    )
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_config_effective)
+
+    s = sp.add_parser(
+        "feedback-collect",
+        help="Read bounded metadata-only Skill feedback reports from explicit projects",
+    )
+    s.add_argument("--project", action="append", required=True)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_feedback_collect)
 
     s = sp.add_parser("baseline")
     baseline_sp = s.add_subparsers(dest="baseline_cmd", required=True)
@@ -14060,6 +16224,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         args = p.parse_args(argv)
+        repo = Path(args.repo).resolve()
+        tokenized_write = (
+            args.cmd == "project-file-safe"
+            or (
+                args.cmd in {
+                    "managed-scaffold-converge",
+                    "project-config-finalize",
+                    "project-converge",
+                }
+                and bool(getattr(args, "write", False))
+            )
+        )
+        if args.cmd == "install-io":
+            pass
+        elif tokenized_write:
+            _require_active_install_transaction(repo)
+        elif args.cmd != "config-effective":
+            _require_no_install_transaction(repo)
         args.func(args)
         return 0
     except APError as e:

@@ -7,9 +7,9 @@ description: Optional delivery-first engineering workflow for repository changes
 
 ## Use the two authorities
 
-Read root `AGENTS.md` for the shared behavioral protocol,
-`docs/ENGINEERING.md` for access/risk/validation configuration, and
-`docs/project/` for durable project facts.
+Read root `AGENTS.md` for the shared behavioral protocol, the effective
+configuration formed from managed `docs/ENGINEERING.md` defaults plus
+`docs/project/auto-coding-skill.yaml`, and `docs/project/` for durable facts.
 Do not reconstruct or duplicate those rules from historical task documents.
 
 Normal delivery is:
@@ -94,7 +94,7 @@ python3 docs/tools/autopipeline/ap.py doctor
 ```
 
 Finish registered tasks before changing versions. `autocoding init` idempotently
-replaces managed constraints, preserves schema-supported values, installs canonical
-docs/templates, archives obsolete content outside active `docs/`, and preserves
-designated artifacts. It verifies the managed-install manifest; `doctor` cheaply
-rechecks declared paths without treating project-owned files or archives as a mirror.
+replaces managed defaults and constraints while preserving the project overlay
+byte-for-byte after its one-time semantic migration. It installs canonical docs,
+archives obsolete content outside active `docs/`, verifies the managed-install
+manifest, and lets `doctor` validate the effective configuration.

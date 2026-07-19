@@ -1,8 +1,8 @@
-<!-- auto-coding-skill:managed-agents:start version=4.2.8 -->
+<!-- auto-coding-skill:managed-agents:start version=4.3.0 -->
 # Shared Engineering Protocol
 
-This file is fully managed by `auto-coding-skill`. Keep project-specific facts,
-access values, risk rules, and validation routes in `docs/ENGINEERING.md`.
+This file is fully managed by `auto-coding-skill`. Keep project-specific facts in
+`docs/project/` and configuration in `docs/project/auto-coding-skill.yaml`.
 
 ## Authority
 
@@ -11,8 +11,8 @@ Use this order when sources disagree:
 1. The current user request.
 2. Code, tests, schemas, migrations, and runtime configuration for behavior that
    exists now.
-3. `docs/ENGINEERING.md` for workflow configuration and access values, then the
-   managed `docs/project/` files for durable project facts.
+3. The effective configuration formed from managed `docs/ENGINEERING.md` defaults
+   plus the project overlay, then `docs/project/` for durable project facts.
 4. Current interface documentation for intended contracts.
 5. Accepted DD/ADR for lasting decisions.
 6. Taskbooks, closures, reviews, and deployment records as history only.
@@ -124,9 +124,9 @@ failure may continue in the same conversation/task without a second lifecycle.
 ## Documentation and access
 
 - This AGENTS file is the single behavioral protocol. The installed `SKILL.md`
-  contains invocation guidance. `docs/ENGINEERING.md` is the exact project
-  configuration source; `docs/project/` owns durable facts. Do not repeat the
-  protocol elsewhere.
+  contains invocation guidance. `docs/ENGINEERING.md` is managed default policy;
+  `docs/project/auto-coding-skill.yaml` is the higher-priority project overlay,
+  and the remaining `docs/project/` files own durable facts.
 - `autocoding init` owns the active `docs/` directory topology and managed
   templates. Put durable facts into the installed project files. Architecture,
   ADR, interface, DD, review, and deploy-record artifacts may use their designated
@@ -136,6 +136,10 @@ failure may continue in the same conversation/task without a second lifecycle.
 - Ordinary work creates no taskbook, closure Markdown, evidence JSONL, active-task
   document, or design file. Machine coordination/evidence stays in Git
   common/local state and cannot change the reviewed diff.
+- After diagnosing the project/Skill boundary, record a probable shared-Skill
+  defect or gap from `docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md`; keep
+  project-only configuration out, redact sensitive/raw evidence, and never mutate
+  a frozen Reviewer diff merely to add feedback.
 - Pure ledger/archive reconciliation is terminal: validate, commit once, and stop.
 - Fill configured project/Jenkins/GitLab/Nexus access fields during initialization.
   Plaintext values are allowed; do not invent or unnecessarily echo credentials.

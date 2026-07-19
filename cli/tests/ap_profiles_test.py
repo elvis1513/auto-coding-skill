@@ -1610,21 +1610,27 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertEqual("high-risk", plan["profile"])
         self.assertIn("matched gate rule with profile=high-risk", plan["profile_reasons"])
 
-    def test_full_scope_rule_does_not_expand_local_gate(self) -> None:
+    def test_legacy_full_scope_rule_fails_closed_during_planning(self) -> None:
         cfg = base_config()
         cfg["gate"]["rules"] = [{"name": "sensitive", "paths": ["src/sensitive/**"], "scope": "full"}]
         repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
-        plan = self.plan(repo, cfg, requested_scope="changed", requested_profile="micro", requested_mode="dev")
-        self.assertEqual("micro", plan["profile"])
-        self.assertEqual("changed", plan["selected_scope"])
-        self.assertEqual("dev", plan["effective_mode"])
+        with self.assertRaisesRegex(APError, "legacy automatic gate escalation"):
+            self.plan(
+                repo,
+                cfg,
+                requested_scope="changed",
+                requested_profile="micro",
+                requested_mode="dev",
+            )
 
-    def test_legacy_rule_commands_never_run_in_automatic_gate(self) -> None:
+    def test_legacy_rule_commands_fail_closed_and_never_run(self) -> None:
         cfg = base_config()
         repo, cfg = self.make_repo("src/sensitive/value.py", cfg)
-        quick_marker = repo.parent / "quick-ran"
-        full_marker = repo.parent / "full-ran"
-        build_marker = repo.parent / "build-ran"
+        marker_dir = repo / ".test-markers"
+        marker_dir.mkdir()
+        quick_marker = marker_dir / "quick-ran"
+        full_marker = marker_dir / "full-ran"
+        build_marker = marker_dir / "build-ran"
         cfg["commands"] = {
             "gate_changed": f"touch {quick_marker}",
             "gate_full": f"touch {full_marker}",
@@ -1640,18 +1646,20 @@ class AutoCodingProfileTests(unittest.TestCase):
         ]
         self.write_config(repo, cfg)
 
-        ap.cmd_light_gate(
-            argparse.Namespace(
-                repo=str(repo),
-                scope="changed",
-                profile="",
-                mode="dev",
-                base="",
-                explain=False,
+        with self.assertRaises(APError) as context:
+            ap.cmd_light_gate(
+                argparse.Namespace(
+                    repo=str(repo),
+                    scope="changed",
+                    profile="",
+                    mode="dev",
+                    base="",
+                    explain=False,
+                )
             )
-        )
 
-        self.assertTrue(quick_marker.exists())
+        self.assertIn("legacy automatic gate escalation", str(context.exception))
+        self.assertFalse(quick_marker.exists())
         self.assertFalse(full_marker.exists())
         self.assertFalse(build_marker.exists())
 
@@ -2667,7 +2675,35 @@ class AutoCodingProfileTests(unittest.TestCase):
             ap.cmd_doctor(argparse.Namespace(repo=str(repo)))
         self.assertIn("gate.rules[0].scope", str(context.exception))
 
-    def test_upgrade_migrates_legacy_yaml_and_known_policy_fragments(self) -> None:
+    def test_project_overlay_render_rejects_its_own_oversized_output(self) -> None:
+        with self.assertRaisesRegex(APError, "exceeds its size limit"):
+            ap._render_project_overlay({"project": {"oversized": "x" * 200_000}})
+
+    def test_project_config_prepare_never_replaces_a_concurrent_overlay(self) -> None:
+        repo, _ = self.make_repo()
+        overlay = repo / "docs" / "project" / "auto-coding-skill.yaml"
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        concurrent = ap._render_project_overlay({"project": {"name": "concurrent-owner"}})
+        planned = ap._render_project_overlay({"project": {"name": "planned-owner"}})
+        overlay.write_bytes(concurrent)
+        engineering_before = (repo / "docs" / "ENGINEERING.md").read_bytes()
+        convergence = {
+            "engineering_current": "",
+            "engineering_output": engineering_before.decode("utf-8"),
+            "overlay_current": None,
+            "overlay_output": planned,
+            "migrated_paths": ["project.name"],
+        }
+        args = argparse.Namespace(repo=str(repo), write=True, json=False)
+
+        with mock.patch.object(ap, "_project_config_convergence_plan", return_value=convergence):
+            with self.assertRaisesRegex(APError, "create-only publish"):
+                ap.cmd_project_config_prepare(args)
+
+        self.assertEqual(concurrent, overlay.read_bytes())
+        self.assertEqual(engineering_before, (repo / "docs" / "ENGINEERING.md").read_bytes())
+
+    def test_upgrade_write_is_retired_before_any_migration(self) -> None:
         cfg = base_config()
         cfg["gate"]["full_on"] = {"paths": ["src/**"]}
         cfg["gate"]["rules"] = [
@@ -2695,17 +2731,15 @@ class AutoCodingProfileTests(unittest.TestCase):
                 }
             ]
         )
+        before = engineering.read_bytes()
         args = argparse.Namespace(repo=str(repo), write=True, dry_run=False, json=False)
         with mock.patch.object(ap, "_load_workflow_migration_policy", return_value=policy):
-            ap.cmd_upgrade(args)
+            with self.assertRaises(APError) as context:
+                ap.cmd_upgrade(args)
 
-        migrated, body = ap._read_frontmatter_markdown(engineering)
-        self.assertNotIn("full_on", migrated["gate"])
-        self.assertEqual([], migrated["gate"]["rules"])
-        self.assertEqual("high-risk", migrated["risk"]["rules"][0]["profile"])
-        self.assertEqual(["gate_full"], migrated["validation"]["routes"][-1]["commands"])
-        self.assertEqual("true", migrated["commands"]["gate_full"])
-        self.assertNotIn("must run the full gate", body)
+        self.assertIn("transactional installer", str(context.exception))
+        self.assertEqual(before, engineering.read_bytes())
+        self.assertFalse((repo / ".agents").exists())
 
     def test_upgrade_unknown_policy_conflict_fails_before_any_write(self) -> None:
         repo, _ = self.make_repo()
@@ -2716,14 +2750,19 @@ class AutoCodingProfileTests(unittest.TestCase):
             encoding="utf-8",
         )
         before = engineering.read_text(encoding="utf-8")
-        args = argparse.Namespace(repo=str(repo), write=True, dry_run=False, json=False)
+        args = argparse.Namespace(repo=str(repo), write=False, dry_run=True, json=False)
         with mock.patch.object(
             ap,
-            "_load_workflow_migration_policy",
-            return_value=self.workflow_policy(),
+            "_project_config_convergence_plan",
+            return_value={},
         ):
-            with self.assertRaises(APError) as context:
-                ap.cmd_upgrade(args)
+            with mock.patch.object(
+                ap,
+                "_load_workflow_migration_policy",
+                return_value=self.workflow_policy(),
+            ):
+                with self.assertRaises(APError) as context:
+                    ap.cmd_upgrade(args)
         self.assertIn("docs/ENGINEERING.md", str(context.exception))
         self.assertEqual(before, engineering.read_text(encoding="utf-8"))
         self.assertFalse((repo / ".agents").exists())

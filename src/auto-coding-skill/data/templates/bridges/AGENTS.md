@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.3.3 -->
+<!-- auto-coding-skill:managed-agents:start version=4.3.4 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts in
@@ -90,6 +90,12 @@ failure may continue in the same conversation/task without a second lifecycle.
 - `agent-result-template` supplies all 16 fields and `review-run` normalizes presentation.
 - Runtime exhaustion needs explicit `review-runtime-override` authorization; it records
   `runtime-bypassed`, never approval, and cannot replace a substantive blocked result.
+- `review-runtime-retry` is a narrow migration only for active 4.2.8-4.3.2 tasks
+  consumed solely by the fixed Git-local artifact permission defect. It requires
+  the lifecycle owner, unchanged fingerprint, original Reviewer, a strictly newer
+  managed runtime, and the fixed reason code; it preserves all old evidence and
+  permits one audited attempt. Never use it for timeouts, findings, changed scope,
+  user overrides, or general Reviewer failures.
 - Block only new or worsened in-scope P0/P1 defects. Adjacent debt is a follow-up;
   semantic changes invalidate approval, while mechanical docs may get a targeted recheck.
 

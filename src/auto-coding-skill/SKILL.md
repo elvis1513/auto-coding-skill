@@ -58,6 +58,13 @@ The Reviewer reads it with `review-artifact --file <assignment.json>`, never a r
 
 After exhausted startup attempts or an analysis deadline, explicit user authorization may record a one-fingerprint `review-runtime-override` with identity, reference, reason, evidence, and `--confirm-runtime-bypass`.
 It records `runtime-bypassed`, never `approved`, and cannot replace a substantive `blocked` or `changes-requested` result.
+An active task created by 4.2.8-4.3.2 may instead use `review-runtime-retry` only
+when its sole completed blocked result is the fixed Git-local `review-artifact`
+permission defect with no findings. The lifecycle owner must supply the unchanged
+fingerprint and fixed reason code from a strictly newer managed runtime; the
+original Reviewer identity then runs once against a create-only audit and fresh
+fixed deadline. This migration never renews an ordinary timeout or substantive
+review result.
 
 ## Close with the bounded routed gate
 

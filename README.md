@@ -9,7 +9,9 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.3.3 resolves the first multi-project feedback batch: read-only
+Version 4.3.4 adds one fail-closed, immutable-evidence retry for tasks whose
+4.2.8-4.3.2 Reviewer was consumed solely by the fixed Git-local artifact access
+defect. Version 4.3.3 resolves the first multi-project feedback batch: read-only
 Reviewer artifact access is mutation-free, substantive nonzero-exit results are
 preserved, lifecycle identities fail early, managed protocol classification and
 database migration signals are precise, and empty feedback status reports the
@@ -380,6 +382,25 @@ Finish every registered task using its currently installed runtime before changi
 the Skill version. Then run `autocoding init` from each project root. It is safe to
 rerun and needs no force flag.
 
+The only migration exception is an active 4.2.8-4.3.2 task whose completed
+Reviewer result contains no findings and is blocked solely by the fixed
+`review-artifact` Git-local permission error. Run the managed 4.3.4 runtime from
+outside the project install to authorize one audited retry, then immediately run
+the original Reviewer identity:
+
+```bash
+python3 /absolute/managed/4.3.4/ap.py --repo /path/project \
+  review-runtime-retry T0001 --diff-fingerprint <SHA256> \
+  --reason-code managed-review-artifact-access \
+  --confirm-managed-runtime-retry
+python3 /absolute/managed/4.3.4/ap.py --repo /path/project \
+  review-run T0001 --reviewer <ORIGINAL_REVIEWER> --json
+```
+
+The command preserves the original assignment, patch, result, receipt, and event
+log byte-for-byte. It refuses substantive findings, changed scope or fingerprint,
+tampered evidence, user overrides, duplicate retries, and unmanaged runtimes.
+
 ```bash
 cd /path/a && autocoding init
 cd /path/b && autocoding init
@@ -391,6 +412,21 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.4
+
+- Added `review-runtime-retry`, a one-attempt migration for the exact
+  4.2.8-4.3.2 read-only `review-artifact` permission defect. Eligibility is bound
+  to the lifecycle owner, original Reviewer, task UUID, base/HEAD/scope,
+  fingerprint, canonical non-substantive blocked result, and a strictly newer
+  managed runtime.
+- Kept the original assignment, frozen patch, result, runtime receipt, and event
+  log immutable. The retry writes a mode-0600 create-only audit plus tokenized
+  result/run/events files and carries its own fixed 150/360-second deadline.
+- Made `review-run`, `review-artifact`, `task-review`, approval validation, and
+  task status validate the retry audit and effective deadline. Artifact access
+  receives the extension only through the supervised runtime environment and
+  the exact absolute managed script that authorized it.
 
 ## What changed in 4.3.3
 

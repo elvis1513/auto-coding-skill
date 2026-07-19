@@ -97,10 +97,22 @@ _REVIEW_RUNTIME_FIELDS = (
     "runtime_override_path",
     "runtime_override_sha256",
 )
+_REVIEW_RETRY_FIELDS = (
+    "runtime_retry_token",
+    "runtime_retry_version",
+    "runtime_retry_reason_code",
+    "runtime_retry_audit_path",
+    "runtime_retry_audit_sha256",
+)
+_REVIEW_RUNTIME_RETRY_REASON = "managed-review-artifact-access"
+_REVIEW_RUNTIME_RETRY_AFFECTED_MIN = (4, 2, 8)
+_REVIEW_RUNTIME_RETRY_AFFECTED_MAX = (4, 3, 2)
+_REVIEW_RUNTIME_RETRY_FIXED_IN = (4, 3, 4)
 _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
 _REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _REVIEW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REVIEW_ATTEMPT_TOKEN_RE = re.compile(r"^retry-v[0-9]+\.[0-9]+\.[0-9]+$")
 _FEEDBACK_SCHEMAS = {
     "auto-coding-skill-feedback/v1",
     "auto-coding-skill-feedback/v2",
@@ -287,7 +299,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.3", "engineering": "4.3.3"},
+    "managed_versions": {"agents": "4.3.4", "engineering": "4.3.4"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -5811,6 +5823,8 @@ def _validate_review_runtime_override(repo: Path, manifest: dict, fingerprint: s
         repo,
         _text(manifest.get("task_id")),
         fingerprint,
+        _review_attempt_token(review),
+        create=False,
     )
     del expected_result_path
     if receipt_path != expected_receipt_path.resolve():
@@ -5875,6 +5889,15 @@ def _require_approved_review(repo: Path, cfg: dict, manifest: dict) -> str:
     _validate_review_diff_artifact(repo, assignment)
     if verdict == "runtime-bypassed":
         _validate_review_runtime_override(repo, manifest, fingerprint)
+    elif _review_attempt_token(review):
+        receipt_path = Path(_text(review.get("runtime_receipt_path"))).resolve()
+        _validate_bound_review_runtime_receipt(
+            repo,
+            manifest,
+            assignment,
+            receipt_path,
+            "completed",
+        )
     return fingerprint
 
 
@@ -13242,12 +13265,27 @@ def _task_status_payload(repo: Path, manifest: dict) -> dict:
     )
     review = manifest.get("review") or {}
     deadline_at = _text(review.get("deadline_at"))
+    effective_deadline_at = deadline_at
     review_seconds_remaining: Optional[int] = None
     review_deadline_expired = False
+    if _review_attempt_token(review):
+        try:
+            assignment = _load_bound_review_assignment(
+                repo,
+                manifest,
+                Path(_text(review.get("assignment_path"))).resolve(),
+            )
+            effective_deadline_at = _effective_review_deadline(
+                repo,
+                manifest,
+                assignment,
+            ).isoformat()
+        except APError:
+            effective_deadline_at = ""
     if deadline_at:
         try:
             remaining = (
-                _parse_iso_timestamp(deadline_at, "deadline_at")
+                _parse_iso_timestamp(effective_deadline_at, "effective_deadline_at")
                 - _dt.datetime.now(_dt.timezone.utc)
             ).total_seconds()
             seconds = int(remaining)
@@ -13264,6 +13302,7 @@ def _task_status_payload(repo: Path, manifest: dict) -> dict:
         "tip": tip,
         "has_task_commits": has_task_commits,
         "merged_into_target": merged,
+        "review_effective_deadline_at": effective_deadline_at,
         "review_deadline_expired": review_deadline_expired,
         "review_seconds_remaining": review_seconds_remaining,
         "current_diff_fingerprint": _task_review_fingerprint(worktree, manifest)
@@ -13495,10 +13534,30 @@ def _parse_iso_timestamp(value: object, field: str) -> _dt.datetime:
     return parsed.astimezone(_dt.timezone.utc)
 
 
-def _review_assignment_path(control_repo: Path, task_id: str, fingerprint: str) -> Path:
+def _review_attempt_token(review: object) -> str:
+    payload = review if isinstance(review, dict) else {}
+    token = _text(payload.get("runtime_retry_token"))
+    if token and not _REVIEW_ATTEMPT_TOKEN_RE.fullmatch(token):
+        raise APError("Reviewer runtime retry token is invalid.")
+    return token
+
+
+def _review_attempt_stem(fingerprint: str, attempt_token: str = "") -> str:
     if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
         raise APError("Review fingerprint must be a lowercase SHA-256 value.")
-    return _task_review_dir(control_repo, task_id) / f"{fingerprint}.assignment.json"
+    token = _text(attempt_token)
+    if token and not _REVIEW_ATTEMPT_TOKEN_RE.fullmatch(token):
+        raise APError("Reviewer runtime retry token is invalid.")
+    return f"{fingerprint}.{token}" if token else fingerprint
+
+
+def _review_assignment_path(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+) -> Path:
+    stem = _review_attempt_stem(fingerprint)
+    return _task_review_dir(control_repo, task_id) / f"{stem}.assignment.json"
 
 
 def _review_diff_artifact_path(control_repo: Path, task_id: str, fingerprint: str) -> Path:
@@ -13811,8 +13870,16 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             "scope_revision": int(manifest.get("scope_revision") or 1),
         }
         _validate_orchestration_contract("assignment", assignment)
-        assignment_path = _review_assignment_path(control_repo, task_id, fingerprint)
         prior_review = manifest.get("review") or {}
+        assignment_path = _review_assignment_path(control_repo, task_id, fingerprint)
+        if (
+            _text(prior_review.get("diff_fingerprint")) == fingerprint
+            and _review_attempt_token(prior_review)
+        ):
+            raise APError(
+                "A bounded Reviewer runtime retry is already authorized; run review-run with "
+                "the original Reviewer identity."
+            )
         if (
             _text(prior_review.get("diff_fingerprint")) == fingerprint
             and (
@@ -13962,7 +14029,7 @@ def cmd_review_assignment(args: argparse.Namespace) -> None:
             "deadline_at": assignment["deadline_at"],
         }
         if _text(prior_review.get("diff_fingerprint")) == fingerprint:
-            for field in _REVIEW_RUNTIME_FIELDS:
+            for field in _REVIEW_RUNTIME_FIELDS + _REVIEW_RETRY_FIELDS:
                 if field in prior_review:
                     review_state[field] = prior_review[field]
         manifest["review"] = review_state
@@ -13993,10 +14060,14 @@ def cmd_review_artifact(args: argparse.Namespace) -> None:
         raise APError(
             f"Review artifact must be read from its assigned worktree: expected={assigned_worktree}, current={repo}."
         )
-    if _dt.datetime.now(_dt.timezone.utc) >= _parse_iso_timestamp(
-        assignment.get("deadline_at"),
-        "deadline_at",
-    ):
+    deadline = _effective_review_deadline(
+        repo,
+        manifest,
+        assignment,
+        require_environment=bool(_review_attempt_token(manifest.get("review") or {})),
+        require_same_runtime=bool(_review_attempt_token(manifest.get("review") or {})),
+    )
+    if _dt.datetime.now(_dt.timezone.utc) >= deadline:
         raise APError("Review assignment deadline expired before diff artifact access.")
     payload = _validate_review_diff_artifact(repo, assignment)
     sys.stdout.flush()
@@ -14011,26 +14082,61 @@ def _write_private_json(path: Path, payload: dict) -> None:
     _write_private_bytes(path, encoded)
 
 
+def _create_private_json(path: Path, payload: dict, label: str) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    handle = _open_private_review_event_log(path)
+    try:
+        handle.write(encoded.decode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    except Exception:
+        handle.close()
+        path.unlink(missing_ok=True)
+        raise
+    handle.close()
+    if _private_review_file_sha256(path, label) != hashlib.sha256(encoded).hexdigest():
+        raise APError(f"Review {label} changed during create-only publication.")
+
+
 def _review_runtime_paths(
     control_repo: Path,
     task_id: str,
     fingerprint: str,
+    attempt_token: str = "",
+    *,
+    create: bool = True,
 ) -> tuple[Path, Path]:
-    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
-        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
-    root = _task_review_dir(control_repo, task_id, create=True)
-    return root / f"{fingerprint}.result.json", root / f"{fingerprint}.run.json"
+    stem = _review_attempt_stem(fingerprint, attempt_token)
+    root = _task_review_dir(control_repo, task_id, create=create)
+    return root / f"{stem}.result.json", root / f"{stem}.run.json"
 
 
 def _review_runtime_event_log_path(
     control_repo: Path,
     task_id: str,
     fingerprint: str,
+    attempt_token: str = "",
+    *,
+    create: bool = True,
 ) -> Path:
-    if not _REVIEW_SHA256_RE.fullmatch(_text(fingerprint)):
-        raise APError("Review fingerprint must be a lowercase SHA-256 value.")
-    root = _task_review_dir(control_repo, task_id, create=True)
-    return root / f"{fingerprint}.events.jsonl"
+    stem = _review_attempt_stem(fingerprint, attempt_token)
+    root = _task_review_dir(control_repo, task_id, create=create)
+    return root / f"{stem}.events.jsonl"
+
+
+def _review_runtime_retry_audit_path(
+    control_repo: Path,
+    task_id: str,
+    fingerprint: str,
+    attempt_token: str,
+    *,
+    create: bool = True,
+) -> Path:
+    stem = _review_attempt_stem(fingerprint, attempt_token)
+    root = _task_review_dir(control_repo, task_id, create=create)
+    return root / f"{stem}.audit.json"
 
 
 def _review_runtime_override_path(
@@ -14059,6 +14165,260 @@ def _open_private_review_event_log(path: Path):
 def _private_review_file_sha256(path: Path, label: str) -> str:
     payload = _read_private_review_file(path, label)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _review_runtime_version_tuple(value: object, label: str) -> tuple[int, int, int]:
+    raw = _text(value)
+    match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", raw)
+    if not match:
+        raise APError(f"{label} must be a stable semantic version.")
+    return tuple(int(match.group(index)) for index in range(1, 4))
+
+
+def _managed_review_runtime_identity() -> dict:
+    script_path = Path(__file__).resolve()
+    script_sha256 = hashlib.sha256(script_path.read_bytes()).hexdigest()
+    agents_dir = next((parent for parent in script_path.parents if parent.name == ".agents"), None)
+    if agents_dir is None:
+        raise APError(
+            "Reviewer runtime retry requires an installed managed Skill runtime; "
+            "source-tree execution is not accepted."
+        )
+    install_root = agents_dir.parent.resolve()
+    expected_relative = Path(".agents/skills/auto-coding-skill/scripts/ap.py")
+    try:
+        actual_relative = script_path.relative_to(install_root)
+    except ValueError as exc:
+        raise APError("Managed Reviewer runtime escapes its install root.") from exc
+    if actual_relative != expected_relative:
+        raise APError(
+            "Reviewer runtime retry must execute the canonical managed ap.py entry."
+        )
+    manifest_path = agents_dir / "managed-install.json"
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as exc:
+        raise APError(f"Cannot read managed Reviewer runtime manifest: {manifest_path}: {exc}") from exc
+    if len(manifest_bytes) > 4 * 1024 * 1024:
+        raise APError("Managed Reviewer runtime manifest exceeds 4 MiB.")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APError("Managed Reviewer runtime manifest is invalid JSON.") from exc
+    if not isinstance(manifest, dict) or int(manifest.get("schema_version") or 0) != 1:
+        raise APError("Managed Reviewer runtime manifest schema is invalid.")
+    version = _text(manifest.get("skill_version"))
+    _review_runtime_version_tuple(version, "Managed Reviewer runtime version")
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        raise APError("Managed Reviewer runtime manifest entries are invalid.")
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("path") == expected_relative.as_posix()
+    ]
+    if len(matches) != 1:
+        raise APError("Managed Reviewer runtime manifest must bind one canonical ap.py entry.")
+    entry = matches[0]
+    if (
+        entry.get("source") != "skill/scripts/ap.py"
+        or entry.get("ownership") != "exact"
+        or entry.get("scope") != "shared"
+        or entry.get("version") != version
+        or _text(entry.get("sha256")) != script_sha256
+    ):
+        raise APError("Managed Reviewer runtime ap.py identity check failed.")
+    integrity = verify_managed_install(
+        install_root,
+        mode="global",
+        expected_version=version,
+        manifest_path=manifest_path,
+    )
+    if not integrity.get("ok"):
+        raise APError(
+            "Managed Reviewer runtime install integrity failed: "
+            + "; ".join(str(item) for item in integrity.get("errors") or [])
+        )
+    return {
+        "version": version,
+        "script_path": str(script_path),
+        "script_sha256": script_sha256,
+        "manifest_path": str(manifest_path.resolve()),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    }
+
+
+def _load_review_runtime_retry_audit(
+    control_repo: Path,
+    manifest: dict,
+    assignment: dict,
+    *,
+    require_environment: bool = False,
+    require_same_runtime: bool = False,
+) -> Optional[dict]:
+    review = manifest.get("review") or {}
+    token = _review_attempt_token(review)
+    if not token:
+        return None
+    task_id = _text(manifest.get("task_id"))
+    fingerprint = _text(review.get("diff_fingerprint"))
+    audit_path = _review_runtime_retry_audit_path(
+        control_repo,
+        task_id,
+        fingerprint,
+        token,
+        create=False,
+    ).resolve()
+    if Path(_text(review.get("runtime_retry_audit_path"))).resolve() != audit_path:
+        raise APError("Reviewer runtime retry audit path is not canonical.")
+    audit_sha256 = _text(review.get("runtime_retry_audit_sha256"))
+    payload = _read_verified_private_review_file(audit_path, audit_sha256, "runtime retry audit")
+    try:
+        audit = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise APError("Reviewer runtime retry audit is invalid JSON.") from exc
+    if not isinstance(audit, dict) or int(audit.get("schema") or 0) != 1:
+        raise APError("Reviewer runtime retry audit schema is invalid.")
+    runtime_version = _text(audit.get("managed_runtime_version"))
+    if token != f"retry-v{runtime_version}":
+        raise APError("Reviewer runtime retry token does not bind its managed version.")
+    if _text(review.get("runtime_retry_version")) != runtime_version:
+        raise APError("Reviewer runtime retry version does not match its audit.")
+    if (
+        _text(review.get("runtime_retry_reason_code")) != _REVIEW_RUNTIME_RETRY_REASON
+        or _text(audit.get("reason_code")) != _REVIEW_RUNTIME_RETRY_REASON
+    ):
+        raise APError("Reviewer runtime retry reason code is invalid.")
+    expected = {
+        "task_id": task_id,
+        "task_uuid": _text(manifest.get("task_uuid")),
+        "owner": _text(manifest.get("owner")),
+        "reviewer": _text(review.get("reviewer")),
+        "task_skill_version": _text(manifest.get("skill_version")),
+        "base_sha": _text(manifest.get("base_sha")),
+        "diff_head": _text(assignment.get("diff_head")),
+        "diff_fingerprint": fingerprint,
+        "scope_revision": int(manifest.get("scope_revision") or 1),
+        "owned_paths": list(manifest.get("owned_paths") or []),
+        "retry_token": token,
+        "assignment_path": str(_review_assignment_path(control_repo, task_id, fingerprint).resolve()),
+        "assignment_sha256": _text(review.get("assignment_sha256")),
+        "diff_artifact_path": str(_review_diff_artifact_path(control_repo, task_id, fingerprint).resolve()),
+        "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
+        "original_deadline_at": _text(assignment.get("deadline_at")),
+    }
+    mismatched = [field for field, value in expected.items() if audit.get(field) != value]
+    if mismatched:
+        raise APError(
+            "Reviewer runtime retry audit does not match task state: " + ", ".join(mismatched)
+        )
+    worktree = Path(_text(manifest.get("worktree_path"))).resolve()
+    if not worktree.exists() or _resolve_commit(worktree, "HEAD") != _text(assignment.get("diff_head")):
+        raise APError("Reviewer runtime retry task HEAD changed after authorization.")
+    if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
+        raise APError("Reviewer runtime retry diff changed after authorization.")
+    retry_result_path, retry_receipt_path = _review_runtime_paths(
+        control_repo,
+        task_id,
+        fingerprint,
+        token,
+        create=False,
+    )
+    retry_event_path = _review_runtime_event_log_path(
+        control_repo,
+        task_id,
+        fingerprint,
+        token,
+        create=False,
+    )
+    retry_expected = {
+        "retry_result_path": str(retry_result_path.resolve()),
+        "retry_receipt_path": str(retry_receipt_path.resolve()),
+        "retry_event_log_path": str(retry_event_path.resolve()),
+    }
+    retry_mismatched = [field for field, value in retry_expected.items() if audit.get(field) != value]
+    if retry_mismatched:
+        raise APError(
+            "Reviewer runtime retry audit paths are invalid: " + ", ".join(retry_mismatched)
+        )
+    for field, label in (
+        ("prior_result", "prior result"),
+        ("prior_receipt", "prior runtime receipt"),
+        ("prior_event_log", "prior event log"),
+    ):
+        path = Path(_text(audit.get(f"{field}_path"))).resolve()
+        expected_path = {
+            "prior_result": _review_runtime_paths(
+                control_repo, task_id, fingerprint, create=False
+            )[0].resolve(),
+            "prior_receipt": _review_runtime_paths(
+                control_repo, task_id, fingerprint, create=False
+            )[1].resolve(),
+            "prior_event_log": _review_runtime_event_log_path(
+                control_repo, task_id, fingerprint, create=False
+            ).resolve(),
+        }[field]
+        if path != expected_path:
+            raise APError(f"Reviewer runtime retry {label} path is not canonical.")
+        _read_verified_private_review_file(path, _text(audit.get(f"{field}_sha256")), label)
+    issued = _parse_iso_timestamp(audit.get("retry_issued_at"), "retry_issued_at")
+    deadline = _parse_iso_timestamp(audit.get("retry_deadline_at"), "retry_deadline_at")
+    timeout_seconds = int(audit.get("retry_timeout_seconds") or 0)
+    if timeout_seconds != int(assignment.get("timeout_seconds") or 0):
+        raise APError("Reviewer runtime retry timeout does not match the original fixed policy.")
+    if int((deadline - issued).total_seconds()) != timeout_seconds:
+        raise APError("Reviewer runtime retry deadline duration is invalid.")
+    identity = _managed_review_runtime_identity()
+    current_version = _review_runtime_version_tuple(identity["version"], "Current managed runtime version")
+    audit_version = _review_runtime_version_tuple(runtime_version, "Retry managed runtime version")
+    if current_version < audit_version:
+        raise APError("Current managed runtime is older than the authorized Reviewer retry runtime.")
+    if require_same_runtime and any(
+        audit.get(field) != identity[value]
+        for field, value in (
+            ("managed_runtime_version", "version"),
+            ("managed_runtime_script_path", "script_path"),
+            ("managed_runtime_script_sha256", "script_sha256"),
+            ("managed_runtime_manifest_path", "manifest_path"),
+            ("managed_runtime_manifest_sha256", "manifest_sha256"),
+        )
+    ):
+        raise APError("Reviewer retry must use the exact managed runtime that authorized it.")
+    if require_environment:
+        environment_expected = {
+            "AUTOCODING_REVIEW_RETRY_TOKEN": token,
+            "AUTOCODING_REVIEW_RETRY_AUDIT": str(audit_path),
+            "AUTOCODING_REVIEW_RETRY_AUDIT_SHA256": audit_sha256,
+        }
+        missing = [
+            key for key, value in environment_expected.items() if _text(os.environ.get(key)) != value
+        ]
+        if missing:
+            raise APError(
+                "Reviewer retry artifact access lacks its supervised audit binding: "
+                + ", ".join(missing)
+            )
+    return audit
+
+
+def _effective_review_deadline(
+    control_repo: Path,
+    manifest: dict,
+    assignment: dict,
+    *,
+    require_environment: bool = False,
+    require_same_runtime: bool = False,
+) -> _dt.datetime:
+    audit = _load_review_runtime_retry_audit(
+        control_repo,
+        manifest,
+        assignment,
+        require_environment=require_environment,
+        require_same_runtime=require_same_runtime,
+    )
+    if audit is None:
+        return _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+    return _parse_iso_timestamp(audit.get("retry_deadline_at"), "retry_deadline_at")
 
 
 def _reviewer_cli_version(command: list[str], runner_kind: str) -> str:
@@ -14257,6 +14617,15 @@ def _update_review_runtime(
         review = dict(manifest.get("review") or {})
         if _text(review.get("diff_fingerprint")) != fingerprint:
             raise APError("Reviewer runtime assignment became stale while the process was running.")
+        _, expected_receipt_path = _review_runtime_paths(
+            control_repo,
+            task_id,
+            fingerprint,
+            _review_attempt_token(review),
+            create=False,
+        )
+        if receipt_path.resolve() != expected_receipt_path.resolve():
+            raise APError("Reviewer runtime attempt token changed while the process was running.")
         review.update(updates)
         manifest["review"] = review
         receipt = _read_json_object(receipt_path) or {}
@@ -14289,6 +14658,8 @@ def _validate_bound_review_runtime_receipt(
         control_repo,
         task_id,
         fingerprint,
+        _review_attempt_token(review),
+        create=False,
     )
     if receipt_path.resolve() != expected_receipt_path.resolve():
         raise APError("Reviewer runtime receipt path is not canonical.")
@@ -14311,11 +14682,35 @@ def _validate_bound_review_runtime_receipt(
         "result_path": str(expected_result_path),
         "command_sha256": _text(review.get("runtime_command_sha256")),
         "event_log_path": str(
-            _review_runtime_event_log_path(control_repo, task_id, fingerprint)
+            _review_runtime_event_log_path(
+                control_repo,
+                task_id,
+                fingerprint,
+                _review_attempt_token(review),
+                create=False,
+            )
         ),
         "status": expected_status,
     }
     mismatched = [field for field, value in expected.items() if receipt.get(field) != value]
+    retry_audit = _load_review_runtime_retry_audit(
+        control_repo,
+        manifest,
+        assignment,
+    )
+    if retry_audit is not None:
+        retry_expected = {
+            "runtime_retry_token": _review_attempt_token(review),
+            "runtime_retry_audit_path": _text(review.get("runtime_retry_audit_path")),
+            "runtime_retry_audit_sha256": _text(review.get("runtime_retry_audit_sha256")),
+            "managed_runtime_version": _text(retry_audit.get("managed_runtime_version")),
+            "managed_runtime_script_sha256": _text(
+                retry_audit.get("managed_runtime_script_sha256")
+            ),
+        }
+        mismatched.extend(
+            field for field, value in retry_expected.items() if receipt.get(field) != value
+        )
     if mismatched:
         raise APError(
             "Reviewer runtime receipt does not match task state: " + ", ".join(mismatched)
@@ -14349,25 +14744,355 @@ def _blocked_reviewer_runtime_result(
     return _validate_orchestration_contract("result", result)
 
 
+def _known_review_artifact_access_failure(
+    control_repo: Path,
+    result: dict,
+) -> bool:
+    if (
+        _text(result.get("verdict")) != "blocked"
+        or _text(result.get("status")) != "blocked"
+        or list(result.get("findings") or [])
+        or list(result.get("changed_paths") or [])
+    ):
+        return False
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) != 1 or not isinstance(evidence[0], str):
+        return False
+    state_root = re.escape(str(_task_state_root(control_repo).resolve()))
+    pattern = re.compile(
+        r"^review-artifact exited(?: with code)? 2: Cannot protect Git-local review storage"
+        rf"(?: at |: ){state_root}: (?:\[Errno 1\] )?Operation not permitted\.?$"
+    )
+    if not pattern.fullmatch(evidence[0]):
+        return False
+    summaries = {
+        "Review could not start because review-artifact failed while protecting Git-local review storage.",
+        "Review could not begin because review-artifact failed before verifying or emitting the immutable patch.",
+        "Review could not begin because review-artifact failed before emitting the verified immutable patch.",
+        "Review could not begin because review-artifact failed before emitting the verified immutable patch: the read-only sandbox denied protection of Git-local review storage.",
+        "Review could not begin because the mandatory frozen artifact verification failed under the read-only filesystem.",
+        "Review could not begin because review-artifact failed before emitting the immutable patch.",
+    }
+    if _text(result.get("summary")) not in summaries:
+        return False
+    risks = result.get("risks")
+    allowed_risks = {
+        "The immutable patch was not emitted or substantively reviewed because mandatory artifact verification did not complete.",
+        "The artifact mode and SHA-256 were not verified, so the frozen diff was not analyzed. Re-run the same assignment in an environment permitting review-artifact to protect and read Git-local review storage.",
+        "The frozen diff artifact was not emitted or substantively reviewed; no correctness or security conclusion can be made.",
+        "The frozen diff was not emitted or substantively reviewed; no correctness or security conclusion is available.",
+        "The immutable patch was neither verified nor analyzed; no substantive correctness or security conclusion is available.",
+        "The immutable patch was not emitted or substantively reviewed.",
+    }
+    if not isinstance(risks, list) or len(risks) != 1 or risks[0] not in allowed_risks:
+        return False
+    return True
+
+
+def cmd_review_runtime_retry(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).resolve()
+    ensure_git_repo(repo)
+    cfg = _load_cfg(repo)
+    task_id = _validate_task_id(args.task_id)
+    if _text(args.reason_code) != _REVIEW_RUNTIME_RETRY_REASON:
+        raise APError(
+            f"--reason-code must be {_REVIEW_RUNTIME_RETRY_REASON} for this bounded migration."
+        )
+    if not bool(args.confirm_managed_runtime_retry):
+        raise APError("Reviewer runtime retry requires --confirm-managed-runtime-retry.")
+    identity = _managed_review_runtime_identity()
+    runtime_version = _text(identity.get("version"))
+    runtime_version_tuple = _review_runtime_version_tuple(
+        runtime_version,
+        "Managed Reviewer runtime version",
+    )
+    if runtime_version_tuple < _REVIEW_RUNTIME_RETRY_FIXED_IN:
+        raise APError("Managed Reviewer runtime is too old to authorize the bounded retry.")
+
+    control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    timeout_s = float(_concurrency_cfg(cfg).get("lock_timeout_sec") or 30)
+    with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
+        manifest = _load_task_manifest(control_repo, task_id)
+        lifecycle_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+        if not lifecycle_actor or lifecycle_actor != _text(manifest.get("owner")):
+            raise APError("Only the task lifecycle owner may authorize a Reviewer runtime retry.")
+        if _text(manifest.get("state")) != "active":
+            raise APError("Reviewer runtime retry is limited to active tasks.")
+        if not bool(manifest.get("review_required")):
+            raise APError("Reviewer runtime retry requires an independent-review task.")
+        task_version = _text(manifest.get("skill_version"))
+        task_version_tuple = _review_runtime_version_tuple(task_version, "Task Skill version")
+        if not (
+            _REVIEW_RUNTIME_RETRY_AFFECTED_MIN
+            <= task_version_tuple
+            <= _REVIEW_RUNTIME_RETRY_AFFECTED_MAX
+        ):
+            raise APError("Task Skill version is outside the bounded Reviewer retry migration range.")
+        if runtime_version_tuple <= task_version_tuple:
+            raise APError("Managed Reviewer retry runtime must be newer than the task runtime.")
+        review = dict(manifest.get("review") or {})
+        if _review_attempt_token(review) or any(_text(review.get(field)) for field in _REVIEW_RETRY_FIELDS):
+            raise APError("A Reviewer runtime retry is already authorized for this diff fingerprint.")
+        if _text(review.get("runtime_override_path")) or _text(review.get("runtime_override_sha256")):
+            raise APError("Reviewer runtime retry cannot follow a user-authorized runtime override.")
+        fingerprint = _task_review_fingerprint(worktree, manifest, _load_cfg(worktree))
+        supplied = _text(args.diff_fingerprint)
+        if supplied != fingerprint or _text(review.get("diff_fingerprint")) != fingerprint:
+            raise APError(
+                f"Reviewer runtime retry fingerprint mismatch: supplied={supplied or '(missing)'}, "
+                f"current={fingerprint}."
+            )
+        if (
+            _text(review.get("verdict")) != "blocked"
+            or _text(review.get("runtime_state")) != "blocked"
+            or review.get("runtime_exit_code") != 0
+            or _text(review.get("runtime_failure_kind"))
+            or int(review.get("runtime_attempt_count") or 0) != 1
+        ):
+            raise APError("Prior Reviewer state is not the exact completed procedural block eligible for retry.")
+        assignment_path = Path(_text(review.get("assignment_path"))).resolve()
+        assignment = _load_bound_review_assignment(control_repo, manifest, assignment_path)
+        _validate_review_diff_artifact(control_repo, assignment)
+        expected_assignment_fields = {
+            "task_id": task_id,
+            "base_sha": _text(manifest.get("base_sha")),
+            "diff_base": _text(manifest.get("base_sha")),
+            "diff_head": _resolve_commit(worktree, "HEAD"),
+            "diff_fingerprint": fingerprint,
+            "owned_paths": list(manifest.get("owned_paths") or []),
+            "node_id": _text(review.get("reviewer")),
+            "scope_revision": int(manifest.get("scope_revision") or 1),
+        }
+        assignment_mismatches = [
+            field for field, value in expected_assignment_fields.items() if assignment.get(field) != value
+        ]
+        if assignment_mismatches:
+            raise APError(
+                "Prior Reviewer assignment no longer matches task state: "
+                + ", ".join(assignment_mismatches)
+            )
+        prior_result_path, prior_receipt_path = _review_runtime_paths(
+            control_repo,
+            task_id,
+            fingerprint,
+            create=False,
+        )
+        prior_event_path = _review_runtime_event_log_path(
+            control_repo,
+            task_id,
+            fingerprint,
+            create=False,
+        )
+        if Path(_text(review.get("runtime_result_path"))).resolve() != prior_result_path.resolve():
+            raise APError("Prior Reviewer result path is not canonical.")
+        if Path(_text(review.get("runtime_receipt_path"))).resolve() != prior_receipt_path.resolve():
+            raise APError("Prior Reviewer receipt path is not canonical.")
+        if Path(_text(review.get("runtime_event_log_path"))).resolve() != prior_event_path.resolve():
+            raise APError("Prior Reviewer event log path is not canonical.")
+        receipt = _validate_bound_review_runtime_receipt(
+            control_repo,
+            manifest,
+            assignment,
+            prior_receipt_path,
+            "blocked",
+        )
+        attempts = receipt.get("attempts") or []
+        if (
+            int(receipt.get("schema") or 0) != 2
+            or _text(receipt.get("verdict")) != "blocked"
+            or receipt.get("exit_code") != 0
+            or _text(receipt.get("failure_kind"))
+            or len(attempts) != 1
+            or _text(attempts[0].get("status")) != "completed"
+            or attempts[0].get("exit_code") != 0
+        ):
+            raise APError("Prior Reviewer receipt is not the exact completed procedural block eligible for retry.")
+        try:
+            result_payload = json.loads(_read_bounded_reviewer_output(prior_result_path))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise APError("Prior Reviewer result is invalid JSON.") from exc
+        if not isinstance(result_payload, dict):
+            raise APError("Prior Reviewer result must contain one JSON object.")
+        normalized_result = _normalize_reviewer_runtime_result(assignment, result_payload)
+        if result_payload != normalized_result or not _known_review_artifact_access_failure(
+            control_repo,
+            normalized_result,
+        ):
+            raise APError(
+                "Prior Reviewer result is not the exact non-substantive Git-local access failure."
+            )
+
+        token = f"retry-v{runtime_version}"
+        audit_path = _review_runtime_retry_audit_path(
+            control_repo,
+            task_id,
+            fingerprint,
+            token,
+        )
+        retry_result_path, retry_receipt_path = _review_runtime_paths(
+            control_repo,
+            task_id,
+            fingerprint,
+            token,
+        )
+        retry_event_path = _review_runtime_event_log_path(
+            control_repo,
+            task_id,
+            fingerprint,
+            token,
+        )
+        for path in (audit_path, retry_result_path, retry_receipt_path, retry_event_path):
+            if path.exists() or path.is_symlink():
+                raise APError(f"Reviewer runtime retry evidence already exists: {path}")
+        issued = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
+        retry_timeout = int(assignment.get("timeout_seconds") or 0)
+        if retry_timeout not in {_FOCUSED_REVIEW_TIMEOUT_SECONDS, _DEEP_REVIEW_TIMEOUT_SECONDS}:
+            raise APError("Original Reviewer timeout is outside the fixed managed policy.")
+        deadline = issued + _dt.timedelta(seconds=retry_timeout)
+        audit = {
+            "schema": 1,
+            "reason_code": _REVIEW_RUNTIME_RETRY_REASON,
+            "authorized_at": issued.isoformat(),
+            "authorized_by": lifecycle_actor,
+            "task_id": task_id,
+            "task_uuid": _text(manifest.get("task_uuid")),
+            "owner": lifecycle_actor,
+            "reviewer": _text(review.get("reviewer")),
+            "task_skill_version": task_version,
+            "base_sha": _text(manifest.get("base_sha")),
+            "diff_head": _text(assignment.get("diff_head")),
+            "diff_fingerprint": fingerprint,
+            "scope_revision": int(manifest.get("scope_revision") or 1),
+            "owned_paths": list(manifest.get("owned_paths") or []),
+            "retry_token": token,
+            "retry_issued_at": issued.isoformat(),
+            "retry_deadline_at": deadline.isoformat(),
+            "retry_timeout_seconds": retry_timeout,
+            "original_issued_at": _text(assignment.get("issued_at")),
+            "original_deadline_at": _text(assignment.get("deadline_at")),
+            "assignment_path": str(assignment_path),
+            "assignment_sha256": _text(review.get("assignment_sha256")),
+            "diff_artifact_path": _text(review.get("diff_artifact_path")),
+            "diff_artifact_sha256": _text(review.get("diff_artifact_sha256")),
+            "prior_result_path": str(prior_result_path),
+            "prior_result_sha256": _private_review_file_sha256(prior_result_path, "prior result"),
+            "prior_receipt_path": str(prior_receipt_path),
+            "prior_receipt_sha256": _private_review_file_sha256(
+                prior_receipt_path, "prior runtime receipt"
+            ),
+            "prior_event_log_path": str(prior_event_path),
+            "prior_event_log_sha256": _private_review_file_sha256(
+                prior_event_path, "prior event log"
+            ),
+            "prior_review_state_sha256": hashlib.sha256(
+                json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "prior_verdict": "blocked",
+            "prior_runtime_state": "blocked",
+            "managed_runtime_version": runtime_version,
+            "managed_runtime_script_path": identity["script_path"],
+            "managed_runtime_script_sha256": identity["script_sha256"],
+            "managed_runtime_manifest_path": identity["manifest_path"],
+            "managed_runtime_manifest_sha256": identity["manifest_sha256"],
+            "retry_result_path": str(retry_result_path),
+            "retry_receipt_path": str(retry_receipt_path),
+            "retry_event_log_path": str(retry_event_path),
+        }
+        _create_private_json(audit_path, audit, "runtime retry audit")
+        audit_sha256 = _private_review_file_sha256(audit_path, "runtime retry audit")
+        next_review = {
+            key: value
+            for key, value in review.items()
+            if key not in _REVIEW_RUNTIME_FIELDS and key not in _REVIEW_RETRY_FIELDS
+        }
+        next_review.update(
+            {
+                "verdict": "pending",
+                "reviewed_at": "",
+                "reason": "bounded managed runtime retry authorized",
+                "runtime_retry_token": token,
+                "runtime_retry_version": runtime_version,
+                "runtime_retry_reason_code": _REVIEW_RUNTIME_RETRY_REASON,
+                "runtime_retry_audit_path": str(audit_path),
+                "runtime_retry_audit_sha256": audit_sha256,
+            }
+        )
+        manifest["review"] = next_review
+        try:
+            _save_task_manifest(control_repo, manifest, strict_worktree=True)
+        except Exception:
+            audit_path.unlink(missing_ok=True)
+            raise
+        _load_review_runtime_retry_audit(
+            control_repo,
+            manifest,
+            assignment,
+            require_same_runtime=True,
+        )
+    result = {
+        "task_id": task_id,
+        "status": "retry-authorized",
+        "diff_fingerprint": fingerprint,
+        "reviewer": _text(next_review.get("reviewer")),
+        "retry_token": token,
+        "retry_deadline_at": deadline.isoformat(),
+        "audit_path": str(audit_path),
+        "audit_sha256": audit_sha256,
+    }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"[review-runtime-retry] task={task_id} status=retry-authorized "
+            f"fingerprint={fingerprint} token={token}"
+        )
+        print(f"[review-runtime-retry] deadline_at={deadline.isoformat()}")
+        print(
+            "[review-runtime-retry] next=review-run "
+            f"{task_id} --reviewer {_text(next_review.get('reviewer'))}"
+        )
+
+
 def cmd_review_run(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     ensure_git_repo(repo)
     cfg = _load_cfg(repo)
     task_id = _validate_task_id(args.task_id)
     reviewer = _text(args.reviewer)
-    with contextlib.redirect_stdout(io.StringIO()):
-        cmd_review_assignment(
-            argparse.Namespace(
-                repo=str(repo),
-                task_id=task_id,
-                reviewer=reviewer,
-                json=False,
-            )
-        )
-
     control_repo, worktree, _ = _task_lifecycle_context(repo, cfg, task_id)
+    initial_manifest = _load_task_manifest(control_repo, task_id)
+    initial_review = initial_manifest.get("review") or {}
+    if _review_attempt_token(initial_review):
+        if reviewer != _text(initial_review.get("reviewer")):
+            raise APError("Reviewer runtime retry must preserve the original Reviewer identity.")
+        initial_assignment_path = Path(_text(initial_review.get("assignment_path"))).resolve()
+        initial_assignment = _load_bound_review_assignment(
+            control_repo,
+            initial_manifest,
+            initial_assignment_path,
+        )
+        _load_review_runtime_retry_audit(
+            control_repo,
+            initial_manifest,
+            initial_assignment,
+            require_same_runtime=True,
+        )
+    else:
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_review_assignment(
+                argparse.Namespace(
+                    repo=str(repo),
+                    task_id=task_id,
+                    reviewer=reviewer,
+                    json=False,
+                )
+            )
+
     manifest = _load_task_manifest(control_repo, task_id)
     review = manifest.get("review") or {}
+    attempt_token = _review_attempt_token(review)
     assignment_path = Path(_text(review.get("assignment_path"))).resolve()
     assignment = _load_bound_review_assignment(
         control_repo,
@@ -14379,7 +15104,12 @@ def cmd_review_run(args: argparse.Namespace) -> None:
     _validate_review_diff_artifact(control_repo, assignment)
     if _task_review_fingerprint(worktree, manifest, _load_cfg(worktree)) != fingerprint:
         raise APError("Review assignment is stale; the task-owned working tree changed before Reviewer start.")
-    result_path, receipt_path = _review_runtime_paths(control_repo, task_id, fingerprint)
+    result_path, receipt_path = _review_runtime_paths(
+        control_repo,
+        task_id,
+        fingerprint,
+        attempt_token,
+    )
 
     command_override = _text(getattr(args, "runner_command_json", ""))
     if command_override:
@@ -14409,7 +15139,12 @@ def cmd_review_run(args: argparse.Namespace) -> None:
     command_sha256 = _review_command_sha256(command)
     command_metadata = _reviewer_command_metadata(command, runner_kind)
     started_at = _now_iso()
-    event_log_path = _review_runtime_event_log_path(control_repo, task_id, fingerprint)
+    event_log_path = _review_runtime_event_log_path(
+        control_repo,
+        task_id,
+        fingerprint,
+        attempt_token,
+    )
     receipt = {
         "schema": 2,
         "task_id": task_id,
@@ -14431,6 +15166,24 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         "finished_at": "",
         "exit_code": None,
     }
+    retry_audit = _load_review_runtime_retry_audit(
+        control_repo,
+        manifest,
+        assignment,
+        require_same_runtime=bool(attempt_token),
+    )
+    if retry_audit is not None:
+        receipt.update(
+            {
+                "runtime_retry_token": attempt_token,
+                "runtime_retry_audit_path": _text(review.get("runtime_retry_audit_path")),
+                "runtime_retry_audit_sha256": _text(review.get("runtime_retry_audit_sha256")),
+                "managed_runtime_version": _text(retry_audit.get("managed_runtime_version")),
+                "managed_runtime_script_sha256": _text(
+                    retry_audit.get("managed_runtime_script_sha256")
+                ),
+            }
+        )
     timeout_s = float(_concurrency_cfg(_load_cfg(control_repo)).get("lock_timeout_sec") or 30)
     with _repo_lock(control_repo, f"task-{task_id}", timeout_s=timeout_s):
         manifest = _load_task_manifest(control_repo, task_id)
@@ -14449,7 +15202,12 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             raise APError(
                 "The supervised Reviewer runtime has already started for this diff fingerprint."
             )
-        deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+        deadline = _effective_review_deadline(
+            control_repo,
+            manifest,
+            assignment,
+            require_same_runtime=bool(attempt_token),
+        )
         if _dt.datetime.now(_dt.timezone.utc) >= deadline:
             raise APError("Review assignment deadline expired before Reviewer runtime start.")
         if result_path.exists() or result_path.is_symlink():
@@ -14490,11 +15248,20 @@ def cmd_review_run(args: argparse.Namespace) -> None:
             "AUTOCODING_REVIEW_DIFF_ARTIFACT": _text(assignment.get("diff_artifact_path")),
             "AUTOCODING_REVIEW_DIFF_ARTIFACT_SHA256": _text(assignment.get("diff_artifact_sha256")),
             "AUTOCODING_REVIEW_RESULT": str(result_path),
-            "AUTOCODING_REVIEW_DEADLINE": _text(assignment.get("deadline_at")),
+            "AUTOCODING_REVIEW_DEADLINE": deadline.isoformat(),
             "AUTOCODING_REVIEW_TIMEOUT_SECONDS": str(int(assignment.get("timeout_seconds") or 0)),
         }
     )
-    deadline = _parse_iso_timestamp(assignment.get("deadline_at"), "deadline_at")
+    if retry_audit is not None:
+        env.update(
+            {
+                "AUTOCODING_REVIEW_RETRY_TOKEN": attempt_token,
+                "AUTOCODING_REVIEW_RETRY_AUDIT": _text(review.get("runtime_retry_audit_path")),
+                "AUTOCODING_REVIEW_RETRY_AUDIT_SHA256": _text(
+                    review.get("runtime_retry_audit_sha256")
+                ),
+            }
+        )
     attempts: list[dict] = []
     completed: Optional[subprocess.CompletedProcess[str]] = None
     runtime_failure: Optional[_ReviewerRuntimeFailure] = None
@@ -14922,6 +15689,7 @@ def cmd_review_runtime_override(args: argparse.Namespace) -> None:
             control_repo,
             task_id,
             fingerprint,
+            _review_attempt_token(review),
         )
         if receipt_path != expected_receipt_path.resolve():
             raise APError("Reviewer runtime receipt path is not canonical.")
@@ -15117,6 +15885,8 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                 control_repo,
                 task_id,
                 fingerprint,
+                _review_attempt_token(assigned_review),
+                create=False,
             )
             result_path = Path(_text(assigned_review.get("runtime_result_path"))).resolve()
             receipt_path = Path(_text(assigned_review.get("runtime_receipt_path"))).resolve()
@@ -15150,6 +15920,8 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                     control_repo,
                     task_id,
                     fingerprint,
+                    _review_attempt_token(assigned_review),
+                    create=False,
                 ).resolve()
                 if Path(_text(receipt.get("event_log_path"))).resolve() != expected_event_log_path:
                     raise APError("Reviewer runtime event log path is not canonical.")
@@ -15182,6 +15954,13 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                     + ", ".join(receipt_mismatches)
                 )
         deadline_at = _text(assigned_review.get("deadline_at"))
+        effective_deadline = (
+            _effective_review_deadline(control_repo, manifest, assignment)
+            if assignment is not None
+            else _parse_iso_timestamp(deadline_at, "deadline_at")
+            if deadline_at
+            else None
+        )
         completed_at = _dt.datetime.now(_dt.timezone.utc)
         if (
             _text(assigned_review.get("runtime_state")) == "completed"
@@ -15191,7 +15970,7 @@ def cmd_task_review(args: argparse.Namespace) -> None:
                 assigned_review.get("runtime_finished_at"),
                 "runtime_finished_at",
             )
-        if deadline_at and completed_at > _parse_iso_timestamp(deadline_at, "deadline_at"):
+        if effective_deadline is not None and completed_at > effective_deadline:
             raise APError(
                 "Review assignment deadline expired; the single review attempt is blocked."
             )
@@ -15213,7 +15992,7 @@ def cmd_task_review(args: argparse.Namespace) -> None:
             "review_depth": _text(manifest.get("review_depth")),
             "review_timeout_seconds": int(manifest.get("review_timeout_seconds") or 0),
         }
-        for field in _REVIEW_RUNTIME_FIELDS:
+        for field in _REVIEW_RUNTIME_FIELDS + _REVIEW_RETRY_FIELDS:
             if field in assigned_review:
                 review_state[field] = assigned_review[field]
         manifest["review"] = review_state
@@ -16518,6 +17297,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--json", action="store_true")
     s.add_argument("--runner-command-json", help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_review_run)
+
+    s = sp.add_parser(
+        "review-runtime-retry",
+        help="Authorize one audited retry for the fixed 4.2.8-4.3.2 review-artifact access defect",
+    )
+    s.add_argument("task_id")
+    s.add_argument("--diff-fingerprint", required=True)
+    s.add_argument("--reason-code", required=True)
+    s.add_argument("--confirm-managed-runtime-retry", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_review_runtime_retry)
 
     s = sp.add_parser(
         "review-runtime-override",

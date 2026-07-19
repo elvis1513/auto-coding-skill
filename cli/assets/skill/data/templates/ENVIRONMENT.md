@@ -16,7 +16,6 @@ It contains only common endpoints, ports, and credential lookup guidance.
 
 ## Credential lookup
 
-Actual usernames and passwords are not stored in this document or any tracked
-project documentation. Read them only from the local, untracked credential source
-referenced by `docs/PROJECT.md`. Do not copy credentials into a repository, chat
-transcript, build log, or deployment artifact.
+Actual usernames and passwords are project-specific information. Read them from
+the credential records in `docs/PROJECT.md`; this managed environment document
+intentionally contains no blank or project-specific credential fields.

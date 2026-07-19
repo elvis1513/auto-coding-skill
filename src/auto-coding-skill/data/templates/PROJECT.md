@@ -4,8 +4,9 @@
 > create it only when missing and never overwrite it.
 
 Record only durable, project-specific information that helps later development
-or diagnosis. Do not put plaintext passwords, tokens, private keys, or other
-credentials here; use the local credential source reference below.
+or diagnosis. This project-owned document may contain project-approved plaintext
+usernames and passwords for development and diagnosis. Keep each credential next
+to its system, address, and purpose; do not echo it in chat or logs.
 
 ## Project services and ports
 
@@ -16,8 +17,7 @@ credentials here; use the local credential source reference below.
 ## Shared-access overrides
 
 - Backend host or URL:
-- Local credential source path:
-- Required credential variable names:
+- Credential records:
 - Access constraints:
 
 ## Runtime and operations

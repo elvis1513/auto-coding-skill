@@ -27,10 +27,10 @@ docs/product/
 ```
 
 `docs/ENVIRONMENT.md` is managed shared context and is refreshed on each
-`init`/`sync`. It records common endpoints, ports, and local credential variable
-names. `docs/PROJECT.md` is project-owned and never overwritten; use it for
-project-specific configuration. Keep actual passwords only in the local,
-untracked credential source referenced by the environment document.
+`init`/`sync`. It records common endpoints and ports without empty project
+credential fields. `docs/PROJECT.md` is project-owned and never overwritten;
+use it for project-specific configuration and project-approved credential
+records.
 
 Only `AGENTS.md` and `docs/ENVIRONMENT.md` are refreshed by later `init` or
 `sync` runs. Project documents are created only when missing and are never

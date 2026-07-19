@@ -46,9 +46,8 @@ of creating parallel summaries.
 
 `docs/ENVIRONMENT.md` is shared managed context: it names endpoint ports and
 credential lookup guidance, but never contains plaintext credentials. Project
-specific configuration belongs in `docs/PROJECT.md`; it may name the local,
-untracked credential source and required variable names, but never stores the
-values. It is preserved across Skill upgrades. Never invent credentials, copy
-them into chat output, or expose them in logs.
+specific configuration belongs in `docs/PROJECT.md`; it is preserved across
+Skill upgrades and may hold project-approved plaintext credential records. Never
+invent credentials, copy them into chat output, or expose them in logs.
 
 <!-- auto-coding-skill:managed-agents:end -->

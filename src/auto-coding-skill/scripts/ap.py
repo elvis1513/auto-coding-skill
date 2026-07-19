@@ -57,6 +57,7 @@ from install_integrity import verify_managed_install
 from scaffold_templates import (
     MANAGED_FRAMEWORK_DOCS,
     PROJECT_FEEDBACK_PATTERNS,
+    PROJECT_OWNED_DOC_ROOTS,
     scaffold_groups,
     templates_for,
 )
@@ -100,8 +101,14 @@ _REVIEW_OUTPUT_MAX_BYTES = 1024 * 1024
 _REVIEW_DIFF_ARTIFACT_FORMAT = "git-binary-patch-v1"
 _REVIEW_DIFF_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _REVIEW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_FEEDBACK_SCHEMA = "auto-coding-skill-feedback/v1"
-_FEEDBACK_COLLECTION_SCHEMA = "auto-coding-skill-feedback-collection/v1"
+_FEEDBACK_SCHEMAS = {
+    "auto-coding-skill-feedback/v1",
+    "auto-coding-skill-feedback/v2",
+}
+_FEEDBACK_COLLECTION_SCHEMA = "auto-coding-skill-feedback-collection/v2"
+_FEEDBACK_RESOLUTION_SCHEMA = "auto-coding-skill-feedback-resolutions/v1"
+_FEEDBACK_RESOLUTION_POLICY = Path("data/policies/feedback-resolutions-v1.json")
+_FEEDBACK_RESOLUTION_MAX_BYTES = 64 * 1024
 _FEEDBACK_REPORT_MAX_BYTES = 16 * 1024
 _FEEDBACK_PROJECT_MAX_REPORTS = 100
 _FEEDBACK_PROJECT_MAX_ENTRIES = 200
@@ -114,7 +121,7 @@ _EFFECTIVE_CONFIG_PATHS = {
     "docs/ENGINEERING.md",
     _PROJECT_CONFIG_RELATIVE.as_posix(),
 }
-_FEEDBACK_FIELDS = (
+_FEEDBACK_V1_FIELDS = (
     "schema",
     "report_id",
     "status",
@@ -129,7 +136,14 @@ _FEEDBACK_FIELDS = (
     "signature",
     "export",
 )
+_FEEDBACK_V2_FIELDS = (
+    *_FEEDBACK_V1_FIELDS,
+    "updated_at",
+    "last_verified_skill_version",
+    "resolution",
+)
 _FEEDBACK_STATUSES = {"open", "needs-evidence", "accepted", "duplicate", "resolved", "rejected"}
+_FEEDBACK_ACTIVE_STATUSES = {"open", "needs-evidence", "accepted"}
 _FEEDBACK_KINDS = {"defect", "gap"}
 _FEEDBACK_IMPACTS = {"blocking", "degraded", "minor"}
 _FEEDBACK_ORIGIN_SURFACES = {
@@ -138,6 +152,23 @@ _FEEDBACK_ORIGIN_SURFACES = {
     "managed-agent",
     "cli",
     "installer",
+}
+_FEEDBACK_RESOLUTIONS = {
+    "pending",
+    "fixed",
+    "duplicate",
+    "project-config",
+    "environment",
+    "not-shared",
+    "not-reproducible",
+    "wont-fix",
+}
+_FEEDBACK_CATALOG_DISPOSITIONS = {
+    "fixed",
+    "project-config",
+    "environment",
+    "duplicate",
+    "rejected",
 }
 _FEEDBACK_HEADINGS = (
     "Symptom",
@@ -256,7 +287,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.0", "engineering": "4.3.0"},
+    "managed_versions": {"agents": "4.3.1", "engineering": "4.3.1"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -1402,17 +1433,7 @@ def cmd_project_config_finalize(args: argparse.Namespace) -> None:
         print(f"[project-config-finalize] {item['action']}: {item['path']}")
 
 
-_PROJECT_ARTIFACT_PATTERNS = (
-    "docs/architecture/*.md",
-    "docs/architecture/adr/*.md",
-    "docs/deployment/deploy-records/*.md",
-    "docs/design/*.md",
-    "docs/interfaces/*.md",
-    "docs/project/*.md",
-    _PROJECT_CONFIG_RELATIVE.as_posix(),
-    "docs/reviews/*.md",
-    *PROJECT_FEEDBACK_PATTERNS,
-)
+_PROJECT_ARTIFACT_ROOTS = tuple(Path(value) for value in PROJECT_OWNED_DOC_ROOTS)
 
 
 def _safe_project_relative_path(rel: str | Path) -> Path:
@@ -2519,7 +2540,7 @@ def _is_allowed_project_doc(rel: Path, candidate: Path | None = None) -> bool:
         return candidate is None or (candidate.is_file() and not candidate.is_symlink())
     if any(rel.match(pattern) for pattern in PROJECT_FEEDBACK_PATTERNS):
         return candidate is None or (candidate.is_file() and not candidate.is_symlink())
-    return any(rel.match(pattern) for pattern in _PROJECT_ARTIFACT_PATTERNS)
+    return any(rel == root or root in rel.parents for root in _PROJECT_ARTIFACT_ROOTS)
 
 
 def cmd_project_converge(args: argparse.Namespace) -> None:
@@ -2631,19 +2652,19 @@ def cmd_project_converge(args: argparse.Namespace) -> None:
     docs_root = repo / "docs"
     if docs_root.exists():
         for candidate in sorted(docs_root.rglob("*")):
-            if not candidate.is_file() and not candidate.is_symlink():
+            try:
+                candidate_metadata = candidate.lstat()
+            except OSError as exc:
+                raise APError("Cannot inspect active project documentation safely") from exc
+            if stat.S_ISDIR(candidate_metadata.st_mode) and not _is_windows_reparse_point(candidate_metadata):
                 continue
             rel = candidate.relative_to(repo)
+            if _is_windows_reparse_point(candidate_metadata) or not stat.S_ISREG(candidate_metadata.st_mode):
+                raise APError(
+                    "Active project documentation must contain only real directories and "
+                    f"regular non-symlink files: {rel.as_posix()}"
+                )
             if rel in allowed_docs or _is_allowed_project_doc(rel, candidate):
-                continue
-            if candidate.is_symlink() and any(rel.match(pattern) for pattern in PROJECT_FEEDBACK_PATTERNS):
-                actions.append({
-                    "action": "delete",
-                    "path": rel.as_posix(),
-                    "detail": "feedback reports must be regular non-symlink Markdown files",
-                })
-                if args.write:
-                    candidate.unlink()
                 continue
             archive_extra(candidate, "removed from the exact docs framework")
             actions.append({"action": "delete", "path": rel.as_posix()})
@@ -3070,7 +3091,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
     if canonical_agents and current_agents != canonical_agents:
         if current_agents:
             archive_header = (
-                "# Archived AGENTS.md before auto-coding-skill 4.3.0\n\n"
+                "# Archived AGENTS.md before auto-coding-skill 4.3.1\n\n"
                 "This file is historical and non-authoritative. The root AGENTS.md is fully managed.\n"
                 "Move project configuration into docs/project/auto-coding-skill.yaml and facts into docs/project/,\n"
                 "without copying workflow rules back into the root AGENTS.md.\n\n---\n\n"
@@ -3078,7 +3099,7 @@ def cmd_upgrade(args: argparse.Namespace) -> None:
             archive_content = archive_header + current_agents
             archive_rel, archive_required = _select_project_archive_target(
                 repo,
-                Path("docs/archive/workflow/AGENTS.pre-4.3.0.md"),
+                Path("docs/archive/workflow/AGENTS.pre-4.3.1.md"),
                 archive_content.encode("utf-8"),
                 legacy_digest_payload=current_agents.encode("utf-8"),
             )
@@ -3843,13 +3864,13 @@ def _feedback_scalar(data: dict, field: str, path: Path) -> str:
     return value.strip()
 
 
-def _feedback_created_at(value: object, path: Path) -> str:
+def _feedback_timestamp(value: object, path: Path, field: str) -> str:
     if isinstance(value, _dt.datetime):
         return value.isoformat()
     if isinstance(value, _dt.date):
         return value.isoformat()
     if not isinstance(value, str) or not value.strip():
-        raise _feedback_error(path, "created_at must be an ISO-8601 date or timestamp")
+        raise _feedback_error(path, f"{field} must be an ISO-8601 date or timestamp")
     raw = value.strip()
     try:
         if "T" in raw or " " in raw:
@@ -3857,7 +3878,7 @@ def _feedback_created_at(value: object, path: Path) -> str:
         else:
             _dt.date.fromisoformat(raw)
     except ValueError as exc:
-        raise _feedback_error(path, "created_at must be an ISO-8601 date or timestamp") from exc
+        raise _feedback_error(path, f"{field} must be an ISO-8601 date or timestamp") from exc
     return raw
 
 
@@ -3882,8 +3903,12 @@ def _parse_feedback_report(payload: bytes, path: Path) -> dict:
         raise _feedback_error(path, "YAML frontmatter must be a flat mapping")
     if any(not isinstance(key, str) for key in data):
         raise _feedback_error(path, "frontmatter field names must be strings")
-    unknown = sorted(set(data) - set(_FEEDBACK_FIELDS))
-    missing = [field for field in _FEEDBACK_FIELDS if field not in data]
+    schema_value = _feedback_scalar(data, "schema", path)
+    if schema_value not in _FEEDBACK_SCHEMAS:
+        raise _feedback_error(path, "schema must be auto-coding-skill-feedback/v1 or /v2")
+    expected_fields = _FEEDBACK_V2_FIELDS if schema_value.endswith("/v2") else _FEEDBACK_V1_FIELDS
+    unknown = sorted(set(data) - set(expected_fields))
+    missing = [field for field in expected_fields if field not in data]
     if unknown:
         raise _feedback_error(path, "unknown frontmatter fields are not allowed")
     if missing:
@@ -3892,9 +3917,6 @@ def _parse_feedback_report(payload: bytes, path: Path) -> dict:
         raise _feedback_error(path, "frontmatter values must be scalars")
 
     metadata: dict[str, str] = {}
-    schema_value = _feedback_scalar(data, "schema", path)
-    if schema_value != _FEEDBACK_SCHEMA:
-        raise _feedback_error(path, f"schema must be {_FEEDBACK_SCHEMA}")
     metadata["schema"] = schema_value
     report_id = _feedback_scalar(data, "report_id", path)
     if not _FEEDBACK_SAFE_ID_RE.fullmatch(report_id):
@@ -3904,7 +3926,12 @@ def _parse_feedback_report(payload: bytes, path: Path) -> dict:
     if status_value not in _FEEDBACK_STATUSES:
         raise _feedback_error(path, "status is not supported")
     metadata["status"] = status_value
-    metadata["created_at"] = _feedback_created_at(data.get("created_at"), path)
+    metadata["created_at"] = _feedback_timestamp(data.get("created_at"), path, "created_at")
+    metadata["updated_at"] = (
+        _feedback_timestamp(data.get("updated_at"), path, "updated_at")
+        if schema_value.endswith("/v2")
+        else metadata["created_at"]
+    )
     project_value = _feedback_scalar(data, "project", path)
     if not _FEEDBACK_SAFE_ID_RE.fullmatch(project_value):
         raise _feedback_error(path, "project must be a safe identifier")
@@ -3913,6 +3940,13 @@ def _parse_feedback_report(payload: bytes, path: Path) -> dict:
     if not _FEEDBACK_SEMVER_RE.fullmatch(version):
         raise _feedback_error(path, "observed_skill_version must be valid SemVer")
     metadata["observed_skill_version"] = version
+    if schema_value.endswith("/v2"):
+        last_verified = _feedback_scalar(data, "last_verified_skill_version", path)
+        if not _FEEDBACK_SEMVER_RE.fullmatch(last_verified):
+            raise _feedback_error(path, "last_verified_skill_version must be valid SemVer")
+    else:
+        last_verified = version
+    metadata["last_verified_skill_version"] = last_verified
     component = _feedback_scalar(data, "component", path)
     if not _FEEDBACK_SLUG_RE.fullmatch(component):
         raise _feedback_error(path, "component must be a lowercase kebab-case slug")
@@ -3937,6 +3971,33 @@ def _parse_feedback_report(payload: bytes, path: Path) -> dict:
     if not _FEEDBACK_SIGNATURE_RE.fullmatch(signature):
         raise _feedback_error(path, "signature must be sha256 followed by 64 lowercase hex characters")
     metadata["signature"] = signature
+    if schema_value.endswith("/v2"):
+        resolution = _feedback_scalar(data, "resolution", path)
+        if resolution not in _FEEDBACK_RESOLUTIONS:
+            raise _feedback_error(path, "resolution is not supported")
+        if status_value in _FEEDBACK_ACTIVE_STATUSES and resolution != "pending":
+            raise _feedback_error(path, "active status requires resolution=pending")
+        if status_value == "resolved" and resolution != "fixed":
+            raise _feedback_error(path, "status=resolved requires resolution=fixed")
+        if status_value == "duplicate" and resolution != "duplicate":
+            raise _feedback_error(path, "status=duplicate requires resolution=duplicate")
+        if status_value == "rejected" and resolution not in {
+            "project-config",
+            "environment",
+            "not-shared",
+            "not-reproducible",
+            "wont-fix",
+        }:
+            raise _feedback_error(path, "status=rejected requires a supported rejected resolution")
+    elif status_value in _FEEDBACK_ACTIVE_STATUSES:
+        resolution = "pending"
+    elif status_value == "resolved":
+        resolution = "fixed"
+    elif status_value == "duplicate":
+        resolution = "duplicate"
+    else:
+        resolution = "not-shared"
+    metadata["resolution"] = resolution
     export_value = _feedback_scalar(data, "export", path)
     if export_value != "metadata-only":
         raise _feedback_error(path, "export must be metadata-only")
@@ -4029,22 +4090,101 @@ def _feedback_project_root(raw: str) -> Path:
     return root
 
 
-def _feedback_configured_project(root: Path) -> str:
+def _feedback_configured_project(root: Path) -> tuple[str, str]:
     config = load_effective_config(root)
     name = _text(_mapping(config.get("project")).get("name"))
     if not _FEEDBACK_SAFE_ID_RE.fullmatch(name):
         raise APError("Effective project.name must be a safe non-empty identifier for feedback")
-    return name
+    version = _text(_mapping(config.get("workflow")).get("skill_version"))
+    if not _FEEDBACK_SEMVER_RE.fullmatch(version):
+        raise APError("Effective workflow.skill_version must be valid SemVer for feedback")
+    return name, version
+
+
+def _feedback_release_at_least(current: str, required: str) -> bool:
+    def parts(value: str) -> tuple[tuple[int, int, int], bool]:
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([^+]+))?(?:\+.+)?", value)
+        if not match:
+            raise APError("Skill feedback version comparison requires valid SemVer")
+        return tuple(int(match.group(index)) for index in range(1, 4)), bool(match.group(4))
+
+    current_core, current_prerelease = parts(current)
+    required_core, required_prerelease = parts(required)
+    if current_core != required_core:
+        return current_core > required_core
+    if current_prerelease != required_prerelease:
+        return not current_prerelease
+    return current == required or (not current_prerelease and not required_prerelease)
+
+
+def _load_feedback_resolution_catalog() -> dict[str, dict[str, str]]:
+    path = _skill_root() / _FEEDBACK_RESOLUTION_POLICY
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise APError("Managed Skill feedback resolution catalog is missing") from exc
+    if _is_windows_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise APError("Managed Skill feedback resolution catalog must be a regular non-symlink file")
+    if metadata.st_size > _FEEDBACK_RESOLUTION_MAX_BYTES:
+        raise APError("Managed Skill feedback resolution catalog exceeds its size limit")
+    try:
+        payload = path.read_bytes()
+        value = json.loads(payload)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise APError("Managed Skill feedback resolution catalog is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"schema", "entries"}:
+        raise APError("Managed Skill feedback resolution catalog has an invalid top-level contract")
+    if value.get("schema") != _FEEDBACK_RESOLUTION_SCHEMA or not isinstance(value.get("entries"), list):
+        raise APError("Managed Skill feedback resolution catalog schema is invalid")
+    catalog: dict[str, dict[str, str]] = {}
+    ordered_signatures: list[str] = []
+    for index, raw in enumerate(value["entries"]):
+        if not isinstance(raw, dict):
+            raise APError(f"Managed Skill feedback resolution entry {index} must be an object")
+        allowed = {"signature", "disposition", "effective_skill_version", "canonical_signature"}
+        if set(raw) - allowed or not {"signature", "disposition", "effective_skill_version"}.issubset(raw):
+            raise APError(f"Managed Skill feedback resolution entry {index} has invalid fields")
+        if any(not isinstance(item, str) or not item.strip() for item in raw.values()):
+            raise APError(f"Managed Skill feedback resolution entry {index} values must be non-empty strings")
+        signature = raw["signature"].strip()
+        disposition = raw["disposition"].strip()
+        effective = raw["effective_skill_version"].strip()
+        if not _FEEDBACK_SIGNATURE_RE.fullmatch(signature):
+            raise APError(f"Managed Skill feedback resolution entry {index} has an invalid signature")
+        if disposition not in _FEEDBACK_CATALOG_DISPOSITIONS:
+            raise APError(f"Managed Skill feedback resolution entry {index} has an invalid disposition")
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", effective):
+            raise APError(f"Managed Skill feedback resolution entry {index} has an invalid release version")
+        canonical = _text(raw.get("canonical_signature"))
+        if disposition == "duplicate":
+            if not _FEEDBACK_SIGNATURE_RE.fullmatch(canonical) or canonical == signature:
+                raise APError(f"Managed Skill feedback resolution entry {index} needs a distinct canonical signature")
+        elif canonical:
+            raise APError(f"Managed Skill feedback resolution entry {index} cannot set canonical_signature")
+        if signature in catalog:
+            raise APError("Managed Skill feedback resolution catalog contains duplicate signatures")
+        entry = {
+            "signature": signature,
+            "disposition": disposition,
+            "effective_skill_version": effective,
+        }
+        if canonical:
+            entry["canonical_signature"] = canonical
+        catalog[signature] = entry
+        ordered_signatures.append(signature)
+    if ordered_signatures != sorted(ordered_signatures):
+        raise APError("Managed Skill feedback resolution entries must be sorted by signature")
+    return catalog
 
 
 def _collect_project_feedback(
     root: Path,
-) -> tuple[list[dict], int, tuple[int, int] | None, set[tuple[int, int]], str | None]:
+) -> tuple[list[dict], int, tuple[int, int] | None, set[tuple[int, int]], str, str]:
     reports_relative = Path("docs/skill-feedback/reports")
-    configured_project = _feedback_configured_project(root)
+    configured_project, installed_skill_version = _feedback_configured_project(root)
     with _open_project_directory(root, reports_relative) as directory_fd:
         if directory_fd is None:
-            return [], 0, None, set(), configured_project
+            return [], 0, None, set(), configured_project, installed_skill_version
         directory_metadata = (
             directory_fd.stat() if isinstance(directory_fd, Path) else os.fstat(directory_fd)
         )
@@ -4099,13 +4239,77 @@ def _collect_project_feedback(
             report["size_bytes"] = size
             reports.append(report)
             total_bytes += size
-        return reports, total_bytes, directory_identity, file_identities, configured_project
+        return (
+            reports,
+            total_bytes,
+            directory_identity,
+            file_identities,
+            configured_project,
+            installed_skill_version,
+        )
 
 
-def cmd_feedback_collect(args: argparse.Namespace) -> None:
-    raw_projects = list(args.project or [])
+def _feedback_lifecycle(
+    report: dict,
+    installed_skill_version: str,
+    catalog: dict[str, dict[str, str]],
+) -> tuple[str, str, dict[str, str] | None]:
+    if report["status"] not in _FEEDBACK_ACTIVE_STATUSES:
+        return "closed", "none", catalog.get(report["signature"])
+    catalog_entry = catalog.get(report["signature"])
+    if catalog_entry:
+        effective = catalog_entry["effective_skill_version"]
+        if not _feedback_release_at_least(installed_skill_version, effective):
+            return "upgrade-due", "upgrade-project-then-verify", catalog_entry
+        disposition = catalog_entry["disposition"]
+        if disposition == "fixed":
+            if report["last_verified_skill_version"] == installed_skill_version:
+                return "regression-current", "none", catalog_entry
+            if _feedback_release_at_least(report["last_verified_skill_version"], effective):
+                return (
+                    "recheck-due",
+                    "reproduce-on-installed-version-and-update-or-close",
+                    catalog_entry,
+                )
+            return "verification-due", "verify-fix-then-resolve-or-delete", catalog_entry
+        if disposition == "project-config":
+            return (
+                "reroute-due",
+                "move-to-docs/project/auto-coding-skill.yaml-then-reject-or-delete",
+                catalog_entry,
+            )
+        return "closure-due", "update-closed-status-or-delete", catalog_entry
+    if report["last_verified_skill_version"] != installed_skill_version:
+        return "recheck-due", "reproduce-on-installed-version-and-update-or-close", None
+    return "active-current", "none", None
+
+
+def _feedback_groups(reports: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for report in reports:
+        grouped.setdefault(report["signature"], []).append(report)
+    groups: list[dict] = []
+    for signature, items in sorted(grouped.items()):
+        projects = sorted({item["project"] for item in items})
+        group_source_projects = sorted({item["source_project"] for item in items})
+        groups.append(
+            {
+                "signature": signature,
+                "report_count": len(items),
+                "project_count": len(group_source_projects),
+                "projects": projects,
+                "source_projects": group_source_projects,
+                "report_ids": [item["report_id"] for item in items],
+                "cross_project": len(group_source_projects) > 1,
+            }
+        )
+    return groups
+
+
+def _feedback_collection_result(raw_projects: list[str]) -> dict:
     if not raw_projects:
         raise APError("feedback-collect requires at least one explicit --project")
+    catalog = _load_feedback_resolution_catalog()
     roots: list[Path] = []
     seen_roots: set[str] = set()
     for raw in raw_projects:
@@ -4133,6 +4337,7 @@ def cmd_feedback_collect(args: argparse.Namespace) -> None:
             directory_identity,
             file_identities,
             configured_project,
+            installed_skill_version,
         ) = _collect_project_feedback(root)
         if directory_identity is not None:
             if directory_identity in seen_report_directories:
@@ -4141,13 +4346,14 @@ def cmd_feedback_collect(args: argparse.Namespace) -> None:
         if seen_report_files.intersection(file_identities):
             raise APError("Explicit projects contain the same physical Skill feedback report file")
         seen_report_files.update(file_identities)
-        if configured_project is not None:
-            if configured_project in seen_configured_projects:
-                raise APError("Explicit projects must have distinct effective project.name values")
-            seen_configured_projects.add(configured_project)
-        source_descriptor = {"source_project": source_id}
-        if configured_project is not None:
-            source_descriptor["project"] = configured_project
+        if configured_project in seen_configured_projects:
+            raise APError("Explicit projects must have distinct effective project.name values")
+        seen_configured_projects.add(configured_project)
+        source_descriptor = {
+            "source_project": source_id,
+            "project": configured_project,
+            "skill_version": installed_skill_version,
+        }
         source_projects.append(source_descriptor)
         total_bytes += project_bytes
         if total_bytes > _FEEDBACK_COLLECTION_MAX_BYTES:
@@ -4160,45 +4366,89 @@ def cmd_feedback_collect(args: argparse.Namespace) -> None:
             )
         for report in project_reports:
             report["source_project"] = source_id
+            report["installed_skill_version"] = installed_skill_version
+            lifecycle, recommended_action, catalog_entry = _feedback_lifecycle(
+                report,
+                installed_skill_version,
+                catalog,
+            )
+            report["lifecycle"] = lifecycle
+            report["recommended_action"] = recommended_action
+            if catalog_entry:
+                report["catalog_disposition"] = catalog_entry["disposition"]
+                report["catalog_effective_skill_version"] = catalog_entry["effective_skill_version"]
+                if catalog_entry.get("canonical_signature"):
+                    report["catalog_canonical_signature"] = catalog_entry["canonical_signature"]
         reports.extend(project_reports)
 
     reports.sort(key=lambda item: (item["signature"], item["project"], item["report_id"], item["source_path"]))
-    grouped: dict[str, list[dict]] = {}
-    for report in reports:
-        grouped.setdefault(report["signature"], []).append(report)
-    groups: list[dict] = []
-    for signature, items in sorted(grouped.items()):
-        projects = sorted({item["project"] for item in items})
-        group_source_projects = sorted({item["source_project"] for item in items})
-        groups.append(
-            {
-                "signature": signature,
-                "report_count": len(items),
-                "project_count": len(group_source_projects),
-                "projects": projects,
-                "source_projects": group_source_projects,
-                "report_ids": [item["report_id"] for item in items],
-                "cross_project": len(group_source_projects) > 1,
-            }
-        )
+    triage_reports = [
+        report
+        for report in reports
+        if report["lifecycle"] in {"active-current", "regression-current"}
+    ]
+    groups = _feedback_groups(triage_reports)
     cross_project = [group for group in groups if group["cross_project"]]
-    result = {
+    lifecycle_counts = {
+        lifecycle: sum(1 for report in reports if report["lifecycle"] == lifecycle)
+        for lifecycle in sorted({report["lifecycle"] for report in reports})
+    }
+    action_required = [
+        {
+            key: report[key]
+            for key in (
+                "source_project",
+                "project",
+                "report_id",
+                "source_path",
+                "signature",
+                "installed_skill_version",
+                "last_verified_skill_version",
+                "lifecycle",
+                "recommended_action",
+                "catalog_disposition",
+                "catalog_effective_skill_version",
+                "catalog_canonical_signature",
+            )
+            if key in report
+        }
+        for report in reports
+        if report["recommended_action"] != "none"
+    ]
+    return {
         "schema": _FEEDBACK_COLLECTION_SCHEMA,
         "projects": source_projects,
         "report_count": len(reports),
+        "active_report_count": len(triage_reports),
+        "closed_report_count": lifecycle_counts.get("closed", 0),
+        "action_required_count": len(action_required),
         "total_bytes": total_bytes,
+        "lifecycle_counts": lifecycle_counts,
+        "action_required": action_required,
         "metadata": reports,
         "groups": groups,
         "cross_project": cross_project,
     }
+
+
+def cmd_feedback_collect(args: argparse.Namespace) -> None:
+    raw_projects = list(args.project or [])
+    result = _feedback_collection_result(raw_projects)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     print(
-        f"[feedback-collect] projects={len(roots)} reports={len(reports)} "
-        f"groups={len(groups)} cross_project={len(cross_project)} bytes={total_bytes}"
+        f"[feedback-collect] projects={len(result['projects'])} reports={result['report_count']} "
+        f"active={result['active_report_count']} closed={result['closed_report_count']} "
+        f"actions={result['action_required_count']} groups={len(result['groups'])} "
+        f"cross_project={len(result['cross_project'])} bytes={result['total_bytes']}"
     )
-    for group in groups:
+    for item in result["action_required"]:
+        print(
+            f"[feedback-collect] action={item['recommended_action']} "
+            f"project={item['project']} report={item['report_id']} lifecycle={item['lifecycle']}"
+        )
+    for group in result["groups"]:
         print(
             f"[feedback-collect] signature={group['signature']} "
             f"cross_project={str(group['cross_project']).lower()} "
@@ -11289,6 +11539,27 @@ def cmd_doctor(args: argparse.Namespace) -> dict | None:
         validation_errors.extend(
             f"install integrity: {issue}" for issue in integrity["errors"]
         )
+
+    if (
+        isinstance(raw_project_name, str)
+        and _FEEDBACK_SAFE_ID_RE.fullmatch(raw_project_name.strip())
+        and _FEEDBACK_SEMVER_RE.fullmatch(skill_version)
+        and (repo / "docs" / "skill-feedback" / "reports").exists()
+    ):
+        try:
+            feedback = _feedback_collection_result([str(repo)])
+        except APError:
+            advisories.append(
+                "Skill feedback metadata needs maintenance; run "
+                "autocoding feedback --projects . --json for the bounded diagnostic"
+            )
+        else:
+            if feedback["action_required_count"]:
+                advisories.append(
+                    f"{feedback['action_required_count']} Skill feedback report(s) need recheck, "
+                    "closure, upgrade, or project-overlay routing; run "
+                    "autocoding feedback --projects . --json"
+                )
 
     missing.extend(validation_errors)
 

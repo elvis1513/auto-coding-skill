@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.3.0 -->
+<!-- auto-coding-skill:managed-agents:start version=4.3.1 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts in
@@ -138,8 +138,10 @@ failure may continue in the same conversation/task without a second lifecycle.
   common/local state and cannot change the reviewed diff.
 - After diagnosing the project/Skill boundary, record a probable shared-Skill
   defect or gap from `docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md`; keep
-  project-only configuration out, redact sensitive/raw evidence, and never mutate
-  a frozen Reviewer diff merely to add feedback.
+  project-only configuration in `docs/project/auto-coding-skill.yaml`, redact
+  sensitive/raw evidence, and never mutate a frozen Reviewer diff merely to add
+  feedback. Periodically run `autocoding feedback --projects . --json`; after an
+  upgrade, verify and close/delete fixed reports or update current regressions.
 - Pure ledger/archive reconciliation is terminal: validate, commit once, and stop.
 - Fill configured project/Jenkins/GitLab/Nexus access fields during initialization.
   Plaintext values are allowed; do not invent or unnecessarily echo credentials.

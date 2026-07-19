@@ -3124,6 +3124,32 @@ class AutoCodingProfileTests(unittest.TestCase):
         closure = closure_path.read_text(encoding="utf-8")
         self.assertIn("- Effective Profile: high-risk", closure)
 
+    def test_feedback_lifecycle_tracks_upgrade_verification_regression_and_closure(self) -> None:
+        signature = "sha256:" + "a" * 64
+        catalog = {
+            signature: {
+                "signature": signature,
+                "disposition": "fixed",
+                "effective_skill_version": "4.3.1",
+            }
+        }
+        report = {
+            "status": "open",
+            "signature": signature,
+            "last_verified_skill_version": "4.3.0",
+        }
+        self.assertEqual("upgrade-due", ap._feedback_lifecycle(report, "4.3.0", catalog)[0])
+        self.assertEqual("verification-due", ap._feedback_lifecycle(report, "4.3.1", catalog)[0])
+        report["last_verified_skill_version"] = "4.3.1"
+        self.assertEqual("regression-current", ap._feedback_lifecycle(report, "4.3.1", catalog)[0])
+        self.assertEqual("recheck-due", ap._feedback_lifecycle(report, "4.3.2", catalog)[0])
+        report["last_verified_skill_version"] = "4.3.2"
+        self.assertEqual("recheck-due", ap._feedback_lifecycle(report, "4.3.1", catalog)[0])
+        report["last_verified_skill_version"] = "4.3.1"
+        self.assertEqual("recheck-due", ap._feedback_lifecycle(report, "4.3.2", {})[0])
+        report["status"] = "resolved"
+        self.assertEqual("closed", ap._feedback_lifecycle(report, "4.3.2", catalog)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

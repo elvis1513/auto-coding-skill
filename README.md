@@ -9,7 +9,10 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.3.0 separates exact managed defaults from a byte-stable project
+Version 4.3.1 preserves recursively nested project documentation assets of any
+file type, and gives project-owned Skill feedback a release-aware lifecycle with
+active/closed grouping, recheck and verification notices, and explicit routing
+of project preferences into the project overlay. Version 4.3.0 separates exact managed defaults from a byte-stable project
 configuration overlay, migrates legacy specialization with semantic proof, and
 adds project-owned shared-Skill feedback inboxes with bounded read-only
 multi-project triage. Upgrades now use recoverable, owner-bound transactions.
@@ -74,9 +77,10 @@ AGENTS.md (fully managed canonical repository contract)
 
 `autocoding init` also installs the exact shared documentation tree under
 `docs/{architecture,bugs,deployment,design,interfaces,project,reviews,skill-feedback,testing}`.
-Managed templates are replaced; the scaffolded project structure standard,
-mutable project docs, and valid architecture, ADR, interface, DD, review, or
-deploy-record documents plus `docs/skill-feedback/reports/*.md` are preserved;
+Managed templates are replaced; project-owned files under the designated
+architecture, bugs, deployment, design, interfaces, project, reviews, and testing
+roots are preserved recursively and byte-for-byte regardless of extension, as
+are `docs/skill-feedback/reports/*.md`;
 unrelated
 directories are archived under `.agents/archive/`. Re-running init is the complete upgrade operation;
 `sync` is the explicit multi-project equivalent. Project-local
@@ -109,7 +113,10 @@ docs/skill-feedback/
 ```
 
 The README and template are managed; reports are project-owned and upgrades
-preserve them byte-for-byte. A report is a candidate observation only. Create one
+preserve them byte-for-byte. Releases carry a signature-keyed resolution catalog;
+the read-only collector derives upgrade, recheck, verification, closure, and
+project-overlay routing actions without rewriting reports. Closed reports are
+excluded from active cross-project grouping. A report is a candidate observation only. Create one
 after distinguishing managed Skill behavior from project `risk.rules`, validation
 routes, access values, structure policy, business code, and environment failures.
 Do not automatically turn test failures or Reviewer findings into reports, and do
@@ -127,6 +134,11 @@ executes nothing from the documents, changes no repository, and groups exact
 root-cause signatures. Human triage still decides whether an observation is a
 shared defect, project configuration, environment issue, duplicate, or missing
 evidence before fixes and a release are planned.
+
+After a project upgrade, verify each requested action. Fixed reports should be
+deleted or updated to `resolved`; current regressions should update their last
+verified version; project-only preferences belong in
+`docs/project/auto-coding-skill.yaml` and should be removed from active feedback.
 
 Fill the project/Jenkins/GitLab/Nexus URL, username, and password overrides under
 `access.*` in `docs/project/auto-coding-skill.yaml`, then configure one real fast
@@ -373,6 +385,20 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.1
+
+- Replaced extension-bound documentation preservation with recursive ownership
+  for designated project documentation roots. PNG, SVG, JSON, YAML, binary, and
+  nested assets now remain byte-identical across status, dry-run, init, and sync;
+  active documentation symlinks and special files fail before writes.
+- Added the managed, signature-keyed feedback resolution catalog and compatible
+  v1/v2 report parsing. Collection now separates active and closed reports and
+  derives release-aware upgrade, recheck, verification, regression, closure, and
+  project-overlay routing states without modifying project-owned reports.
+- Surfaced feedback maintenance as non-blocking status, sync, init, and doctor
+  advisories, while keeping explicit feedback collection strict, bounded,
+  metadata-only, and read-only.
 
 ## What changed in 4.3.0
 

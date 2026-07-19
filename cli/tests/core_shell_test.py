@@ -87,7 +87,7 @@ class ProjectConfigResolverTests(unittest.TestCase):
         (self.repo / "docs" / "project").mkdir(parents=True)
         self.write_managed(
             """workflow:
-  skill_version: "4.3.0"
+  skill_version: "4.3.1"
   mode: dev
   profile: auto
   completion: push
@@ -130,7 +130,7 @@ access:
         effective = core.load_effective_config(self.repo)
 
         self.assertEqual("sample", effective["project"]["name"])
-        self.assertEqual("4.3.0", effective["workflow"]["skill_version"])
+        self.assertEqual("4.3.1", effective["workflow"]["skill_version"])
         self.assertEqual(self.repo / "docs" / "ENGINEERING.md", core.find_config(self.repo))
         self.assertEqual({}, core.load_project_overrides(self.repo))
 
@@ -153,7 +153,7 @@ access:
 
         effective = core.load_effective_config(self.repo)
 
-        self.assertEqual("4.3.0", effective["workflow"]["skill_version"])
+        self.assertEqual("4.3.1", effective["workflow"]["skill_version"])
         self.assertEqual("dev", effective["workflow"]["mode"])
         self.assertEqual("project-profile", effective["workflow"]["profile"])
         self.assertEqual("push", effective["workflow"]["completion"])
@@ -292,11 +292,11 @@ access:
 
     def test_large_managed_body_is_not_part_of_frontmatter_bound(self) -> None:
         self.write_managed(
-            'workflow:\n  skill_version: "4.3.0"\n',
+            'workflow:\n  skill_version: "4.3.1"\n',
             body="x" * (core.MANAGED_CONFIG_FRONTMATTER_MAX_BYTES + 1),
         )
 
-        self.assertEqual("4.3.0", core.load_effective_config(self.repo)["workflow"]["skill_version"])
+        self.assertEqual("4.3.1", core.load_effective_config(self.repo)["workflow"]["skill_version"])
 
     def test_yaml_failure_does_not_echo_content_or_absolute_path(self) -> None:
         secret = "NEVER_ECHO_THIS_SECRET"

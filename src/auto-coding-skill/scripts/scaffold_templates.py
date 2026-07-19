@@ -12,16 +12,23 @@ This directory is the project-owned inbox for candidate defects or capability
 gaps in the shared `auto-coding-skill`. It is not the project's business bug
 list and it does not make a reported issue an accepted shared defect.
 
-Create a report only after checking the project/Skill boundary. Project-specific
-`risk.rules`, validation routes, access values, structure policy, and business
-constraints stay in project configuration unless the same behavior is reproduced
-in managed Skill code or independently observed in another project.
+Route the observation before writing a report:
+
+| Observation | Project-owned destination |
+| --- | --- |
+| Risk rules, commands, validation routes, access values, structure policy, budgets, or project preferences | `docs/project/auto-coding-skill.yaml` |
+| Durable product, repository, runtime, or operating facts | `docs/project/*.md` |
+| A defect or capability gap reproducible in managed defaults, scripts, agents, CLI, or installer | `docs/skill-feedback/reports/*.md` |
+
+Project configuration may intentionally override managed defaults. A preference
+that is correct for only this project is not shared-Skill feedback.
 
 ## Record a candidate
 
 1. Copy `_TEMPLATE-SKILL-FEEDBACK.md` into `reports/`.
 2. Name it `YYYY-MM-DD-<short-slug>-<8-hex>.md`.
-3. Fill every frontmatter field and all six body sections.
+3. Fill every frontmatter field and all six body sections. Set
+   `last_verified_skill_version` to the version actually reproduced.
 4. Use one stable root-cause signature for duplicate observations.
 5. Redact credentials, tokens, private keys, customer/device data, absolute user
    paths, complete patches, Reviewer artifacts, and raw logs.
@@ -38,6 +45,29 @@ lowercase UTF-8 key `<component>|<origin_surface>|<short-root-cause-slug>` and
 prefix the 64-hex digest with `sha256:`. Exclude project names, paths, versions,
 timestamps, and log text so another project can independently reuse the key.
 
+## Keep reports current
+
+Each Skill release carries a managed resolution catalog keyed by `signature`.
+The collector compares that catalog, the project's installed Skill version, and
+`last_verified_skill_version` without changing the report. It may request an
+upgrade, recheck, fix verification, closure, or routing into the project overlay.
+
+After upgrading a project:
+
+- If the issue is fixed, verify it and either delete a local-only report or set
+  `status: resolved`, `resolution: fixed`, update `updated_at`, and set
+  `last_verified_skill_version` to the verified release.
+- If it still reproduces, keep an active status and update the verification
+  version; the collector treats it as a current regression.
+- If triage says it is project configuration, maintain the value in
+  `docs/project/auto-coding-skill.yaml`, then delete the report or set
+  `status: rejected` and `resolution: project-config`.
+- Use `duplicate` or another supported rejected resolution for closed reports.
+  Closed reports remain project history but are excluded from active grouping.
+
+Do not reopen a closed historical report. Create a new report with the same
+signature if the behavior later regresses.
+
 ## Periodic read-only collection
 
 From the Skill source checkout, explicitly list the projects to inspect:
@@ -52,18 +82,21 @@ whether the result is a shared defect, project configuration, environment issue,
 duplicate, or insufficient evidence before any Skill fix or release is planned.
 """,
         "docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md": """---
-schema: auto-coding-skill-feedback/v1
+schema: auto-coding-skill-feedback/v2
 report_id: ACSF-<project>-YYYYMMDD-<8-hex>
 status: open
 created_at: YYYY-MM-DDTHH:MM:SS+08:00
+updated_at: YYYY-MM-DDTHH:MM:SS+08:00
 project: <project>
 observed_skill_version: 0.0.0
+last_verified_skill_version: 0.0.0
 component: <reviewer-runtime|installer|classification|validation|structure|docs|other>
 kind: defect
 impact: <blocking|degraded|minor>
 origin_surface: <managed-template|managed-script|managed-agent|cli|installer>
 suspected_scope: shared
 signature: sha256:<64-lowercase-hex>
+resolution: pending
 export: metadata-only
 ---
 # <Short title>
@@ -260,6 +293,20 @@ MANAGED_FRAMEWORK_DOCS = frozenset({
 
 PROJECT_FEEDBACK_PATTERNS = (
     "docs/skill-feedback/reports/*.md",
+)
+
+
+# Files below these roots are project-owned artifacts regardless of extension or
+# nesting. Exact managed entries inside the same roots still converge first.
+PROJECT_OWNED_DOC_ROOTS = (
+    "docs/architecture",
+    "docs/bugs",
+    "docs/deployment",
+    "docs/design",
+    "docs/interfaces",
+    "docs/project",
+    "docs/reviews",
+    "docs/testing",
 )
 
 

@@ -367,12 +367,31 @@ function testInitFullyConvergesExistingProject() {
   writeFile(path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md"), "# ADR-0042\n\nKeep me.\n");
   writeFile(path.join(repo, "docs", "interfaces", "event-contracts.md"), "# Events\n\nKeep me.\n");
   writeFile(path.join(repo, "docs", "project", "operations.md"), "# Project operations\n\nKeep me.\n");
+  const projectAssets = new Map([
+    ["docs/architecture/diagrams/system.svg", Buffer.from("<svg>architecture</svg>\n")],
+    ["docs/bugs/attachments/trace.bin", Buffer.from([0, 1, 2, 255])],
+    ["docs/deployment/assets/values.yaml", Buffer.from("replicas: 2\n")],
+    ["docs/design/T0055-login-comparison.png", Buffer.from([137, 80, 78, 71, 0, 255])],
+    ["docs/interfaces/schemas/event.json", Buffer.from('{"type":"object"}\n')],
+    ["docs/project/assets/logo.bin", Buffer.from([10, 20, 30, 40])],
+    ["docs/reviews/evidence/chart.svg", Buffer.from("<svg>review</svg>\n")],
+    ["docs/testing/fixtures/sample.dat", Buffer.from("fixture\u0000bytes")],
+  ]);
+  for (const [relative, bytes] of projectAssets) writeFile(path.join(repo, relative), bytes);
+  writeFile(path.join(repo, "docs", "legacy", "orphan.bin"), Buffer.from([7, 8, 9]));
   const skillFeedback = path.join(repo, "docs", "skill-feedback", "reports", "2026-07-18-review-timeout-a13f82c1.md");
   const skillFeedbackContent = "project-owned feedback bytes\n";
   writeFile(skillFeedback, skillFeedbackContent);
   writeFile(structureStandard, customStructureStandard);
   writeFile(path.join(repo, ".agents", "agents", "custom.toml"), 'name = "custom"\n');
   writeFile(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt"), "obsolete\n");
+
+  const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
+  const dryActions = JSON.parse(dryRun.stdout).results[0].actions;
+  for (const [relative, bytes] of projectAssets) {
+    assert(!dryActions.some(item => item.path === relative && item.action === "would-delete"), `${relative}: dry-run must preserve project-owned assets`);
+    assert(fs.readFileSync(path.join(repo, relative)).equals(bytes), `${relative}: dry-run must preserve bytes`);
+  }
 
   run("node", [cli, "init"], { cwd: repo });
   const installedDocs = listProjectFiles(path.join(repo, "docs"))
@@ -386,6 +405,7 @@ function testInitFullyConvergesExistingProject() {
     "docs/project/auto-coding-skill.yaml",
     "docs/project/operations.md",
     "docs/skill-feedback/reports/2026-07-18-review-timeout-a13f82c1.md",
+    ...projectAssets.keys(),
   ].sort();
   assert(JSON.stringify(installedDocs) === JSON.stringify(expectedInstalledDocs), `docs framework must converge while preserving valid artifacts: ${installedDocs.join(", ")}`);
   const converged = fs.readFileSync(engineering, "utf8");
@@ -402,7 +422,8 @@ function testInitFullyConvergesExistingProject() {
   }
   assert(exists(path.join(repo, ".agents", "agents", "custom.toml")), "project-owned custom agents must survive init");
   assert(!exists(path.join(repo, ".agents", "skills", "auto-coding-skill", "obsolete.txt")), "extra Skill files must be removed");
-  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
+  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "legacy", "old-taskbook.md")), "removed docs must be archived outside active docs");
+  assert(exists(path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "legacy", "orphan.bin")), "unowned legacy binary assets must still be archived");
   assert(fs.readFileSync(structureStandard, "utf8") === customStructureStandard, "init must preserve a project-owned structure standard");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "adr", "0042-project-choice.md"), "utf8").includes("Keep me"), "numbered ADR artifacts must survive init");
   assert(fs.readFileSync(path.join(repo, "docs", "architecture", "system-context.md"), "utf8").includes("Keep me"), "architecture artifacts must survive init");
@@ -410,12 +431,18 @@ function testInitFullyConvergesExistingProject() {
   assert(fs.readFileSync(path.join(repo, "docs", "project", "operations.md"), "utf8").includes("Keep me"), "project fact documents promised by the manifest must survive init");
   assert(fs.readFileSync(skillFeedback, "utf8") === skillFeedbackContent, "project Skill feedback must survive init byte-for-byte");
   assert(fs.readFileSync(projectConfigPath(repo)).equals(overlayBefore), "init must preserve the project configuration overlay byte-for-byte");
+  for (const [relative, bytes] of projectAssets) {
+    assert(fs.readFileSync(path.join(repo, relative)).equals(bytes), `${relative}: init must preserve project-owned bytes`);
+  }
 
   run("node", [cli, "init"], { cwd: repo });
   assert(fs.readFileSync(engineering, "utf8") === converged, "repeated init must be byte-idempotent for ENGINEERING.md");
   assert(fs.readFileSync(projectConfigPath(repo)).equals(overlayBefore), "repeated init must preserve the project configuration overlay byte-for-byte");
   assert(fs.readFileSync(structureStandard, "utf8") === customStructureStandard, "repeated init must preserve the project structure standard byte-for-byte");
   assert(fs.readFileSync(skillFeedback, "utf8") === skillFeedbackContent, "repeated init must preserve project Skill feedback byte-for-byte");
+  for (const [relative, bytes] of projectAssets) {
+    assert(fs.readFileSync(path.join(repo, relative)).equals(bytes), `${relative}: repeated init must preserve project-owned bytes`);
+  }
   const secondDocs = listProjectFiles(path.join(repo, "docs"))
     .map(file => path.relative(repo, file).split(path.sep).join("/"))
     .sort();
@@ -468,6 +495,39 @@ function testStructureBlockWarningsDefaultsPreserveAndConverge() {
   );
 }
 
+function testProjectDocumentationSpecialFilesFailBeforeWrites() {
+  if (process.platform === "win32") return;
+  const repo = tmpdir("docs-special-files");
+  run("node", [cli, "init"], { cwd: repo });
+  const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
+  const sentinel = "stale-skill-must-survive-rejected-docs-preflight\n";
+  writeFile(skill, sentinel);
+
+  const externalFile = path.join(tmpdir("docs-special-target"), "external.png");
+  writeFile(externalFile, "external-target\n");
+  const linkedFile = path.join(repo, "docs", "design", "linked.png");
+  fs.symlinkSync(externalFile, linkedFile);
+  let rejected = run("node", [cli, "sync", "--projects", repo], { check: false });
+  assert(rejected.status !== 0 && rejected.stderr.includes("regular non-symlink files"), "project document file symlinks must fail before writes");
+  assert(fs.readFileSync(skill, "utf8") === sentinel && fs.readFileSync(externalFile, "utf8") === "external-target\n", "rejected file symlink must not mutate managed or external files");
+  fs.unlinkSync(linkedFile);
+
+  const externalDir = tmpdir("docs-special-directory-target");
+  const linkedDir = path.join(repo, "docs", "reviews", "linked-assets");
+  fs.symlinkSync(externalDir, linkedDir);
+  rejected = run("node", [cli, "sync", "--projects", repo], { check: false });
+  assert(rejected.status !== 0 && rejected.stderr.includes("regular non-symlink files"), "project document directory symlinks must fail before writes");
+  assert(fs.readFileSync(skill, "utf8") === sentinel && fs.readdirSync(externalDir).length === 0, "rejected directory symlink must preserve both roots");
+  fs.unlinkSync(linkedDir);
+
+  const fifo = path.join(repo, "docs", "testing", "fixture.pipe");
+  run("mkfifo", [fifo]);
+  rejected = run("node", [cli, "sync", "--projects", repo], { check: false });
+  assert(rejected.status !== 0 && rejected.stderr.includes("regular non-symlink files"), "project document FIFOs must fail before writes");
+  assert(fs.readFileSync(skill, "utf8") === sentinel, "rejected special files must preserve managed bytes");
+  fs.unlinkSync(fifo);
+}
+
 function testManagedPolicySummaryPreservesProjectConfiguration() {
   const repo = tmpdir("managed-policy-summary");
   run("node", [cli, "init"], { cwd: repo });
@@ -478,12 +538,12 @@ function testManagedPolicySummaryPreservesProjectConfiguration() {
   const legacySummary = "- `structure` and `optimization`: advisory architecture and no-new-debt policy.";
   const installedOldDefault = current
     .replace(/^  skill_version:.*$/m, "  skill_version: 4.2.5")
-    .replace("managed-workflow:start version=4.3.0", "managed-workflow:start version=4.2.5")
+    .replace("managed-workflow:start version=4.3.1", "managed-workflow:start version=4.2.5")
     .replace(neutralSummary, legacySummary);
   installTrustedEngineeringDefault(repo, installedOldDefault, "4.2.5");
   const customized = current
     .replace(/^  skill_version:.*$/m, "  skill_version: 4.2.5")
-    .replace("managed-workflow:start version=4.3.0", "managed-workflow:start version=4.2.5")
+    .replace("managed-workflow:start version=4.3.1", "managed-workflow:start version=4.2.5")
     .replace(neutralSummary, legacySummary)
     .replace(/^  enforcement:.*$/m, "  enforcement: blocking")
     .replace("  block_warnings: false", "  block_warnings: true")
@@ -502,7 +562,7 @@ function testManagedPolicySummaryPreservesProjectConfiguration() {
   const upgraded = fs.readFileSync(engineering, "utf8");
   const managedAfterUpgrade = readEngineeringConfig(engineering);
   const afterUpgrade = readEffectiveConfig(repo);
-  assert(managedAfterUpgrade.workflow?.skill_version === "4.3.0", "init must upgrade the managed workflow version");
+  assert(managedAfterUpgrade.workflow?.skill_version === "4.3.1", "init must upgrade the managed workflow version");
   assert(canonicalJson(afterUpgrade.structure) === canonicalJson(beforeUpgrade.structure), "init must preserve the complete project structure policy");
   assert(canonicalJson(afterUpgrade.optimization) === canonicalJson(beforeUpgrade.optimization), "init must preserve the complete project optimization policy");
   assert(upgraded.includes(neutralSummary), "upgraded managed text must defer to frontmatter policy");
@@ -580,11 +640,11 @@ function testMinimalInitConvergesWithinBudget() {
   assert(files.length <= 40, `minimal scaffold file budget exceeded: ${files.length}`);
   // Integrity, staging, fail-closed classification, immutable Reviewer snapshots,
   // bounded runtime supervision, failure-evidence binding, contract helpers,
-  // effective-config overlay parsing/migration, metadata-only feedback
-  // collection, and the language-aware structure scanner are executable
+  // effective-config overlay parsing/migration, release-aware metadata-only
+  // feedback lifecycle collection, and the language-aware structure scanner are executable
   // support code, not prompt context. Keep a measured ceiling while leaving
   // safety checks readable.
-  assert(lines <= 20000, `minimal scaffold line budget exceeded: ${lines}`);
+  assert(lines <= 20500, `minimal scaffold line budget exceeded: ${lines}`);
   const engineering = fs.readFileSync(path.join(repo, "docs", "ENGINEERING.md"), "utf8");
   const managedConfig = readEngineeringConfig(path.join(repo, "docs", "ENGINEERING.md"));
   assert(managedConfig.workflow?.profile === "auto", "engineering should enable adaptive profiles");
@@ -1153,7 +1213,7 @@ function testTamperedInstalledDefaultRejectsInitAndSyncWithoutWrites() {
   const skill = path.join(repo, ".agents", "skills", "auto-coding-skill", "SKILL.md");
   const oldDefault = fs.readFileSync(engineering, "utf8")
     .replace(/^  skill_version:.*$/m, '  skill_version: "4.2.7"')
-    .replace("managed-workflow:start version=4.3.0", "managed-workflow:start version=4.2.7");
+    .replace("managed-workflow:start version=4.3.1", "managed-workflow:start version=4.2.7");
   installTrustedEngineeringDefault(repo, oldDefault, "4.2.7");
   writeFile(engineering, oldDefault);
   fs.unlinkSync(overlay);
@@ -1442,7 +1502,7 @@ function testArchiveFallbackCollisionsNeverLosePreviousContent() {
     const engineering = path.join(repo, "docs", "ENGINEERING.md");
     fs.appendFileSync(engineering, "\n## Archive collision sentinel\n\nPreserve these ENGINEERING bytes.\n");
     const previous = fs.readFileSync(engineering);
-    const archiveDir = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs");
+    const archiveDir = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs");
     const preferred = path.join(archiveDir, "ENGINEERING.md");
     const legacyDigest = path.join(archiveDir, `ENGINEERING-${digest12(previous)}.md`);
     const occupiedPreferred = Buffer.from("occupied-engineering-default\n");
@@ -1472,7 +1532,7 @@ function testArchiveFallbackCollisionsNeverLosePreviousContent() {
       ".agents",
       "archive",
       "auto-coding-skill",
-      "4.3.0",
+      "4.3.1",
       "docs",
       "design",
     );
@@ -1498,8 +1558,8 @@ function testArchiveFallbackCollisionsNeverLosePreviousContent() {
     const previous = Buffer.from("# Project AGENTS before sync\n\nPreserve this sync history.\n");
     fs.writeFileSync(agents, previous);
     const archiveDir = path.join(repo, "docs", "archive", "workflow");
-    const preferred = path.join(archiveDir, "AGENTS.pre-4.3.0.md");
-    const legacyDigest = path.join(archiveDir, `AGENTS.pre-4.3.0-${digest12(previous)}.md`);
+    const preferred = path.join(archiveDir, "AGENTS.pre-4.3.1.md");
+    const legacyDigest = path.join(archiveDir, `AGENTS.pre-4.3.1-${digest12(previous)}.md`);
     const occupiedPreferred = Buffer.from("occupied-sync-default\n");
     const occupiedDigest = Buffer.from("occupied-sync-digest\n");
     writeFile(preferred, occupiedPreferred);
@@ -1519,7 +1579,7 @@ function testArchiveFallbackCollisionsNeverLosePreviousContent() {
     const agents = path.join(repo, "AGENTS.md");
     const previous = Buffer.from("# Project AGENTS before init\n\nPreserve this init history.\n");
     fs.writeFileSync(agents, previous);
-    const archiveDir = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0");
+    const archiveDir = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1");
     const preferred = path.join(archiveDir, "AGENTS.md");
     const legacyDigest = path.join(archiveDir, `AGENTS-${digest12(previous)}.md`);
     const occupiedPreferred = Buffer.from("occupied-init-default\n");
@@ -2149,7 +2209,7 @@ function testCliInstallArchivesFeedbackTemplatesAndPreservesReports() {
   writeFile(report, reportContent);
 
   run("node", [cli, "init"], { cwd: repo });
-  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "skill-feedback", "README.md");
+  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "skill-feedback", "README.md");
   assert(fs.readFileSync(feedbackReadme, "utf8").includes("Auto Coding Skill Feedback"), "transactional init must install the managed feedback README");
   assert(fs.readFileSync(archive, "utf8") === previousReadme, "transactional init must archive a pre-existing feedback README before replacement");
   assert(fs.readFileSync(report, "utf8") === reportContent, "transactional init must preserve project feedback reports byte-for-byte");
@@ -2244,7 +2304,7 @@ function testManagedEngineeringInitIsAuthoritativeAndIdempotent() {
 
   const engineering = path.join(repo, "docs", "ENGINEERING.md");
   const initial = fs.readFileSync(engineering, "utf8");
-  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.3\.0 -->/;
+  const startPattern = /<!-- auto-coding-skill:managed-workflow:start version=4\.3\.1 -->/;
   const endMarker = "<!-- auto-coding-skill:managed-workflow:end -->";
   assert(startPattern.test(initial), "new projects should include a versioned managed workflow marker");
   assert(initial.includes(endMarker), "new projects should include the managed workflow end marker");
@@ -2258,21 +2318,21 @@ function testManagedEngineeringInitIsAuthoritativeAndIdempotent() {
   const dryRun = run("node", [cli, "sync", "--projects", repo, "--dry-run", "--json"]);
   const dryResult = JSON.parse(dryRun.stdout).results[0];
   assert(dryResult.managedWorkflow.state === "stale", `dry-run should expose stale workflow state: ${dryRun.stdout}`);
-  assert(dryResult.managedWorkflow.version === "4.3.0", "dry-run should expose the target workflow version");
+  assert(dryResult.managedWorkflow.version === "4.3.1", "dry-run should expose the target workflow version");
   assert(dryResult.actions.some(item => item.action === "would-replace" && item.path === "docs/ENGINEERING.md"), "dry-run should plan exact replacement of the managed default document");
   assert(fs.readFileSync(engineering, "utf8") === customized, "dry-run must not write ENGINEERING.md");
 
   run("node", [cli, "init"], { cwd: repo });
   const updated = fs.readFileSync(engineering, "utf8");
   assert(!updated.includes("project note before") && !updated.includes("project note after"), "init must remove text outside the canonical ENGINEERING body");
-  assert(updated.includes("version=4.3.0"), "init should install the current managed workflow version");
+  assert(updated.includes("version=4.3.1"), "init should install the current managed workflow version");
   assert(updated.includes("The frontmatter contract is:"), "init should refresh stale managed workflow content");
 
   fillRequiredAccess(repo);
   const status = run("node", [cli, "status", "--projects", repo, "--json"]);
   const statusResult = JSON.parse(status.stdout).results[0];
   assert(statusResult.managedWorkflow.state === "current", `status should expose current managed workflow state: ${status.stdout}`);
-  assert(statusResult.managedWorkflow.version === "4.3.0", "status should expose the installed managed workflow version");
+  assert(statusResult.managedWorkflow.version === "4.3.1", "status should expose the installed managed workflow version");
 
   const beforeSecondInit = fs.readFileSync(engineering, "utf8");
   run("node", [cli, "init"], { cwd: repo });
@@ -2300,9 +2360,9 @@ function testLegacyEngineeringMigrationPreservesExistingBody() {
   assert(dryResult.actions.some(item => item.action === "would-archive" && item.path.endsWith("/docs/ENGINEERING.md")), "custom legacy migration must plan archival before replacement");
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(engineering, "utf8");
-  assert(migrated.includes("version=4.3.0"), "legacy migration should insert the current managed workflow");
+  assert(migrated.includes("version=4.3.1"), "legacy migration should insert the current managed workflow");
   assert(!migrated.includes(legacyNote), "legacy project text must not remain in the exact managed default document");
-  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "ENGINEERING.md");
+  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "ENGINEERING.md");
   assert(fs.readFileSync(archive, "utf8").includes(legacyNote), "legacy migration must preserve the complete previous body in history");
   const stable = fs.readFileSync(engineering, "utf8");
   run("node", [cli, "sync", "--projects", repo]);
@@ -2330,7 +2390,7 @@ function testOfficialLegacyEngineeringBodyIsReplacedWithoutDuplication() {
   assert(migrated === canonicalEngineering, "official legacy migration must install the exact managed default document");
   assert((migrated.match(/auto-coding-skill:managed-workflow:start/g) || []).length === 1, "official legacy migration should install exactly one managed workflow");
   assert((migrated.match(/^## Execution profiles$/gm) || []).length === 0, "official legacy migration must remove the old duplicated workflow body");
-  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "ENGINEERING.md");
+  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "ENGINEERING.md");
   assert(fs.readFileSync(archive, "utf8").includes("## Execution profiles"), "official legacy body must remain available in the historical archive");
 
   const stable = fs.readFileSync(engineering, "utf8");
@@ -2405,7 +2465,7 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
   run("node", [cli, "sync", "--projects", repo]);
   const agents = path.join(repo, "AGENTS.md");
   const initial = fs.readFileSync(agents, "utf8");
-  assert(initial.includes("managed-agents:start version=4.3.0"), "new projects should receive the versioned root AGENTS block");
+  assert(initial.includes("managed-agents:start version=4.3.1"), "new projects should receive the versioned root AGENTS block");
 
   const custom = [
     "# Project rules",
@@ -2424,12 +2484,12 @@ function testManagedAgentsMigrationReplacesWholeFileAndArchivesPreviousRules() {
 
   run("node", [cli, "sync", "--projects", repo]);
   const migrated = fs.readFileSync(agents, "utf8");
-  assert(migrated.includes("managed-agents:start version=4.3.0"), "AGENTS migration should install the current managed block");
+  assert(migrated.includes("managed-agents:start version=4.3.1"), "AGENTS migration should install the current managed block");
   assert(!migrated.includes("Preserve this repository-specific rule exactly."), "root AGENTS must contain no project-specific tail");
   assert(!migrated.includes("must execute `commands.gate_full`"), "known official conflicting rule should be removed");
   const canonical = fs.readFileSync(path.join(repoRoot, "cli", "assets", "skill", "data", "templates", "bridges", "AGENTS.md"), "utf8");
   assert(migrated === canonical, "root AGENTS must be byte-identical to the packaged canonical file");
-  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.3.0.md");
+  const archive = path.join(repo, "docs", "archive", "workflow", "AGENTS.pre-4.3.1.md");
   assert(fs.readFileSync(archive, "utf8").includes("Preserve this repository-specific rule exactly."), "previous AGENTS content must be archived once");
   const stable = fs.readFileSync(agents);
   run("node", [cli, "sync", "--projects", repo]);
@@ -2481,7 +2541,7 @@ function testEngineeringMarkerBoundaryIsNormalized() {
   const normalized = fs.readFileSync(engineering, "utf8");
   assert(normalized === current, "sync should restore the exact managed document when text is glued to its end marker");
   assert(!normalized.includes("# Project-specific workflow"), "project workflow text must not remain in the managed default document");
-  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "ENGINEERING.md");
+  const archive = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "ENGINEERING.md");
   assert(fs.readFileSync(archive, "utf8").includes(`${marker}# Project-specific workflow`), "the malformed previous document must remain available in history");
 }
 
@@ -2498,7 +2558,7 @@ function testEngineeringFrameworkRejectsAnyNonCanonicalWorkflowText() {
 
   run("node", [cli, "init"], { cwd: repo });
   assert(!fs.readFileSync(engineering, "utf8").includes("backend owns APIs"), "init must restore the canonical ENGINEERING body");
-  const archived = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.0", "docs", "ENGINEERING.md");
+  const archived = path.join(repo, ".agents", "archive", "auto-coding-skill", "4.3.1", "docs", "ENGINEERING.md");
   assert(fs.readFileSync(archived, "utf8").includes("backend owns APIs"), "removed project text should remain in non-authoritative history");
 }
 
@@ -2510,12 +2570,12 @@ function testManagedInstallIntegrityIsBoundedAndRepairable() {
 
   const manifestPath = path.join(repo, ".agents", "managed-install.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert(manifest.schema_version === 1 && manifest.skill_version === "4.3.0", "installed manifest must identify the release");
+  assert(manifest.schema_version === 1 && manifest.skill_version === "4.3.1", "installed manifest must identify the release");
   assert(manifest.entries.length > 0, "installed manifest must list managed files");
   for (const entry of manifest.entries) {
     assert(typeof entry.path === "string" && !path.isAbsolute(entry.path) && !entry.path.includes(".."), "manifest paths must be safe relative paths");
     assert(/^[0-9a-f]{64}$/.test(entry.sha256), `${entry.path}: manifest hash must be sha256`);
-    assert(entry.version === "4.3.0" && typeof entry.executable === "boolean", `${entry.path}: version/executable metadata missing`);
+    assert(entry.version === "4.3.1" && typeof entry.executable === "boolean", `${entry.path}: version/executable metadata missing`);
   }
   assert(!manifest.managed_namespaces.some(item => item.path === ".agents" || item.path === "docs"), "manifest must not mirror entire project-owned trees");
 
@@ -2600,7 +2660,7 @@ function testSkillFeedbackCollectionIsBoundedReadOnlyAndMetadataOnly() {
     "status: open",
     'created_at: "2026-07-18T10:00:00+08:00"',
     `project: ${project}`,
-    "observed_skill_version: 4.2.8",
+    "observed_skill_version: 4.3.1",
     "component: reviewer-runtime",
     "kind: defect",
     "impact: blocking",
@@ -2630,27 +2690,60 @@ function testSkillFeedbackCollectionIsBoundedReadOnlyAndMetadataOnly() {
     "Managed runtime behavior reproduces outside project configuration.",
     "",
   ].join("\n");
+  const renderV2 = (project, reportId, privateMarker, options) => render(project, reportId, privateMarker)
+    .replace("schema: auto-coding-skill-feedback/v1", "schema: auto-coding-skill-feedback/v2")
+    .replace("status: open", `status: ${options.status ?? "open"}`)
+    .replace('created_at: "2026-07-18T10:00:00+08:00"', 'created_at: "2026-07-18T10:00:00+08:00"\nupdated_at: "2026-07-19T10:00:00+08:00"')
+    .replace("observed_skill_version: 4.3.1", `observed_skill_version: ${options.observed ?? "4.3.1"}\nlast_verified_skill_version: ${options.lastVerified ?? options.observed ?? "4.3.1"}`)
+    .replace(signature, options.signature)
+    .replace("export: metadata-only", `resolution: ${options.resolution ?? "pending"}\nexport: metadata-only`);
   const firstReport = path.join(first, "docs", "skill-feedback", "reports", "2026-07-18-review-timeout-a13f82c1.md");
   const firstOtherReport = path.join(first, "docs", "skill-feedback", "reports", "2026-07-18-installer-gap-c35fa4e3.md");
   const secondReport = path.join(second, "docs", "skill-feedback", "reports", "2026-07-18-review-timeout-b24f93d2.md");
+  const closedReport = path.join(third, "docs", "skill-feedback", "reports", "2026-07-18-resolved-gap-d45fa4e3.md");
+  const fixedReport = path.join(first, "docs", "skill-feedback", "reports", "2026-07-18-project-assets-fd5748e4.md");
+  const rerouteReport = path.join(third, "docs", "skill-feedback", "reports", "2026-07-18-project-policy-a5eeb5eb.md");
   const firstContent = render(path.basename(first), "ACSF-geesight-20260718-a13f82c1", "PRIVATE-BODY-FIRST");
   const firstOtherContent = render(path.basename(first), "ACSF-geesight-20260718-c35fa4e3", "PRIVATE-BODY-OTHER")
     .replaceAll(signature, `sha256:${"b".repeat(64)}`);
   const secondContent = render(path.basename(second), "ACSF-xjmate-20260718-b24f93d2", "PRIVATE-BODY-SECOND");
+  const closedContent = render(path.basename(third), "ACSF-closed-20260718-d45fa4e3", "PRIVATE-BODY-CLOSED")
+    .replace("status: open", "status: resolved")
+    .replaceAll(signature, `sha256:${"d".repeat(64)}`);
+  const fixedContent = renderV2(path.basename(first), "ACSF-assets-20260718-fd5748e4", "PRIVATE-BODY-FIXED", {
+    signature: "sha256:fd5748e4ae40e9f86762c4f62b3302bbbb2b8ae9661adf9e0e07a2327ccf7a36",
+    observed: "4.3.0",
+    lastVerified: "4.3.0",
+  });
+  const rerouteContent = renderV2(path.basename(third), "ACSF-policy-20260718-a5eeb5eb", "PRIVATE-BODY-REROUTE", {
+    signature: "sha256:a5eeb5eb0ef5073dbeec726fa6c2016593b43eb1230171e3028f364c5b07bd86",
+  });
   writeFile(firstReport, firstContent);
   writeFile(firstOtherReport, firstOtherContent);
   writeFile(secondReport, secondContent);
+  writeFile(closedReport, closedContent);
+  writeFile(fixedReport, fixedContent);
+  writeFile(rerouteReport, rerouteContent);
 
   const collected = run("node", [cli, "feedback", "--projects", `${first},${second},${third}`, "--json"]);
   const result = JSON.parse(collected.stdout);
-  assert(result.schema === "auto-coding-skill-feedback-collection/v1", "feedback collection must identify its schema");
-  assert(result.report_count === 3 && result.groups.length === 2, "feedback collection must preserve multiple exact-signature groups");
+  assert(result.schema === "auto-coding-skill-feedback-collection/v2", "feedback collection must identify its active-only grouping schema");
+  assert(result.report_count === 6 && result.active_report_count === 3 && result.groups.length === 2, "feedback collection must group only current active reports");
+  assert(result.closed_report_count === 1 && result.lifecycle_counts.closed === 1, "closed v1 feedback must remain readable but leave active grouping");
+  assert(result.action_required_count === 2, `catalog resolutions must produce bounded project actions: ${collected.stdout}`);
+  const fixedAction = result.action_required.find(item => item.report_id === "ACSF-assets-20260718-fd5748e4");
+  assert(fixedAction?.lifecycle === "verification-due" && fixedAction.recommended_action.includes("verify-fix"), "a project at the fixed release must verify and close its old report");
+  const rerouteAction = result.action_required.find(item => item.report_id === "ACSF-policy-20260718-a5eeb5eb");
+  assert(rerouteAction?.lifecycle === "reroute-due" && rerouteAction.recommended_action.includes("docs/project/auto-coding-skill.yaml"), "project preferences must route to the project overlay");
+  const statusWithFeedback = run("node", [cli, "status", "--projects", first, "--json"], { check: false });
+  const statusFeedback = JSON.parse(statusWithFeedback.stdout).results[0].feedback;
+  assert(statusFeedback.available === true && statusFeedback.actionRequiredCount >= 1, "status must surface feedback maintenance without making it installation drift");
   assert(result.projects.length === 3 && result.projects.every(item => item.source_project && item.project), "feedback collection must retain every explicit initialized project, including one with no reports");
   const sharedGroup = result.groups.find(item => item.signature === signature);
   assert(sharedGroup?.cross_project === true && sharedGroup.project_count === 2, "same signature from two explicit roots must be cross-project");
   const localGroup = result.groups.find(item => item.signature === `sha256:${"b".repeat(64)}`);
   assert(localGroup?.cross_project === false && localGroup.project_count === 1, "a separate one-project signature must remain a local candidate group");
-  const rawReportDigests = [firstContent, firstOtherContent, secondContent]
+  const rawReportDigests = [firstContent, firstOtherContent, secondContent, closedContent, fixedContent, rerouteContent]
     .map(content => crypto.createHash("sha256").update(content).digest("hex"));
   assert(result.metadata.every(item => !("content_sha256" in item) && item.size_bytes > 0), "feedback metadata must not export a hash oracle over private report bodies");
   assert(rawReportDigests.every(digest => !collected.stdout.includes(digest)), "collector output must not expose raw report body digests");
@@ -2658,6 +2751,17 @@ function testSkillFeedbackCollectionIsBoundedReadOnlyAndMetadataOnly() {
   assert(!collected.stdout.includes(first) && !collected.stdout.includes(second) && !collected.stdout.includes(third), "collector output must not expose absolute project roots");
   assert(!exists(marker), "collector must never execute report content");
   assert(fs.readFileSync(firstReport, "utf8") === firstContent && fs.readFileSync(firstOtherReport, "utf8") === firstOtherContent && fs.readFileSync(secondReport, "utf8") === secondContent, "collection must not modify reports");
+  assert(fs.readFileSync(closedReport, "utf8") === closedContent && fs.readFileSync(fixedReport, "utf8") === fixedContent && fs.readFileSync(rerouteReport, "utf8") === rerouteContent, "lifecycle collection must preserve every project-owned report byte-for-byte");
+
+  writeFile(fixedReport, fixedContent.replace("last_verified_skill_version: 4.3.0", "last_verified_skill_version: 4.3.1"));
+  let lifecycleCheck = JSON.parse(run("node", [cli, "feedback", "--projects", first, "--json"]).stdout);
+  assert(lifecycleCheck.metadata.find(item => item.report_id === "ACSF-assets-20260718-fd5748e4")?.lifecycle === "regression-current", "a fixed signature reproduced on the fixed release must re-enter active triage as a regression");
+  writeFile(fixedReport, fixedContent);
+
+  writeFile(firstOtherReport, firstOtherContent.replace("observed_skill_version: 4.3.1", "observed_skill_version: 4.2.8"));
+  lifecycleCheck = JSON.parse(run("node", [cli, "feedback", "--projects", first, "--json"]).stdout);
+  assert(lifecycleCheck.metadata.find(item => item.report_id === "ACSF-geesight-20260718-c35fa4e3")?.lifecycle === "recheck-due", "an unresolved v1 report from an older Skill version must require recheck");
+  writeFile(firstOtherReport, firstOtherContent);
 
   writeFile(secondReport, render("spoofed-project", "ACSF-xjmate-20260718-b24f93d2", "PRIVATE-BODY-SECOND"));
   const spoofed = run("node", [cli, "feedback", "--projects", second, "--json"], { check: false });
@@ -2704,14 +2808,14 @@ function testSkillFeedbackCollectionIsBoundedReadOnlyAndMetadataOnly() {
 }
 
 function testReleaseVersionMarkersStayInSync() {
-  const expected = "4.3.0";
+  const expected = "4.3.1";
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8"));
   const policy = JSON.parse(fs.readFileSync(
     path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "workflow-migrations-v1.json"),
     "utf8",
   ));
-  assert(pkg.version === expected, "package version must match the 4.3.0 release");
+  assert(pkg.version === expected, "package version must match the 4.3.1 release");
   assert(lock.version === expected && lock.packages[""].version === expected, "package-lock versions must match");
   assert(policy.managed_versions.engineering === expected && policy.managed_versions.agents === expected, "managed workflow versions must match");
   const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "cli", "assets", "managed-install.json"), "utf8"));
@@ -2722,11 +2826,23 @@ function testReleaseVersionMarkersStayInSync() {
   assert(manifest.preserved.includes("docs/architecture/structure-standard.md"), "manifest must declare the project structure standard preserved");
   assert(manifest.entries.some(entry => entry.path === "docs/skill-feedback/README.md"), "feedback README must be exact-managed");
   assert(manifest.entries.some(entry => entry.path === "docs/skill-feedback/_TEMPLATE-SKILL-FEEDBACK.md"), "feedback template must be exact-managed");
+  assert(manifest.entries.some(entry => entry.path === ".agents/skills/auto-coding-skill/data/policies/feedback-resolutions-v1.json"), "feedback resolution catalog must be exact-managed");
   assert(manifest.preserved.includes("docs/skill-feedback/reports/*.md"), "manifest must declare project feedback reports preserved");
   assert(!manifest.managed_namespaces.some(item => item.path === "docs/skill-feedback"), "project feedback reports must stay outside managed namespaces");
   assert(manifest.preserved.includes("docs/project/auto-coding-skill.yaml"), "manifest must declare the project configuration overlay preserved");
   assert(!manifest.entries.some(entry => entry.path === "docs/project/auto-coding-skill.yaml"), "project configuration overlay must never be exact-managed");
   assert(!manifest.managed_namespaces.some(item => item.path === "docs/project"), "project configuration overlay must stay outside managed namespaces");
+  for (const root of ["architecture", "bugs", "deployment", "design", "interfaces", "project", "reviews", "testing"]) {
+    assert(manifest.preserved.includes(`docs/${root}/** (except exact-managed entries)`), `manifest must preserve recursive project-owned ${root} assets`);
+  }
+  const resolutionCatalog = JSON.parse(fs.readFileSync(
+    path.join(repoRoot, "src", "auto-coding-skill", "data", "policies", "feedback-resolutions-v1.json"),
+    "utf8",
+  ));
+  assert(resolutionCatalog.schema === "auto-coding-skill-feedback-resolutions/v1", "feedback resolution catalog schema must be stable");
+  const resolutionSignatures = resolutionCatalog.entries.map(item => item.signature);
+  assert(JSON.stringify(resolutionSignatures) === JSON.stringify([...new Set(resolutionSignatures)].sort()), "feedback resolution signatures must be unique and sorted");
+  assert(resolutionCatalog.entries.every(item => /^\d+\.\d+\.\d+$/.test(item.effective_skill_version)), "feedback resolution releases must be stable SemVer");
   const publishWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "npm-publish.yml"), "utf8");
   const runtimeRequirements = fs.readFileSync(path.join(repoRoot, "src", "auto-coding-skill", "requirements.txt"), "utf8");
   assert(publishWorkflow.includes("tags:\n      - \"v*\""), "npm publish must run from version tag pushes");
@@ -2764,6 +2880,7 @@ function testProtocolResponsibilitiesStaySeparated() {
 
 testInitFullyConvergesExistingProject();
 testStructureBlockWarningsDefaultsPreserveAndConverge();
+testProjectDocumentationSpecialFilesFailBeforeWrites();
 testManagedPolicySummaryPreservesProjectConfiguration();
 testInitRejectsMissingPythonRuntimeBeforeWrites();
 testDestVariants();

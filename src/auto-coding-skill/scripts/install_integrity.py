@@ -14,7 +14,12 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from scaffold_templates import MANAGED_FRAMEWORK_DOCS, PROJECT_FEEDBACK_PATTERNS, templates_for
+from scaffold_templates import (
+    MANAGED_FRAMEWORK_DOCS,
+    PROJECT_FEEDBACK_PATTERNS,
+    PROJECT_OWNED_DOC_ROOTS,
+    templates_for,
+)
 
 
 SCHEMA_VERSION = 1
@@ -224,14 +229,9 @@ def build_manifest(skill_root: Path, agents_root: Path, version: str) -> dict[st
         "preserved": [
             ".agents/archive/**",
             ".agents/agents/* (except paths listed in entries)",
-            "docs/project/**",
             "docs/project/auto-coding-skill.yaml",
             "docs/architecture/structure-standard.md",
-            "docs/architecture/adr/[0-9]*.md",
-            "docs/design/*.md",
-            "docs/interfaces/*.md",
-            "docs/deployment/deploy-records/*.md",
-            "docs/reviews/*.md",
+            *(f"{root}/** (except exact-managed entries)" for root in PROJECT_OWNED_DOC_ROOTS),
             *PROJECT_FEEDBACK_PATTERNS,
         ],
     }

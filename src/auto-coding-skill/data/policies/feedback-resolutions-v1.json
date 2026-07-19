@@ -1,0 +1,15 @@
+{
+  "schema": "auto-coding-skill-feedback-resolutions/v1",
+  "entries": [
+    {
+      "signature": "sha256:a5eeb5eb0ef5073dbeec726fa6c2016593b43eb1230171e3028f364c5b07bd86",
+      "disposition": "project-config",
+      "effective_skill_version": "4.3.1"
+    },
+    {
+      "signature": "sha256:fd5748e4ae40e9f86762c4f62b3302bbbb2b8ae9661adf9e0e07a2327ccf7a36",
+      "disposition": "fixed",
+      "effective_skill_version": "4.3.1"
+    }
+  ]
+}

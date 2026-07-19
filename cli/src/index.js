@@ -1867,6 +1867,50 @@ function readPackageVersion(){
   }
 }
 
+function feedbackLifecycleStatus(root, assetSkill){
+  if (!exists(path.join(root, "docs", "skill-feedback", "reports"))) {
+    return {
+      available: true,
+      skillVersion: "",
+      reportCount: 0,
+      activeReportCount: 0,
+      closedReportCount: 0,
+      actionRequiredCount: 0,
+      lifecycleCounts: {},
+      actionRequired: [],
+    };
+  }
+  const result = spawnSync(
+    runtimePython(),
+    [path.join(assetSkill, "scripts", "ap.py"), "feedback-collect", "--project", root, "--json"],
+    { encoding: "utf8", stdio: "pipe", maxBuffer: 2 * 1024 * 1024 },
+  );
+  if (result.error || result.signal || result.status !== 0) {
+    return {
+      available: false,
+      advisory: "run autocoding feedback --projects . --json to inspect Skill feedback metadata",
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout);
+    return {
+      available: true,
+      skillVersion: parsed.projects?.[0]?.skill_version || "",
+      reportCount: parsed.report_count || 0,
+      activeReportCount: parsed.active_report_count || 0,
+      closedReportCount: parsed.closed_report_count || 0,
+      actionRequiredCount: parsed.action_required_count || 0,
+      lifecycleCounts: parsed.lifecycle_counts || {},
+      actionRequired: parsed.action_required || [],
+    };
+  } catch {
+    return {
+      available: false,
+      advisory: "run autocoding feedback --projects . --json to inspect Skill feedback metadata",
+    };
+  }
+}
+
 function projectStatus(project, assetSkill, assetAgents, assetManifest, releaseManifest){
   const root = path.resolve(project);
   validateInstallTransactionInputs(root, assetSkill, assetManifest);
@@ -2010,6 +2054,7 @@ function projectStatus(project, assetSkill, assetAgents, assetManifest, releaseM
     installManifestDiffs.push({ path: ".agents/managed-install.json", status: "stale" });
   }
   const installIntegrity = installIntegrityStatus(root, "project", releaseManifest.skill_version);
+  const feedback = feedbackLifecycleStatus(root, assetSkill);
   const ok = !transactionPending
     && skillDiffs.length === 0
     && agentDiffs.length === 0
@@ -2055,6 +2100,7 @@ function projectStatus(project, assetSkill, assetAgents, assetManifest, releaseM
     invalidConfigTokens,
     managedWorkflow,
     managedAgentsDocument,
+    feedback,
     next,
   };
 }
@@ -2090,6 +2136,14 @@ function printProjectStatus(result){
     console.log(`[autocoding] agents managed-document: ${result.managedAgentsDocument?.state || "unknown"} target=${result.managedAgentsDocument?.version || "unknown"}${detail}`);
   }
   for (const item of result.agentBindings || []) console.log(`[autocoding] agent model: ${item.agent} -> ${item.model}`);
+  if (result.feedback?.available && result.feedback.actionRequiredCount) {
+    console.log(`[autocoding] feedback advisory: ${result.feedback.actionRequiredCount} report(s) need maintenance`);
+    for (const item of result.feedback.actionRequired || []) {
+      console.log(`[autocoding] feedback action: ${item.report_id} ${item.lifecycle} -> ${item.recommended_action}`);
+    }
+  } else if (result.feedback && !result.feedback.available) {
+    console.log(`[autocoding] feedback advisory: ${result.feedback.advisory}`);
+  }
   if (result.next) console.log(`[autocoding] next: ${result.next}`);
 }
 
@@ -2215,6 +2269,7 @@ function syncProject(project, assetSkill, assetAgents, assetManifest, releaseMan
     components,
     managedWorkflow: publicEngineeringPlan(reportedPlans.engineering),
     managedAgentsDocument: publicEngineeringPlan(reportedPlans.agents),
+    feedback: feedbackLifecycleStatus(root, assetSkill),
     actions,
   };
 }
@@ -2316,7 +2371,7 @@ function convergeProjectInstall(project, assetSkill, assetAgents, assetManifest,
   const integrity = requireInstallIntegrity(root, "project", releaseManifest.skill_version);
   actions.push({ action: "verify", path: ".agents/managed-install.json", detail: `${integrity.checked} managed files` });
   completeInstallTransaction(root, transaction);
-  return { project: root, actions };
+  return { project: root, feedback: feedbackLifecycleStatus(root, assetSkill), actions };
 }
 
 function projectRoot(){ return process.cwd(); }
@@ -2519,6 +2574,11 @@ Compatibility:
           const detail = item.detail ? ` - ${item.detail}` : "";
           console.log(`[autocoding] ${item.action}: ${item.path}${detail}`);
         }
+        if (result.feedback?.available && result.feedback.actionRequiredCount) {
+          console.log(`[autocoding] feedback advisory: ${result.feedback.actionRequiredCount} report(s) need maintenance`);
+        } else if (result.feedback && !result.feedback.available) {
+          console.log(`[autocoding] feedback advisory: ${result.feedback.advisory}`);
+        }
       }
     }
     process.exit(0);
@@ -2546,6 +2606,11 @@ Compatibility:
     for (const item of result.actions) {
       const detail = item.detail ? ` - ${item.detail}` : "";
       console.log(`[autocoding] ${item.action}: ${item.path}${detail}`);
+    }
+    if (result.feedback?.available && result.feedback.actionRequiredCount) {
+      console.log(`[autocoding] feedback advisory: ${result.feedback.actionRequiredCount} report(s) need maintenance`);
+    } else if (result.feedback && !result.feedback.available) {
+      console.log(`[autocoding] feedback advisory: ${result.feedback.advisory}`);
     }
     console.log("[autocoding] next: fill any blank access.* values and validation.routes in docs/project/auto-coding-skill.yaml, then run doctor.");
   } else {

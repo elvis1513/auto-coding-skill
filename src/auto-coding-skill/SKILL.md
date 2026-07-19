@@ -64,7 +64,7 @@ permission defect with no findings. The lifecycle owner must supply the unchange
 fingerprint and fixed reason code from a strictly newer managed runtime; the
 original Reviewer identity then runs once against a create-only audit and fresh
 fixed deadline. This migration never renews an ordinary timeout or substantive
-review result. A 4.3.5 runtime may repair only an untouched `retry-v4.3.4` or its
+review result. A 4.3.5+ runtime may repair only an untouched `retry-v4.3.4` or its
 exact non-substantive artifact-access block, preserving both audit generations.
 
 ## Close with the bounded routed gate

@@ -1,4 +1,4 @@
-<!-- auto-coding-skill:managed-agents:start version=4.3.5 -->
+<!-- auto-coding-skill:managed-agents:start version=4.3.6 -->
 # Shared Engineering Protocol
 
 This file is fully managed by `auto-coding-skill`. Keep project-specific facts in
@@ -94,7 +94,7 @@ failure may continue in the same conversation/task without a second lifecycle.
   consumed solely by the fixed Git-local artifact permission defect. It requires
   the lifecycle owner, unchanged fingerprint, original Reviewer, a strictly newer
   managed runtime, and the fixed reason code; it preserves all old evidence and
-  permits one audited attempt. A 4.3.5 runtime may repair only an untouched
+  permits one audited attempt. A 4.3.5+ runtime may repair only an untouched
   `retry-v4.3.4` or its exact non-substantive artifact-access block, with both
   audit generations retained. Never use it for timeouts, findings, changed scope,
   user overrides, or general Reviewer failures.

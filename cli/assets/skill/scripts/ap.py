@@ -300,7 +300,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.5", "engineering": "4.3.5"},
+    "managed_versions": {"agents": "4.3.6", "engineering": "4.3.6"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -14868,7 +14868,7 @@ def _known_review_artifact_access_failure(
         return False
     state_root = re.escape(str(_task_state_root(control_repo).resolve()))
     pattern = re.compile(
-        r"^review-artifact exited(?: with code)? 2: Cannot protect Git-local review storage"
+        r"^review-artifact exited(?:(?: with code)? 2:| with:) Cannot protect Git-local review storage"
         rf"(?: at |: ){state_root}: (?:\[Errno 1\] )?Operation not permitted\.?$"
     )
     if not pattern.fullmatch(evidence[0]):
@@ -14880,6 +14880,7 @@ def _known_review_artifact_access_failure(
         "Review could not begin because review-artifact failed before emitting the verified immutable patch: the read-only sandbox denied protection of Git-local review storage.",
         "Review could not begin because the mandatory frozen artifact verification failed under the read-only filesystem.",
         "Review could not begin because review-artifact failed before emitting the immutable patch.",
+        "Review could not begin because review-artifact failed to verify and emit the immutable patch.",
     }
     if _text(result.get("summary")) not in summaries:
         return False
@@ -14891,6 +14892,7 @@ def _known_review_artifact_access_failure(
         "The frozen diff was not emitted or substantively reviewed; no correctness or security conclusion is available.",
         "The immutable patch was neither verified nor analyzed; no substantive correctness or security conclusion is available.",
         "The immutable patch was not emitted or substantively reviewed.",
+        "The SHA-256-bound frozen diff was not emitted or reviewed, so no substantive correctness or security conclusion is available.",
     }
     if not isinstance(risks, list) or len(risks) != 1 or risks[0] not in allowed_risks:
         return False

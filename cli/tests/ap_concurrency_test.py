@@ -198,7 +198,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             check=check,
         )
 
-    def managed_runtime(self, root: Path, version: str = "4.3.5") -> Path:
+    def managed_runtime(self, root: Path, version: str = "4.3.6") -> Path:
         install_root = root / "managed-runtime"
         skill = install_root / ".agents" / "skills" / "auto-coding-skill"
         shutil.copytree(REPO_ROOT / "src" / "auto-coding-skill", skill)
@@ -1666,7 +1666,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             ).stdout
         )
         self.assertEqual("retry-authorized", authorized["status"])
-        self.assertEqual("retry-v4.3.5", authorized["retry_token"])
+        self.assertEqual("retry-v4.3.6", authorized["retry_token"])
         audit_path = Path(authorized["audit_path"])
         self.assertEqual(0o600, audit_path.stat().st_mode & 0o777)
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -1705,9 +1705,9 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )["tasks"][0]
         retry_review = status["review"]
         self.assertEqual("approved", retry_review["verdict"])
-        self.assertIn(".retry-v4.3.5.result.json", retry_review["runtime_result_path"])
+        self.assertIn(".retry-v4.3.6.result.json", retry_review["runtime_result_path"])
         retry_receipt = json.loads(Path(retry_review["runtime_receipt_path"]).read_text())
-        self.assertEqual("retry-v4.3.5", retry_receipt["runtime_retry_token"])
+        self.assertEqual("retry-v4.3.6", retry_receipt["runtime_retry_token"])
         self.assertEqual(authorized["audit_sha256"], retry_receipt["runtime_retry_audit_sha256"])
 
         repeated = self.ap_script(
@@ -1724,10 +1724,10 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, repeated.returncode)
 
-    def test_434_retry_artifact_access_block_gets_one_435_repair(self) -> None:
+    def test_434_retry_artifact_access_block_gets_one_fixed_runtime_repair(self) -> None:
         root, repo, _ = self.make_repo()
         managed_434 = self.managed_runtime(root / "runtime-434", "4.3.4")
-        managed_435 = self.managed_runtime(root / "runtime-435", "4.3.5")
+        managed_fixed = self.managed_runtime(root / "runtime-fixed", "4.3.6")
         worktree = self.start_task(repo, "REVIEW-RETRY-REPAIR", "shared.txt")
         (worktree / "shared.txt").write_text("repair retry payload\n", encoding="utf-8")
         common_dir = Path(git_output(repo, "rev-parse", "--git-common-dir"))
@@ -1740,9 +1740,9 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             f"state_root = {str(state_root)!r}\n"
             "print(json.dumps({"
             "'verdict': 'blocked', "
-            "'summary': 'Review could not begin because review-artifact failed before emitting the immutable patch.', "
-            "'evidence': ['review-artifact exited 2: Cannot protect Git-local review storage at ' + state_root + ': Operation not permitted.'], "
-            "'risks': ['The immutable patch was not emitted or substantively reviewed.']}))\n",
+            "'summary': 'Review could not begin because review-artifact failed to verify and emit the immutable patch.', "
+            "'evidence': ['review-artifact exited with: Cannot protect Git-local review storage: ' + state_root + ': [Errno 1] Operation not permitted'], "
+            "'risks': ['The SHA-256-bound frozen diff was not emitted or reviewed, so no substantive correctness or security conclusion is available.']}))\n",
             encoding="utf-8",
         )
         blocked_runner = json.dumps([sys.executable, str(blocked_reviewer)])
@@ -1808,7 +1808,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         repaired = json.loads(
             self.ap_script(
                 worktree,
-                managed_435,
+                managed_fixed,
                 "review-runtime-retry",
                 "REVIEW-RETRY-REPAIR",
                 "--diff-fingerprint",
@@ -1819,14 +1819,14 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 "--json",
             ).stdout
         )
-        self.assertEqual("retry-v4.3.5", repaired["retry_token"])
+        self.assertEqual("retry-v4.3.6", repaired["retry_token"])
         repair_audit = json.loads(Path(repaired["audit_path"]).read_text(encoding="utf-8"))
         self.assertEqual("retry-v4.3.4", repair_audit["superseded_retry_token"])
         self.assertEqual("blocked", repair_audit["superseded_retry_state"])
         reviewed = json.loads(
             self.ap_script(
                 worktree,
-                managed_435,
+                managed_fixed,
                 "review-run",
                 "REVIEW-RETRY-REPAIR",
                 "--reviewer",
@@ -1835,7 +1835,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
                 self.artifact_reviewer_runner(
                     root,
                     "repair retry payload",
-                    runtime_script=managed_435,
+                    runtime_script=managed_fixed,
                 ),
                 "--json",
             ).stdout

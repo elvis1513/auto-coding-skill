@@ -100,18 +100,54 @@ function stripLegacyAccessConfiguration(text) {
   return text.replace(/\n?## Migrated access configuration\s*\n```yaml\n[\s\S]*?\n```\s*/g, "\n").trim();
 }
 
+function stripCredentialMaterial(text) {
+  const lines = stripLegacyAccessConfiguration(text).split(/\r?\n/);
+  const output = [];
+  let noted = false;
+  const note = () => {
+    if (!noted) output.push("> Credential values are local-only; see the credential source reference below.");
+    noted = true;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\|.*\b(password|token|secret|credential|private[ _-]?key)\b/i.test(line)) {
+      while (index < lines.length && /^\|/.test(lines[index])) index += 1;
+      index -= 1;
+      note();
+      continue;
+    }
+    if (/^```/.test(line)) {
+      const block = [line];
+      while (index + 1 < lines.length) {
+        index += 1;
+        block.push(lines[index]);
+        if (/^```/.test(lines[index])) break;
+      }
+      if (block.some(item => /\b(password|token|secret|private[ _-]?key)\b\s*[:=]/i.test(item))) note();
+      else output.push(...block);
+      continue;
+    }
+    if (/\b(password|token|secret|private[ _-]?key)\b.*(?:[:=]|\|)/i.test(line)) {
+      note();
+      continue;
+    }
+    output.push(line);
+  }
+  return output.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function migrateLegacyEnvironment(project) {
   const previous = readManifest(project);
   const environment = path.join(project, "docs", "ENVIRONMENT.md");
   const projectConfig = path.join(project, "docs", "PROJECT.md");
   if (exists(projectConfig)) {
     const existing = fs.readFileSync(projectConfig, "utf8");
-    const cleaned = stripLegacyAccessConfiguration(existing);
+    const cleaned = stripCredentialMaterial(existing);
     if (cleaned !== existing.trim()) fs.writeFileSync(projectConfig, `${cleaned}\n`);
     return false;
   }
   if (!exists(environment) || isManaged(previous, "docs/ENVIRONMENT.md")) return false;
-  const legacy = stripLegacyAccessConfiguration(fs.readFileSync(environment, "utf8"));
+  const legacy = stripCredentialMaterial(fs.readFileSync(environment, "utf8"));
   if (!legacy) return false;
   const template = fs.readFileSync(path.join(assetSkill, "data", "templates", "PROJECT.md"), "utf8").trimEnd();
   mkdirFor(projectConfig);

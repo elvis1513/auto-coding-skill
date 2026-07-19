@@ -44,7 +44,7 @@ assert.equal(fs.readFileSync(projectConfig, "utf8"), "# Project Configuration\n\
 
 const status = JSON.parse(run(["status", "--projects", projectA, "--json"]));
 assert.equal(status.results[0].ok, true);
-assert.equal(status.results[0].version, "5.0.2");
+assert.equal(status.results[0].version, "5.0.3");
 
 const legacyEnvironment = path.join(projectB, "docs/ENVIRONMENT.md");
 fs.mkdirSync(path.dirname(legacyEnvironment), { recursive: true });
@@ -74,6 +74,9 @@ assert.doesNotMatch(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf
 fs.appendFileSync(path.join(projectB, "docs/PROJECT.md"), "\n## Migrated access configuration\n```yaml\naccess:\n  password: \"\"\n```\n");
 run(["init"], projectB);
 assert.doesNotMatch(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /Migrated access configuration/, "sync must clean the known legacy access block from existing project configuration");
+fs.appendFileSync(path.join(projectB, "docs/PROJECT.md"), "\n| Host | Username | Password |\n| --- | --- | --- |\n| 192.168.20.10 | admin | local-value |\n");
+run(["init"], projectB);
+assert.doesNotMatch(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /local-value/, "sync must remove legacy credential values from project configuration");
 assert.ok(!fs.existsSync(legacyRuntime), "exact legacy Gate runtime must be retired during upgrade");
 assert.ok(!fs.existsSync(legacyEngineering), "exact legacy Gate policy must be retired during upgrade");
 assert.ok(fs.existsSync(path.join(projectB, ".agents/archive/auto-coding-skill/4.3.7/docs/ENGINEERING.md")), "legacy policy must remain in archive");

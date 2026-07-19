@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "skill_version": "5.0.2",
+  "skill_version": "5.0.3",
   "asset_files": [
     {
       "path": "SKILL.md",
@@ -8,11 +8,11 @@
     },
     {
       "path": "data/templates/ENVIRONMENT.md",
-      "sha256": "d60f87e9511781b8d497aaad0ed9fedac9510b59d97090b0b3e7d6ce26a224c6"
+      "sha256": "daf360b44b2bb68315a201de2f82eaf2fce8e6f1e58ceefe91190c6f8916c125"
     },
     {
       "path": "data/templates/PROJECT.md",
-      "sha256": "f7cc608d30e3c1ad30ce79310cfcf8d2149d109090e44d93b242fa9a073a19c3"
+      "sha256": "9e6bb774677b5d752453c09f0c22771b3075fc81969e564ee7c12bdc1310b143"
     },
     {
       "path": "data/templates/architecture/.gitkeep",
@@ -20,7 +20,7 @@
     },
     {
       "path": "data/templates/bridges/AGENTS.md",
-      "sha256": "4e45ae0ac5a08ba363339e3872ba7d39beb40dfe036cd9247a3536d60031d767"
+      "sha256": "e46deaf34d30690a0f242a2e4c668edc9b213099cb8c37310c90400f6ba5d6d8"
     },
     {
       "path": "data/templates/deployment/.gitkeep",

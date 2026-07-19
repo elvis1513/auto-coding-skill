@@ -287,7 +287,7 @@ _FINAL_GATE_CACHE_ALGORITHM = "final-gate-v1"
 _WORKFLOW_MIGRATION_POLICY = Path("data/policies/workflow-migrations-v1.json")
 _FALLBACK_WORKFLOW_MIGRATION_POLICY = {
     "schema_version": 1,
-    "managed_versions": {"agents": "4.3.2", "engineering": "4.3.2"},
+    "managed_versions": {"agents": "4.3.3", "engineering": "4.3.3"},
     "known_official_engineering_body_sha256": [
         "d1306cc626e8baf8c83c953b760fd771066de2bf125168eca3a7b7d6ff2b87a2",
         "305931c6edef770033a4f1970b00e5fb1c1728351856a173dbfa497daf563021",
@@ -4895,9 +4895,19 @@ def _guard_review_directory(path: Path, common_dir: Path, *, create: bool) -> No
         raise APError(f"Git-local review storage escapes the Git common directory: {path}") from exc
     if os.name == "posix" and path.exists():
         try:
-            path.chmod(0o700)
+            metadata = path.lstat()
+            if metadata.st_uid != os.geteuid():
+                raise APError(f"Git-local review storage must be owned by the current user: {path}")
+            if create:
+                path.chmod(0o700)
+                metadata = path.lstat()
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise APError(f"Git-local review storage must use mode 0700: {path}")
+        except APError:
+            raise
         except OSError as exc:
-            raise APError(f"Cannot protect Git-local review storage: {path}: {exc}") from exc
+            action = "protect" if create else "verify"
+            raise APError(f"Cannot {action} Git-local review storage: {path}: {exc}") from exc
 
 
 def _task_review_root(repo: Path, *, create: bool = False) -> Path:
@@ -5985,8 +5995,12 @@ def _require_task_context(repo: Path, cfg: dict, task_id: str) -> dict:
 @contextlib.contextmanager
 def _repo_lock(repo: Path, name: str, timeout_s: float = 30.0) -> Iterator[None]:
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "repository"
-    lock_path = _task_state_root(repo) / "locks" / f"{safe_name}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    common_dir = _git_common_dir(repo).resolve()
+    state_root = common_dir / "auto-coding-skill"
+    lock_root = state_root / "locks"
+    _guard_review_directory(state_root, common_dir, create=True)
+    _guard_review_directory(lock_root, common_dir, create=True)
+    lock_path = lock_root / f"{safe_name}.lock"
     handle = lock_path.open("a+", encoding="utf-8")
     try:
         try:
@@ -6153,6 +6167,7 @@ _SCOPE_RANK = {"changed": 0, "standard": 1, "full": 2}
 _DOC_PATH_PATTERNS = ["*.md", "docs/**"]
 _DEFAULT_FULL_PATH_PATTERNS = [
     ".agents/**",
+    "AGENTS.md",
     ".github/workflows/**",
     "Jenkinsfile",
     "Jenkinsfile.*",
@@ -9047,7 +9062,24 @@ def _classify_paths(paths: list[str]) -> dict:
         words = {word for word in re.split(r"[^a-z0-9]+", lower) if word}
         if _path_matches(path, _DEFAULT_FULL_PATH_PATTERNS):
             categories.add("release_or_tooling")
-        if words & {"migration", "migrations", "schema", "database", "db", "sql"} or lower.endswith(".sql"):
+        parts = [part for part in lower.replace("\\", "/").strip("/").split("/") if part]
+        directories = set(parts[:-1])
+        suffix = Path(lower).suffix
+        semantic_path_words = words
+        project_documentation_or_managed_skill = bool(directories & {".agents", "docs"})
+        if (
+            suffix in {".ddl", ".sql"}
+            or directories & {"alembic", "flyway", "liquibase", "prisma"}
+            or (
+                semantic_path_words & {"database", "databases", "db", "schema", "schemas", "sql"}
+                and not project_documentation_or_managed_skill
+            )
+            or (
+                semantic_path_words & {"migration", "migrations"}
+                and not project_documentation_or_managed_skill
+                and "workflow" not in semantic_path_words
+            )
+        ):
             categories.add("db")
         if any(token in lower for token in ["api", "controller", "handler", "route", "server"]):
             categories.add("api")
@@ -9111,7 +9143,10 @@ def _classification_for_categories(categories: set[str], file_count: int) -> dic
 def _classify_intent(intent: str) -> list[str]:
     value = _text(intent).lower()
     keyword_categories = {
-        "db": ["database", "migration", "schema", "sql", "数据库", "数据迁移", "表结构"],
+        "db": [
+            "database", "db migration", "data migration", "database migration",
+            "database schema", "table schema", "sql", "数据库", "数据迁移", "表结构",
+        ],
         "api": ["api", "controller", "endpoint", "接口", "控制器"],
         "auth": ["auth", "permission", "security", "登录", "认证", "鉴权", "权限", "安全"],
         "payment": ["payment", "billing", "checkout", "支付", "账单", "结算"],
@@ -9135,7 +9170,8 @@ def _high_confidence_intent_categories(intent: str) -> set[str]:
     value = _text(intent).lower()
     signals = {
         "db": [
-            "migration", "schema", "ddl", "sql", "table structure", "database migration",
+            "database", "db migration", "data migration", "database migration",
+            "database schema", "table schema", "ddl", "sql", "table structure",
             "数据迁移", "数据库迁移", "表结构", "数据库结构",
         ],
         "auth": [
@@ -9755,11 +9791,22 @@ def _codex_reviewer_command(
     if depth not in {"focused", "deep"}:
         raise APError(f"Unsupported Reviewer depth: {review_depth!r}")
     reasoning_effort = "high" if depth == "focused" else "xhigh"
+    runtime_python = os.path.abspath(sys.executable)
+    runtime_script = Path(__file__).resolve()
     artifact_command = shlex.join(
         [
-            "python3",
-            "docs/tools/autopipeline/ap.py",
+            runtime_python,
+            str(runtime_script),
             "review-artifact",
+            "--file",
+            str(assignment_path),
+        ]
+    )
+    template_command = shlex.join(
+        [
+            runtime_python,
+            str(runtime_script),
+            "agent-result-template",
             "--file",
             str(assignment_path),
         ]
@@ -9770,8 +9817,8 @@ def _codex_reviewer_command(
         "mode 0600, and diff_artifact_sha256, then emits the immutable patch. "
         "Review that emitted patch and never substitute a live git diff or diff_base..diff_head. "
         "Stay inside its identity and deadline. Use "
-        "`python3 docs/tools/autopipeline/ap.py agent-result-template --file "
-        f"{assignment_path} --verdict <approved|changes-requested|blocked>` when useful. "
+        f"`{template_command} --verdict approved` when useful, replacing `approved` "
+        "with `changes-requested` or `blocked` when appropriate. "
         "Return only one JSON object as the final response; do not modify files."
     )
     command = [
@@ -10515,7 +10562,7 @@ def _resolve_execution_plan(
     detected_profile = "standard"
     profile_reasons: list[str] = []
     docs_only_paths = _docs_only(classification_inputs)
-    docs_or_tests_only = bool(classification_inputs) and (
+    docs_or_tests_only = "release_or_tooling" not in path_categories and bool(classification_inputs) and (
         (docs_only_paths and str(impact["selected_scope"]) != "full")
         or _tests_only(classification_inputs)
     )
@@ -12870,6 +12917,11 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "only when classify requires isolation/review or the user explicitly requests it."
         )
 
+    owner = _actor_id(args, "owner")
+    runtime_actor = _text(os.environ.get("CODEX_THREAD_ID"))
+    explicit_writer = _text(getattr(args, "writer", ""))
+    writer = _actor_id(args, "writer") if runtime_actor or explicit_writer else owner
+
     configured_isolation = _task_isolation(cfg)
     access_issues = _access_config_issues(cfg)
     if access_issues:
@@ -12933,10 +12985,6 @@ def cmd_task_start(args: argparse.Namespace) -> None:
             "prerequisite_shas": prerequisite_shas,
         }
         _require_dependencies(repo, dependency_contract, base_sha)
-        owner = _text(getattr(args, "owner", "")) or _text(os.environ.get("CODEX_THREAD_ID"))
-        if not owner:
-            raise APError("task-start requires --owner or CODEX_THREAD_ID.")
-        writer = _text(getattr(args, "writer", "")) or owner
         plan = _resolve_execution_plan(
             cfg,
             repo,
@@ -14655,6 +14703,48 @@ def cmd_review_run(args: argparse.Namespace) -> None:
         raise APError("Reviewer runtime ended without a process result.")
     finished_at = _now_iso()
     if completed.returncode != 0:
+        substantive_result = _substantive_reviewer_result(result_path, assignment)
+        if substantive_result is None:
+            try:
+                substantive_result = _substantive_reviewer_event_result(
+                    _bounded_reviewer_output(completed.stdout, "stdout"),
+                    assignment,
+                )
+            except APError:
+                substantive_result = None
+        if substantive_result is not None:
+            _write_private_json(result_path, substantive_result)
+            result_sha256 = _review_result_file_sha256(result_path)
+            _update_review_runtime(
+                control_repo,
+                task_id,
+                fingerprint,
+                updates={
+                    "verdict": substantive_result["verdict"],
+                    "reason": "substantive Reviewer result observed before nonzero process exit",
+                    "runtime_state": "blocked",
+                    "runtime_finished_at": finished_at,
+                    "runtime_exit_code": completed.returncode,
+                    "runtime_attempt_count": len(attempts),
+                    "runtime_failure_kind": "process-exit",
+                },
+                receipt_path=receipt_path,
+                receipt_updates={
+                    "status": "blocked",
+                    "finished_at": finished_at,
+                    "exit_code": completed.returncode,
+                    "verdict": substantive_result["verdict"],
+                    "attempts": attempts,
+                    "failure_kind": "process-exit",
+                    "event_log_sha256": event_log_sha256,
+                    "result_sha256": result_sha256,
+                },
+            )
+            print(json.dumps(substantive_result, ensure_ascii=False, indent=2))
+            raise APError(
+                "Reviewer produced a substantive result before nonzero process exit; "
+                "it cannot be bypassed."
+            )
         result = _blocked_reviewer_runtime_result(
             assignment,
             "Reviewer runtime exited unsuccessfully.",

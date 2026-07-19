@@ -1874,18 +1874,6 @@ function readPackageVersion(){
 }
 
 function feedbackLifecycleStatus(root, assetSkill){
-  if (!exists(path.join(root, "docs", "skill-feedback", "reports"))) {
-    return {
-      available: true,
-      skillVersion: "",
-      reportCount: 0,
-      activeReportCount: 0,
-      closedReportCount: 0,
-      actionRequiredCount: 0,
-      lifecycleCounts: {},
-      actionRequired: [],
-    };
-  }
   const result = spawnSync(
     runtimePython(),
     [path.join(assetSkill, "scripts", "ap.py"), "feedback-collect", "--project", root, "--json"],

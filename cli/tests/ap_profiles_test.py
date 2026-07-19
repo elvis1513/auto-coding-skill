@@ -8,6 +8,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -191,6 +193,18 @@ class AutoCodingProfileTests(unittest.TestCase):
 
         self.assertTrue(registry_path.exists())
         self.assertEqual(b"immutable evidence\n", evidence_path.read_bytes())
+
+    def test_review_directory_read_validation_is_mutation_free(self) -> None:
+        repo, _ = self.make_repo()
+        review_dir = ap._task_review_dir(repo, "READ-ONLY-GUARD", create=True)
+        common_dir = ap._git_common_dir(repo).resolve()
+
+        with mock.patch.object(Path, "chmod", side_effect=PermissionError("read-only sandbox")):
+            ap._guard_review_directory(review_dir, common_dir, create=False)
+
+        os.chmod(review_dir, 0o755)
+        with self.assertRaisesRegex(APError, "must use mode 0700"):
+            ap._guard_review_directory(review_dir, common_dir, create=False)
 
     @staticmethod
     def write_config(repo: Path, cfg: dict) -> None:
@@ -791,7 +805,14 @@ class AutoCodingProfileTests(unittest.TestCase):
             'developer_instructions = "review only the immutable artifact"\n',
             encoding="utf-8",
         )
-        with mock.patch.object(ap.shutil, "which", return_value="/usr/local/bin/codex"):
+        runtime_python_path = repo / "Python Runtime" / "bin" / "python3"
+        runtime_python_path.parent.mkdir(parents=True)
+        runtime_python_path.symlink_to(Path(sys.executable))
+        runtime_python = str(runtime_python_path)
+        with (
+            mock.patch.object(ap.shutil, "which", return_value="/usr/local/bin/codex"),
+            mock.patch.object(ap.sys, "executable", runtime_python),
+        ):
             focused = ap._codex_reviewer_command(
                 repo,
                 assignment_path,
@@ -814,7 +835,30 @@ class AutoCodingProfileTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="xhigh"', deep)
         self.assertEqual("vendor/reviewer-model", focused[focused.index("--model") + 1])
         prompt = focused[-1]
-        self.assertIn("docs/tools/autopipeline/ap.py review-artifact --file", prompt)
+        runtime_python = os.path.abspath(runtime_python)
+        self.assertTrue(Path(runtime_python).is_symlink())
+        runtime_script = str(Path(ap.__file__).resolve())
+        artifact_match = re.search(r"Before analysis, run `([^`]+)`;", prompt)
+        self.assertIsNotNone(artifact_match)
+        self.assertEqual(
+            [runtime_python, runtime_script, "review-artifact", "--file", str(assignment_path)],
+            shlex.split(artifact_match.group(1)),
+        )
+        template_match = re.search(r"Use `([^`]+)` when useful", prompt)
+        self.assertIsNotNone(template_match)
+        self.assertEqual(
+            [
+                runtime_python,
+                runtime_script,
+                "agent-result-template",
+                "--file",
+                str(assignment_path),
+                "--verdict",
+                "approved",
+            ],
+            shlex.split(template_match.group(1)),
+        )
+        self.assertNotIn("docs/tools/autopipeline/ap.py", prompt)
         self.assertIn("diff_artifact_sha256", prompt)
         self.assertIn("never substitute a live git diff", prompt)
         developer_override = next(
@@ -2870,6 +2914,68 @@ class AutoCodingProfileTests(unittest.TestCase):
                 self.assertEqual("high-risk", plan["profile"])
                 self.assertTrue(plan["review_required"])
                 self.assertIn("release_or_tooling", plan["categories"])
+
+    def test_root_agents_protocol_is_high_risk_release_tooling(self) -> None:
+        repo, cfg = self.make_repo()
+        plan = self.plan(
+            repo,
+            cfg,
+            planned_paths=["AGENTS.md"],
+            requested_task_kind="change",
+        )
+        self.assertEqual("high-risk", plan["profile"])
+        self.assertTrue(plan["review_required"])
+        self.assertIn("release_or_tooling", plan["categories"])
+
+    def test_generic_migration_language_and_managed_policy_are_not_database_risk(self) -> None:
+        repo, cfg = self.make_repo()
+        plan = self.plan(
+            repo,
+            cfg,
+            planned_paths=["docs/project/overlay-migration.md"],
+            intent="Document project overlay migration behavior",
+            requested_task_kind="change",
+        )
+        self.assertNotIn("db", plan["categories"])
+        self.assertNotIn("db", plan["intent_categories"])
+        self.assertNotIn("db", plan["high_confidence_intent_categories"])
+        self.assertNotIn(
+            "db",
+            ap._classify_paths(
+                [".agents/skills/auto-coding-skill/data/policies/workflow-migrations-v1.json"]
+            )["categories"],
+        )
+        self.assertNotIn(
+            "db",
+            ap._classify_paths(
+                ["src/auto-coding-skill/data/policies/workflow-migrations-v1.json"]
+            )["categories"],
+        )
+        self.assertIn("db", ap._classify_paths(["migrations/001.sql"])["categories"])
+
+    def test_database_named_source_files_remain_high_risk(self) -> None:
+        repo, cfg = self.make_repo()
+        for path in [
+            "src/db.py",
+            "src/database.py",
+            "src/schema.py",
+            "src/migrations.py",
+            "internal/db.go",
+            "backend/db_migrations/001.py",
+            "backend/database-migrations/001.py",
+            "backend/schema_migrations/001.py",
+            "backend/db-migrations/001.py",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("db", ap._classify_paths([path])["categories"])
+                plan = self.plan(
+                    repo,
+                    cfg,
+                    planned_paths=[path],
+                    requested_task_kind="change",
+                )
+                self.assertEqual("high-risk", plan["profile"])
+                self.assertTrue(plan["review_required"])
 
     def test_explicit_full_structure_scope_inspects_clean_tracked_files(self) -> None:
         cfg = base_config()

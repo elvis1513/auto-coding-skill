@@ -9,7 +9,11 @@ The Skill is a selectable guardrail, not a command sequence that must run for
 every task. The model skips machinery whose expected benefit does not exceed its
 cost; read-only work and obvious small clean-checkout changes normally stay direct.
 
-Version 4.3.2 keeps upgrade history outside active `docs/`, so an upgrade that
+Version 4.3.3 resolves the first multi-project feedback batch: read-only
+Reviewer artifact access is mutation-free, substantive nonzero-exit results are
+preserved, lifecycle identities fail early, managed protocol classification and
+database migration signals are precise, and empty feedback status reports the
+installed version. Version 4.3.2 keeps upgrade history outside active `docs/`, so an upgrade that
 archives the previous managed AGENTS or ENGINEERING contract is immediately
 idempotent and `status` remains current. Version 4.3.1 preserves recursively nested project documentation assets of any
 file type, and gives project-owned Skill feedback a release-aware lifecycle with
@@ -387,6 +391,26 @@ schema/body, runtime launcher, and documentation framework. It preserves explici
 model overrides, complete project `risk.rules`, supported project/access/
 concurrency/route/structure values, and an existing project-owned structure
 standard byte-for-byte. Removed content is archived outside active docs.
+
+## What changed in 4.3.3
+
+- Made existing Git-local Reviewer storage validation read-only: the writable
+  supervisor establishes mode `0700`, while the Reviewer verifies ownership and
+  mode without calling `chmod` from its read-only sandbox. Reviewer artifact and
+  result-template commands now use the exact absolute runtime that launched
+  `review-run`, allowing a fixed runtime to review a task created by an older
+  project installation without changing that task's base or owned scope.
+- Preserved contract-valid `blocked` and `changes-requested` results when the
+  Reviewer process exits nonzero, while retaining the blocking runtime receipt.
+- Rejected `task-start` owner/writer values that conflict with
+  `CODEX_THREAD_ID` before creating task state or worktrees.
+- Classified root `AGENTS.md` as managed release/tooling authority and prevented
+  unqualified workflow/configuration migration wording or policy filenames from
+  being mislabeled as database changes.
+- Reported the installed Skill version in status even before a project creates
+  its first feedback report.
+- Added release-catalog resolutions for all nine reports collected from the
+  seven-project 4.3.2 rollout, including canonical duplicate mappings.
 
 ## What changed in 4.3.2
 

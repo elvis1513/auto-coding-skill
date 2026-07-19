@@ -332,6 +332,30 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         self.assertIn("AGENTS.md:2", result.stdout + result.stderr)
         self.assert_local_branch(repo, "codex/POLICY-START", False)
 
+    def test_task_start_rejects_owner_and_writer_that_conflict_with_runtime_identity(self) -> None:
+        _, repo, _ = self.make_repo()
+        for field in ("owner", "writer"):
+            with self.subTest(field=field):
+                task_id = f"IDENTITY-{field.upper()}"
+                rejected = self.ap(
+                    repo,
+                    "task-start",
+                    task_id,
+                    "--base",
+                    "origin/dev",
+                    "--owned-path",
+                    "shared.txt",
+                    "--isolated",
+                    "--review-required",
+                    f"--{field}",
+                    "different-runtime-actor",
+                    check=False,
+                )
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("does not match CODEX_THREAD_ID", rejected.stdout + rejected.stderr)
+                self.assertFalse(self.registry_manifest_path(repo, task_id).exists())
+                self.assert_local_branch(repo, f"codex/{task_id}", False)
+
     def test_task_start_rejects_legacy_gate_yaml_before_creating_branch(self) -> None:
         _, repo, _ = self.make_repo()
         engineering = repo / "docs" / "ENGINEERING.md"
@@ -930,13 +954,22 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "src",
             "--isolated",
             "--review-required",
-            "--writer",
-            "self-reviewer",
         )
         worktree = self.task_worktree(repo, "SELF-REVIEW")
         payload = worktree / "src" / "payload.txt"
         payload.parent.mkdir(parents=True, exist_ok=True)
         payload.write_text("changed\n", encoding="utf-8")
+        self.ap(
+            repo,
+            "task-handoff",
+            "SELF-REVIEW",
+            "--from",
+            _TEST_OWNER,
+            "--to",
+            "self-reviewer",
+            "--generation",
+            "1",
+        )
         status = json.loads(
             self.ap(worktree, "task-status", "SELF-REVIEW", "--json").stdout
         )["tasks"][0]
@@ -1360,6 +1393,47 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
         )
         self.assertNotEqual(0, bypass.returncode)
         self.assertIn("allowed only after", bypass.stdout + bypass.stderr)
+
+    def test_substantive_result_survives_nonzero_reviewer_exit(self) -> None:
+        root, repo, _ = self.make_repo()
+        worktree = self.start_task(repo, "REVIEW-NONZERO", "shared.txt")
+        (worktree / "shared.txt").write_text("nonzero substantive finding\n", encoding="utf-8")
+        runner_path = root / "nonzero-substantive-reviewer.py"
+        runner_path.write_text(
+            "import json, os\n"
+            "from pathlib import Path\n"
+            "result = Path(os.environ['AUTOCODING_REVIEW_RESULT'])\n"
+            "result.write_text(json.dumps({'verdict': 'changes-requested', 'summary': 'specific defect'}) + '\\n')\n"
+            "result.chmod(0o600)\n"
+            "print(json.dumps({'type': 'turn.started'}), flush=True)\n"
+            "raise SystemExit(7)\n",
+            encoding="utf-8",
+        )
+        rejected = self.ap(
+            worktree,
+            "review-run",
+            "REVIEW-NONZERO",
+            "--reviewer",
+            "reviewer-nonzero",
+            "--runner-command-json",
+            json.dumps([sys.executable, str(runner_path)]),
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("cannot be bypassed", rejected.stdout + rejected.stderr)
+        status = json.loads(
+            self.ap(worktree, "task-status", "REVIEW-NONZERO", "--json").stdout
+        )["tasks"][0]
+        review = status["review"]
+        self.assertEqual("changes-requested", review["verdict"])
+        self.assertEqual("blocked", review["runtime_state"])
+        self.assertEqual(7, review["runtime_exit_code"])
+        result = json.loads(Path(review["runtime_result_path"]).read_text())
+        self.assertEqual("specific defect", result["summary"])
+        receipt = json.loads(Path(review["runtime_receipt_path"]).read_text())
+        self.assertEqual("blocked", receipt["status"])
+        self.assertEqual("changes-requested", receipt["verdict"])
+        self.assertEqual(7, receipt["exit_code"])
 
     def test_substantive_agent_message_before_timeout_cannot_be_bypassed(self) -> None:
         root, repo, _ = self.make_repo()
@@ -1855,12 +1929,22 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "origin/dev",
             "--owned-path",
             ".",
-            "--writer",
-            "fixer-label",
         )
         worktree = self.task_worktree(repo, "LEASE-1")
         (worktree / "lease.txt").write_text("ready\n", encoding="utf-8")
         self.approve_task(worktree, "LEASE-1")
+
+        self.ap(
+            repo,
+            "task-handoff",
+            "LEASE-1",
+            "--from",
+            owner,
+            "--to",
+            "fixer-label",
+            "--generation",
+            "1",
+        )
 
         mismatch = self.ap(
             worktree,
@@ -1895,7 +1979,7 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--to",
             owner,
             "--generation",
-            "1",
+            "2",
         )
         stale = self.ap(
             repo,
@@ -1906,14 +1990,14 @@ class AutoCodingConcurrencyTests(unittest.TestCase):
             "--to",
             "next-writer",
             "--generation",
-            "1",
+            "2",
             check=False,
         )
         self.assertNotEqual(0, stale.returncode)
         self.assertIn("generation changed", stale.stdout + stale.stderr)
         manifest = json.loads(self.registry_manifest_path(repo, "LEASE-1").read_text(encoding="utf-8"))
         self.assertEqual(owner, manifest["writer_lease"]["holder"])
-        self.assertEqual(2, manifest["writer_lease"]["generation"])
+        self.assertEqual(3, manifest["writer_lease"]["generation"])
 
     def test_dependency_sha_must_already_be_in_task_base(self) -> None:
         _, repo, _ = self.make_repo()

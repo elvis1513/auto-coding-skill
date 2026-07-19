@@ -96,14 +96,22 @@ function isManaged(previous, relative) {
   return Array.isArray(previous?.entries) && previous.entries.some(entry => entry?.path === relative && entry?.ownership === "managed");
 }
 
+function stripLegacyAccessConfiguration(text) {
+  return text.replace(/\n?## Migrated access configuration\s*\n```yaml\n[\s\S]*?\n```\s*/g, "\n").trim();
+}
+
 function migrateLegacyEnvironment(project) {
   const previous = readManifest(project);
   const environment = path.join(project, "docs", "ENVIRONMENT.md");
   const projectConfig = path.join(project, "docs", "PROJECT.md");
-  if (!exists(environment) || exists(projectConfig) || isManaged(previous, "docs/ENVIRONMENT.md")) return false;
-  const legacy = fs.readFileSync(environment, "utf8")
-    .replace(/\n?## Migrated access configuration\n\n```yaml\n[\s\S]*?\n```\n?/g, "\n")
-    .trim();
+  if (exists(projectConfig)) {
+    const existing = fs.readFileSync(projectConfig, "utf8");
+    const cleaned = stripLegacyAccessConfiguration(existing);
+    if (cleaned !== existing.trim()) fs.writeFileSync(projectConfig, `${cleaned}\n`);
+    return false;
+  }
+  if (!exists(environment) || isManaged(previous, "docs/ENVIRONMENT.md")) return false;
+  const legacy = stripLegacyAccessConfiguration(fs.readFileSync(environment, "utf8"));
   if (!legacy) return false;
   const template = fs.readFileSync(path.join(assetSkill, "data", "templates", "PROJECT.md"), "utf8").trimEnd();
   mkdirFor(projectConfig);

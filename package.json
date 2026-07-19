@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "description": "CLI installer for project-owned engineering constitution, environment, and change-record documentation.",
   "type": "module",
   "bin": {

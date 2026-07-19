@@ -44,11 +44,11 @@ assert.equal(fs.readFileSync(projectConfig, "utf8"), "# Project Configuration\n\
 
 const status = JSON.parse(run(["status", "--projects", projectA, "--json"]));
 assert.equal(status.results[0].ok, true);
-assert.equal(status.results[0].version, "5.0.1");
+assert.equal(status.results[0].version, "5.0.2");
 
 const legacyEnvironment = path.join(projectB, "docs/ENVIRONMENT.md");
 fs.mkdirSync(path.dirname(legacyEnvironment), { recursive: true });
-fs.writeFileSync(legacyEnvironment, "# Environment\n\nLegacy runtime detail.\n");
+fs.writeFileSync(legacyEnvironment, "# Environment\n\nLegacy runtime detail.\n\n## Migrated access configuration\n```yaml\naccess:\n  password: \"\"\n```\n");
 
 const legacyRuntime = path.join(projectB, "docs/tools/autopipeline/ap.py");
 const legacyEngineering = path.join(projectB, "docs/ENGINEERING.md");
@@ -70,6 +70,10 @@ fs.writeFileSync(path.join(projectB, ".agents/managed-install.json"), JSON.strin
 run(["sync", "--projects", `${projectA},${projectB}`]);
 assert.ok(fs.existsSync(path.join(projectB, "docs/ENVIRONMENT.md")));
 assert.match(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /Legacy runtime detail/, "legacy environment context must migrate to project configuration");
+assert.doesNotMatch(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /Migrated access configuration/, "legacy empty access configuration must not migrate to project configuration");
+fs.appendFileSync(path.join(projectB, "docs/PROJECT.md"), "\n## Migrated access configuration\n```yaml\naccess:\n  password: \"\"\n```\n");
+run(["init"], projectB);
+assert.doesNotMatch(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /Migrated access configuration/, "sync must clean the known legacy access block from existing project configuration");
 assert.ok(!fs.existsSync(legacyRuntime), "exact legacy Gate runtime must be retired during upgrade");
 assert.ok(!fs.existsSync(legacyEngineering), "exact legacy Gate policy must be retired during upgrade");
 assert.ok(fs.existsSync(path.join(projectB, ".agents/archive/auto-coding-skill/4.3.7/docs/ENGINEERING.md")), "legacy policy must remain in archive");

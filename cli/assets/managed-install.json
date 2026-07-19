@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "skill_version": "5.0.1",
+  "skill_version": "5.0.2",
   "asset_files": [
     {
       "path": "SKILL.md",

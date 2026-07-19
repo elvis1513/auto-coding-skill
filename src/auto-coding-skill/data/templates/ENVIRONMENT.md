@@ -1,30 +1,34 @@
-# Project Environment
+<!-- auto-coding-skill:managed-environment -->
+# Shared Development Environment
 
-> Project-owned operational context. Populate only information useful to this
-> project. Plaintext usernames and passwords are permitted here when the project
-> owner intentionally wants local development and diagnosis to use them. Do not
-> invent, echo, or copy credentials outside the project.
+This managed document is refreshed by `autocoding init` and `autocoding sync`.
+It contains only common endpoints, ports, and credential variable references.
+Actual credentials stay in the local, untracked file
+`~/.config/auto-coding-skill/credentials.env`.
 
-## Local development
+## Shared services
 
-| Item | Value / command | Notes |
-| --- | --- | --- |
-| Repository root | | |
-| Runtime/toolchain | | |
-| Main services | | |
-| Start command | | |
-
-## Environments and access
-
-| Environment | System / URL | Username | Password | Notes |
+| Service | URL / host | Port | Credential variables | Notes |
 | --- | --- | --- | --- | --- |
-| Development | | | | |
-| Staging | | | | |
-| Production | | | | |
+| GitLab web | `http://192.168.20.7:8929` | 8929 | `GITLAB_USERNAME`, `GITLAB_PASSWORD` | Source and merge-request UI |
+| GitLab SSH | `192.168.20.7` | 2224 | SSH key / agent | Git remote transport |
+| Nexus | `http://192.168.20.7:8081` | 8081 | `NEXUS_USERNAME`, `NEXUS_PASSWORD` | Package and image repository |
+| Jenkins | `http://192.168.20.7:8080` | 8080 | `JENKINS_USERNAME`, `JENKINS_PASSWORD` | Build and delivery UI |
+| Shared backend access | See `docs/PROJECT.md` | project-specific | `BACKEND_USERNAME`, `BACKEND_PASSWORD` | Common credentials; endpoint belongs to the project |
 
-## Operational facts
+## Local credential source
 
-- Important configuration locations:
-- Logs/metrics locations:
-- External dependencies:
-- Known constraints:
+Create or update `~/.config/auto-coding-skill/credentials.env` locally. It must
+never be copied into a repository, chat transcript, build log, or deployment
+artifact.
+
+```dotenv
+GITLAB_USERNAME=
+GITLAB_PASSWORD=
+NEXUS_USERNAME=
+NEXUS_PASSWORD=
+JENKINS_USERNAME=
+JENKINS_PASSWORD=
+BACKEND_USERNAME=
+BACKEND_PASSWORD=
+```

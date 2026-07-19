@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "5.0.0",
+  "version": "5.0.1",
   "description": "CLI installer for project-owned engineering constitution, environment, and change-record documentation.",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "prepack": "npm run clean:cache",
     "check:package": "npm run clean:cache && node cli/src/check-package.js",
     "test": "node -c cli/src/index.js && node -c cli/src/sync-assets.js && node -c cli/tests/index.test.js && node cli/tests/index.test.js",
-    "test:src": "node -e \"const fs=require('fs'); for (const file of ['src/auto-coding-skill/SKILL.md','src/auto-coding-skill/data/templates/ENVIRONMENT.md','src/auto-coding-skill/data/templates/architecture/.gitkeep','src/auto-coding-skill/data/templates/product/.gitkeep','src/auto-coding-skill/data/templates/bridges/AGENTS.md']) if (!fs.existsSync(file)) throw new Error('missing '+file); console.log('source-doc-assets-ok')\"",
+    "test:src": "node -e \"const fs=require('fs'); for (const file of ['src/auto-coding-skill/SKILL.md','src/auto-coding-skill/data/templates/ENVIRONMENT.md','src/auto-coding-skill/data/templates/PROJECT.md','src/auto-coding-skill/data/templates/architecture/.gitkeep','src/auto-coding-skill/data/templates/product/.gitkeep','src/auto-coding-skill/data/templates/bridges/AGENTS.md']) if (!fs.existsSync(file)) throw new Error('missing '+file); console.log('source-doc-assets-ok')\"",
     "check:assets": "node cli/src/sync-assets.js --check",
     "sync-assets": "node cli/src/sync-assets.js",
     "release:check": "npm run check:assets && npm run test:src && npm run test && npm run check:package"

@@ -9,14 +9,18 @@ const assetsRoot = path.join(packageRoot, "cli", "assets");
 const assetSkill = path.join(assetsRoot, "skill");
 const assetAgents = path.join(assetSkill, "data", "templates", "bridges", "AGENTS.md");
 const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
-const bootstrapDocs = [
+const managedDocs = [
   ["ENVIRONMENT.md", "docs/ENVIRONMENT.md"],
+];
+const projectDocs = [
+  ["PROJECT.md", "docs/PROJECT.md"],
   ["architecture/.gitkeep", "docs/architecture/.gitkeep"],
   ["design/.gitkeep", "docs/design/.gitkeep"],
   ["interfaces/.gitkeep", "docs/interfaces/.gitkeep"],
   ["deployment/.gitkeep", "docs/deployment/.gitkeep"],
   ["product/.gitkeep", "docs/product/.gitkeep"],
 ];
+const bootstrapDocs = [...managedDocs, ...projectDocs];
 
 function fail(message) { console.error(`\n[autocoding] ERROR: ${message}\n`); process.exit(1); }
 function exists(file) { try { fs.accessSync(file); return true; } catch { return false; } }
@@ -88,6 +92,25 @@ function retireExactLegacyFiles(project) {
   return retired;
 }
 
+function isManaged(previous, relative) {
+  return Array.isArray(previous?.entries) && previous.entries.some(entry => entry?.path === relative && entry?.ownership === "managed");
+}
+
+function migrateLegacyEnvironment(project) {
+  const previous = readManifest(project);
+  const environment = path.join(project, "docs", "ENVIRONMENT.md");
+  const projectConfig = path.join(project, "docs", "PROJECT.md");
+  if (!exists(environment) || exists(projectConfig) || isManaged(previous, "docs/ENVIRONMENT.md")) return false;
+  const legacy = fs.readFileSync(environment, "utf8")
+    .replace(/\n?## Migrated access configuration\n\n```yaml\n[\s\S]*?\n```\n?/g, "\n")
+    .trim();
+  if (!legacy) return false;
+  const template = fs.readFileSync(path.join(assetSkill, "data", "templates", "PROJECT.md"), "utf8").trimEnd();
+  mkdirFor(projectConfig);
+  fs.writeFileSync(projectConfig, `${template}\n\n## Migrated pre-5.0.1 environment context\n\n${legacy}\n`);
+  return true;
+}
+
 function buildManifest(project) {
   const entries = [];
   const installedSkill = path.join(project, ".agents", "skills", "auto-coding-skill");
@@ -97,12 +120,15 @@ function buildManifest(project) {
   }
   const agentsTarget = path.join(project, "AGENTS.md");
   entries.push({ path: "AGENTS.md", sha256: sha256(agentsTarget), ownership: "managed" });
+  const environmentTarget = path.join(project, "docs", "ENVIRONMENT.md");
+  entries.push({ path: "docs/ENVIRONMENT.md", sha256: sha256(environmentTarget), ownership: "managed" });
   return {
-    schema_version: 2,
+    schema_version: 3,
     skill_version: pkg.version,
     entries,
-    project_documents: bootstrapDocs.map(([, target]) => target),
-    note: "Project documents are bootstrap-only and are never overwritten or validated as managed content.",
+    managed_documents: managedDocs.map(([, target]) => target),
+    project_documents: projectDocs.map(([, target]) => target),
+    note: "AGENTS.md and docs/ENVIRONMENT.md are refreshed by init/sync. Project documents are bootstrap-only and are never overwritten.",
   };
 }
 
@@ -114,8 +140,13 @@ function init(project) {
   fs.rmSync(installedSkill, { recursive: true, force: true });
   copyTree(assetSkill, installedSkill);
   copyFile(assetAgents, path.join(root, "AGENTS.md"));
+  const migratedEnvironment = migrateLegacyEnvironment(root);
   const created = [];
-  for (const [assetRelative, targetRelative] of bootstrapDocs) {
+  for (const [assetRelative, targetRelative] of managedDocs) {
+    const source = path.join(assetSkill, "data", "templates", assetRelative);
+    copyFile(source, path.join(root, targetRelative));
+  }
+  for (const [assetRelative, targetRelative] of projectDocs) {
     const source = path.join(assetSkill, "data", "templates", assetRelative);
     const target = path.join(root, targetRelative);
     if (!exists(target)) {
@@ -127,7 +158,7 @@ function init(project) {
   const manifestPath = path.join(root, ".agents", "managed-install.json");
   mkdirFor(manifestPath);
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  return { project: root, version: pkg.version, created, retired, managed: manifest.entries.length };
+  return { project: root, version: pkg.version, created, retired, migrated_environment: migratedEnvironment, managed: manifest.entries.length };
 }
 
 function status(project) {

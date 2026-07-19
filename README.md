@@ -1,7 +1,7 @@
 # auto-coding-skill
 
 `auto-coding-skill` 5.x provides detailed general engineering guidance plus a
-small, project-owned documentation layout. It is not a workflow engine.
+small documentation layout. It is not a workflow engine.
 
 It does not require a Gate, classification, task lifecycle, worktree, Reviewer,
 test route, design record, Jenkins check, or deployment check.
@@ -18,6 +18,7 @@ documentation layout:
 
 ```text
 docs/ENVIRONMENT.md
+docs/PROJECT.md
 docs/architecture/
 docs/design/
 docs/interfaces/
@@ -25,14 +26,17 @@ docs/deployment/
 docs/product/
 ```
 
-The environment file is intentionally project-owned and may contain project-
-approved plaintext usernames and passwords for local development and diagnosis.
-Do not invent, echo, or copy credentials beyond the project.
+`docs/ENVIRONMENT.md` is managed shared context and is refreshed on each
+`init`/`sync`. It records common endpoints, ports, and local credential variable
+names. `docs/PROJECT.md` is project-owned and never overwritten; use it for
+project-specific configuration. Keep actual passwords only in the local,
+untracked credential source referenced by the environment document.
 
-All documents are created only when missing and are never overwritten by later
-`init` or `sync` runs. Documentation is optional: record durable facts only when
-the user asks or when they will help future work. Do not create a document for
-every task, review, test, or commit.
+Only `AGENTS.md` and `docs/ENVIRONMENT.md` are refreshed by later `init` or
+`sync` runs. Project documents are created only when missing and are never
+overwritten. Documentation is optional: record durable facts only when the user
+asks or when they will help future work. Do not create a document for every task,
+review, test, or commit.
 
 ## Commands
 

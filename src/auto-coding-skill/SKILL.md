@@ -8,7 +8,8 @@ description: General project guidance and a lightweight documentation layout. It
 Read `AGENTS.md`, then use the project documentation only when it helps the
 current request:
 
-- `docs/ENVIRONMENT.md` for local/runtime facts and project-approved access data.
+- `docs/ENVIRONMENT.md` for shared access endpoints, ports, and local credential references.
+- `docs/PROJECT.md` for project-specific runtime facts and configuration.
 - `docs/product/` for durable product context and decisions.
 - `docs/architecture/`, `docs/design/`, `docs/interfaces/`, and
   `docs/deployment/` for existing topic-specific knowledge.
@@ -21,5 +22,6 @@ contract, decision, test strategy, or operating procedure would otherwise be
 lost. Choose the relevant existing folder; do not create routine task records,
 review records, or duplicate summaries.
 
-`autocoding init` creates missing guidance, the environment file, and empty
-topic directories. It never overwrites project documentation.
+`autocoding init` refreshes `AGENTS.md` and `docs/ENVIRONMENT.md`. It creates
+`docs/PROJECT.md` and topic directories only when missing, and never overwrites
+project-owned documentation.

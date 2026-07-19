@@ -24,6 +24,7 @@ for (const relative of [
   ".agents/skills/auto-coding-skill/SKILL.md",
   "AGENTS.md",
   "docs/ENVIRONMENT.md",
+  "docs/PROJECT.md",
   "docs/architecture/.gitkeep",
   "docs/design/.gitkeep",
   "docs/interfaces/.gitkeep",
@@ -34,13 +35,20 @@ assert.ok(!fs.existsSync(path.join(projectA, "docs/tools/autopipeline/ap.py")), 
 assert.ok(!fs.existsSync(path.join(projectA, ".agents/skills/auto-coding-skill/scripts/ap.py")), "must not install a Gate script");
 
 const environment = path.join(projectA, "docs/ENVIRONMENT.md");
-fs.writeFileSync(environment, "# Environment\n\nProject-owned text.\n");
+const projectConfig = path.join(projectA, "docs/PROJECT.md");
+fs.writeFileSync(environment, "# Environment\n\nChanged managed text.\n");
+fs.writeFileSync(projectConfig, "# Project Configuration\n\nProject-owned text.\n");
 run(["init"], projectA);
-assert.equal(fs.readFileSync(environment, "utf8"), "# Environment\n\nProject-owned text.\n", "init must preserve project docs");
+assert.notEqual(fs.readFileSync(environment, "utf8"), "# Environment\n\nChanged managed text.\n", "init must refresh the managed environment document");
+assert.equal(fs.readFileSync(projectConfig, "utf8"), "# Project Configuration\n\nProject-owned text.\n", "init must preserve project configuration");
 
 const status = JSON.parse(run(["status", "--projects", projectA, "--json"]));
 assert.equal(status.results[0].ok, true);
-assert.equal(status.results[0].version, "5.0.0");
+assert.equal(status.results[0].version, "5.0.1");
+
+const legacyEnvironment = path.join(projectB, "docs/ENVIRONMENT.md");
+fs.mkdirSync(path.dirname(legacyEnvironment), { recursive: true });
+fs.writeFileSync(legacyEnvironment, "# Environment\n\nLegacy runtime detail.\n");
 
 const legacyRuntime = path.join(projectB, "docs/tools/autopipeline/ap.py");
 const legacyEngineering = path.join(projectB, "docs/ENGINEERING.md");
@@ -61,6 +69,7 @@ fs.writeFileSync(path.join(projectB, ".agents/managed-install.json"), JSON.strin
 }));
 run(["sync", "--projects", `${projectA},${projectB}`]);
 assert.ok(fs.existsSync(path.join(projectB, "docs/ENVIRONMENT.md")));
+assert.match(fs.readFileSync(path.join(projectB, "docs/PROJECT.md"), "utf8"), /Legacy runtime detail/, "legacy environment context must migrate to project configuration");
 assert.ok(!fs.existsSync(legacyRuntime), "exact legacy Gate runtime must be retired during upgrade");
 assert.ok(!fs.existsSync(legacyEngineering), "exact legacy Gate policy must be retired during upgrade");
 assert.ok(fs.existsSync(path.join(projectB, ".agents/archive/auto-coding-skill/4.3.7/docs/ENGINEERING.md")), "legacy policy must remain in archive");

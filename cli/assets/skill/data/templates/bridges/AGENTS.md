@@ -28,7 +28,8 @@ answer a technical question. State clearly what was and was not verified.
 
 Read relevant project documentation before relying on project context:
 
-- `docs/ENVIRONMENT.md`: local/runtime services, commands, endpoints, and access data.
+- `docs/ENVIRONMENT.md`: shared GitLab, Nexus, Jenkins, and backend endpoint/port references. Managed and refreshed by the Skill.
+- `docs/PROJECT.md`: project-specific runtime facts, access overrides, and constraints. Project-owned and never overwritten by the Skill.
 - `docs/product/`: durable product context, boundaries, and decisions.
 - `docs/architecture/`: architecture and ADRs.
 - `docs/design/`: durable design notes that help future implementation.
@@ -43,11 +44,11 @@ of creating parallel summaries.
 
 ## Environment and credentials
 
-`docs/ENVIRONMENT.md` is project-owned operational context. The project owner may
-store approved plaintext usernames and passwords there when that makes local
-development and diagnosis practical. Never invent credentials, copy them outside
-the project, place them in chat output, or expose them in logs. Keep endpoints,
-commands, service names, and access instructions current when they materially
-change.
+`docs/ENVIRONMENT.md` is shared managed context: it names endpoint ports and
+credential variables, but never contains plaintext credentials. Store actual
+shared credentials in the local, untracked credential source named there. Put
+project-specific configuration in `docs/PROJECT.md`; it is preserved across
+Skill upgrades. Never invent credentials, copy them into chat output, or expose
+them in logs.
 
 <!-- auto-coding-skill:managed-agents:end -->

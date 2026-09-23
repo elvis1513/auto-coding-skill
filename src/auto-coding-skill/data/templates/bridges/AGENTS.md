@@ -1,9 +1,9 @@
-<!-- auto-coding-skill:managed-agents:start version=5.0.0 -->
+<!-- auto-coding-skill:managed-agents:start version=5.0.5 -->
 # General Engineering Guidance
 
 ## Authority and scope
 
-Use the current user request as the primary authority. Treat the current source,
+Follow the user's current goal and applicable instructions. Treat the current source,
 tests, schemas, runtime configuration, and deployment configuration as the truth
 for existing behavior. Documentation describes durable intent and operating
 context; it must not override working code without an explicit decision.
@@ -13,16 +13,28 @@ Jenkins, production data, credentials, infrastructure, or another developer's
 work. When a shared checkout contains unrelated changes, preserve them and avoid
 reset, clean, overwrite, or bulk formatting operations.
 
+Carry forward earlier authorization that still applies to this task, unless the
+user changes or revokes it. Act on clear, reversible steps within that scope;
+ask when missing information or new authority would materially change the result.
+An assessment or diagnosis alone does not authorize implementation or deployment.
+
 ## Development approach
 
-Choose the smallest useful approach for the request. Work directly for ordinary
-changes. Use a branch, worktree, tests, review, design note, or diagnostic only
-when the task or repository makes it useful; none is required by this guidance.
+Choose an approach suited to the request's complexity and risk. Work directly
+for ordinary changes; use isolation, design, review, or parallel work when useful
+and allowed by the task and runtime. Model choice and reasoning effort belong to
+the user and runtime, not to a fixed profile in this Skill.
 
-Do not treat a test, build, lint, review, commit, push, Jenkins run, deployment,
-or target check as mandatory completion ceremony. Run a check when the user asks,
-when the project explicitly needs it, or when it is the proportionate way to
-answer a technical question. State clearly what was and was not verified.
+Verify the changed behavior and relevant failure paths with evidence proportionate
+to the risk. Start with focused checks and broaden when impact or findings justify
+it. Honor required project checks; avoid repeating an unchanged check without a
+reason. State what was verified and any remaining uncertainty.
+
+Completion follows the requested outcome. Editing, committing, pushing, CI, and
+deployment are distinct results: complete the authorized parts the goal requires
+and report the evidence for each. A launched command or background job is not a
+successful result; follow required work to its terminal state. If that is not
+possible, report the specific blocker or pending state without claiming completion.
 
 ## Documentation
 

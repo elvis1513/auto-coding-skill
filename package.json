@@ -1,7 +1,7 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "5.0.4",
-  "description": "CLI installer for project-owned engineering constitution, environment, and change-record documentation.",
+  "version": "5.0.5",
+  "description": "Lightweight engineering guidance and a managed installer that preserves project-owned documentation.",
   "type": "module",
   "bin": {
     "autocoding": "cli/src/index.js"
@@ -31,9 +31,9 @@
     "agents",
     "skill",
     "documentation",
-    "engineering-constitution",
+    "engineering-guidance",
     "environment-notes",
-    "change-log"
+    "project-context"
   ],
   "repository": {
     "type": "git",

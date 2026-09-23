@@ -1,6 +1,6 @@
 ---
 name: auto-coding-skill
-description: General project guidance and a lightweight documentation layout. It provides context files and optional places to record durable project knowledge, without imposing a development workflow.
+description: Use when a project opts into auto-coding-skill or the user asks to initialize, refresh, or inspect its project guidance and documentation. Provides context without imposing a fixed engineering workflow.
 ---
 
 # Auto Coding Skill
@@ -14,8 +14,9 @@ current request:
 - `docs/architecture/`, `docs/design/`, `docs/interfaces/`, and
   `docs/deployment/` for existing topic-specific knowledge.
 
-This Skill has no required task protocol. It does not require classification,
-Gates, Reviews, worktrees, designs, tests, commits, or deployment checks.
+Use the project's guidance to choose an approach and enough verification for the
+requested outcome. This Skill adds context, not a fixed task protocol or model
+profile; it does not narrow existing authorization or redefine completion.
 
 Write documentation only when the user asks for it or when a durable fact,
 contract, decision, test strategy, or operating procedure would otherwise be

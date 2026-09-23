@@ -23,6 +23,7 @@ to its system, address, and purpose; do not echo it in chat or logs.
 ## Runtime and operations
 
 - Local start and diagnostic entry points:
+- Relevant verification commands and acceptance criteria:
 - Deployment topology:
 - Logs and metrics:
 

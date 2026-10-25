@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "skill_version": "5.0.5",
+  "skill_version": "5.1.0",
   "asset_files": [
     {
       "path": "SKILL.md",
-      "sha256": "54c28a7a3a147460b96e11d3da92e7722690e2836db3e5c35fa28dfc46c2860c"
+      "sha256": "5d4f094f3de1287a44e989af19195ced866c98af58d56db7c0a018a11acf7e42"
     },
     {
       "path": "data/templates/ENVIRONMENT.md",
@@ -12,7 +12,7 @@
     },
     {
       "path": "data/templates/PROJECT.md",
-      "sha256": "f311a02d02bd6a924f94cbf341ff90dba839bf70a1f97d83500a7d2660dad6c1"
+      "sha256": "2a3de51f5bcb576a32d47d807ae17fd724e467da3edc03586dae332605ede2bd"
     },
     {
       "path": "data/templates/architecture/.gitkeep",
@@ -20,7 +20,7 @@
     },
     {
       "path": "data/templates/bridges/AGENTS.md",
-      "sha256": "6f3c5a2881d0b0252c7b7512f5783e9c06346656e2415be9bcec3f2070025755"
+      "sha256": "15d264c0f89ae571534444f5333785913a11cf75f27b8fccbb717b0c483595f1"
     },
     {
       "path": "data/templates/deployment/.gitkeep",
@@ -37,6 +37,10 @@
     {
       "path": "data/templates/product/.gitkeep",
       "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "references/parallel-development.md",
+      "sha256": "907f70aee2d58df1018daa26c3926201aa26c74b37d498aa13f8e6ebf8cae828"
     }
   ]
 }

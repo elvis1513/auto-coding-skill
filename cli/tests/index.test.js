@@ -58,7 +58,16 @@ try {
   write(a, "docs/design/custom.md", "durable design\n");
   write(a, "docs/ENVIRONMENT.md", "changed managed text\n");
   assert.equal(status(a, 1).integrity, false);
-  run(["init"], a);
+  const beforeBlocked = read(a, manifestPath);
+  const blocked = JSON.parse(run(["init", "--json"], a, 1));
+  assert.deepEqual(blocked.results[0].conflicts.map(entry => entry.path), ["docs/ENVIRONMENT.md"]);
+  assert.equal(read(a, "docs/ENVIRONMENT.md"), "changed managed text\n");
+  assert.equal(read(a, manifestPath), beforeBlocked, "blocked replacement must not alter the manifest");
+  const replaced = JSON.parse(run(["init", "--replace-managed", "--backup-dir", path.join(tmp, "backups"), "--json"], a));
+  const backup = JSON.parse(read(replaced.backup, "backup.json"));
+  assert.equal(read(replaced.backup, backup.files[0].backup_path), "changed managed text\n");
+  assert.equal(fs.statSync(replaced.backup).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(path.join(replaced.backup, backup.files[0].backup_path)).mode & 0o777, 0o600);
   assert.notEqual(read(a, "docs/ENVIRONMENT.md"), "changed managed text\n");
   assert.equal(read(a, "docs/PROJECT.md"), projectText);
   assert.equal(read(a, "docs/design/custom.md"), "durable design\n");
@@ -94,10 +103,68 @@ try {
   const stale = status(a, 1);
   assert.deepEqual(stale.unexpected_files, [`${skillPath}/scripts/old.py`]);
   assert.deepEqual(stale.legacy_files, [".agents/agents/old-reviewer.toml"]);
-  const repaired = JSON.parse(run(["init", "--json"], a));
+  run(["init"], a, 1);
+  assert.equal(read(a, `${skillPath}/scripts/old.py`), "obsolete runtime\n");
+  const repaired = JSON.parse(run(["init", "--replace-managed", "--backup-dir", path.join(tmp, "backups"), "--json"], a));
   assert.deepEqual(repaired.legacy_files, [".agents/agents/old-reviewer.toml"]);
   assert.ok(present(a, ".agents/agents/custom.toml"));
   assert.ok(present(a, ".agents/agents/old-reviewer.toml"), "unowned legacy candidates require review, not deletion");
+
+  // Dry-run is read-only; custom AGENTS/environment/skill files are never silently lost.
+  const guarded = project("guarded");
+  const dry = JSON.parse(run(["init", "--dest", guarded, "--dry-run", "--json"]));
+  assert.equal(dry.can_apply, true);
+  assert.deepEqual(fs.readdirSync(guarded), [], "fresh dry-run must not create directories");
+  run(["init"], guarded);
+  const ownedProject = read(guarded, "docs/PROJECT.md");
+  const custom = {
+    "AGENTS.md": `${read(guarded, "AGENTS.md")}\nproject-only-no-device-dispatch\n`,
+    "docs/ENVIRONMENT.md": "private-fixture-password-do-not-print\n",
+    [`${skillPath}/SKILL.md`]: "project-custom-skill\n",
+    [`${skillPath}/local-notes.md`]: "unowned-local-detail\n",
+  };
+  for (const [relative, content] of Object.entries(custom)) write(guarded, relative, content);
+  const previewText = run(["init", "--dry-run", "--json"], guarded, 1);
+  assert.ok(!previewText.includes("private-fixture-password"), "previews must not expose file contents");
+  assert.equal(JSON.parse(previewText).results[0].conflicts.length, 4);
+  run(["init", "--replace-managed"], guarded, 1);
+  run(["init", "--backup-dir", path.join(tmp, "backups")], guarded, 1);
+  run(["init", "--replace-managed", "--backup-dir", path.join(guarded, ".local/backup")], guarded, 1);
+  const alias = path.join(tmp, "guarded-alias");
+  fs.symlinkSync(guarded, alias);
+  run(["init", "--replace-managed", "--backup-dir", path.join(alias, "nested/backup")], guarded, 1);
+  for (const [relative, content] of Object.entries(custom)) assert.equal(read(guarded, relative), content);
+
+  // A conflict in the last project must not partially refresh an earlier project.
+  const batchFirst = project("batch-first");
+  run(["sync", "--projects", `${batchFirst},${guarded}`, "--json"], root, 1);
+  assert.deepEqual(fs.readdirSync(batchFirst), []);
+  const noWriteBackup = path.join(tmp, "dry-backup");
+  run(["init", "--replace-managed", "--backup-dir", noWriteBackup, "--dry-run", "--json"], guarded);
+  assert.ok(!fs.existsSync(noWriteBackup));
+  const done = JSON.parse(run(["sync", "--projects", `${batchFirst},${guarded}`, "--replace-managed", "--backup-dir", path.join(tmp, "backups"), "--json"]));
+  const protectedFiles = JSON.parse(read(done.results[1].backup, "backup.json"));
+  assert.equal(protectedFiles.files.length, 4);
+  for (const entry of protectedFiles.files) assert.equal(read(done.results[1].backup, entry.backup_path), custom[entry.path]);
+  assert.equal(read(guarded, "docs/PROJECT.md"), ownedProject);
+  assert.equal(status(guarded).ok, true);
+  assert.equal(status(batchFirst).ok, true);
+
+  // Existing unowned guidance needs review, including when a project document already exists.
+  const unowned = project("unowned");
+  write(unowned, "AGENTS.md", "owner-authored instructions\n");
+  write(unowned, "docs/PROJECT.md", "existing project\n");
+  write(unowned, "docs/ENVIRONMENT.md", "owner-authored endpoint\n");
+  run(["init"], unowned, 1);
+  assert.equal(read(unowned, "AGENTS.md"), "owner-authored instructions\n");
+  assert.ok(!present(unowned, manifestPath));
+
+  // Symlinked extra content cannot be read, copied, or deleted as part of replacement.
+  const nestedLink = project("nested-link");
+  run(["init"], nestedLink);
+  fs.symlinkSync(path.join(tmp, "backups"), path.join(nestedLink, skillPath, "external"));
+  run(["init", "--replace-managed", "--backup-dir", path.join(tmp, "backups")], nestedLink, 1);
+  assert.ok(fs.lstatSync(path.join(nestedLink, skillPath, "external")).isSymbolicLink());
 
   // Exact legacy files retire, with policy archived; legacy context migrates intact.
   const b = project("legacy");
@@ -178,7 +245,7 @@ try {
   assert.equal(ownStatus.mode, "source");
   assert.equal(ownStatus.ok, true);
   run(["--help"]);
-  console.log("CLI regressions passed: install, preservation, freshness, legacy migration, unsafe paths, source discovery");
+  console.log("CLI regressions passed: install, conflict preflight, private backups, batch protection, dry-run, preservation, freshness, legacy migration, unsafe paths, source discovery");
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }

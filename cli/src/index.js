@@ -46,17 +46,124 @@ function copyTree(source, target) {
 
 function parseArgs(argv) {
   const [,, rawCommand, ...rest] = argv;
-  const args = { command: (!rawCommand || rawCommand === "-h" || rawCommand === "--help") ? "help" : rawCommand, dest: null, projects: [], json: false };
+  const args = { command: (!rawCommand || rawCommand === "-h" || rawCommand === "--help") ? "help" : rawCommand, dest: null, projects: [], json: false, dryRun: false, replaceManaged: false, backupDir: null };
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index];
     if (value === "--dest") args.dest = rest[++index] || fail("--dest requires a path");
     else if (value === "--projects") args.projects.push(...(rest[++index] || fail("--projects requires paths")).split(",").filter(Boolean));
     else if (value === "--json") args.json = true;
+    else if (value === "--dry-run") args.dryRun = true;
+    else if (value === "--replace-managed") args.replaceManaged = true;
+    else if (value === "--backup-dir") args.backupDir = rest[++index] || fail("--backup-dir requires a private external directory");
     else if (value === "-h" || value === "--help") args.command = "help";
     else if (value.startsWith("--")) fail(`unknown argument: ${value}`);
     else args.projects.push(value);
   }
   return args;
+}
+
+function installSnapshot(root) {
+  const skill = managedTarget(root, ".agents/skills/auto-coding-skill");
+  const previous = readManifest(root);
+  const paths = new Set(["AGENTS.md", "docs/ENVIRONMENT.md", "docs/PROJECT.md", ".agents/managed-install.json"]);
+  if (skill && exists(skill)) {
+    if (!fs.statSync(skill).isDirectory()) fail("installed skill path is not a directory");
+    for (const file of listFiles(skill)) paths.add(`.agents/skills/auto-coding-skill/${file}`);
+  }
+  for (const entry of [...(Array.isArray(previous?.entries) ? previous.entries : []), ...(Array.isArray(previous?.legacy_entries) ? previous.legacy_entries : [])]) {
+    if (legacyManagedPath(entry?.path)) paths.add(entry.path);
+  }
+  return [...paths].sort().map(relative => {
+    const file = managedTarget(root, relative);
+    if (!file) fail(`unsafe install path: ${relative}`);
+    if (!exists(file)) return { path: relative, sha256: null };
+    if (!fs.statSync(file).isFile()) fail(`expected a regular file: ${relative}`);
+    return { path: relative, sha256: sha256(file) };
+  });
+}
+
+function installationPlan(project) {
+  const root = fs.realpathSync(path.resolve(project));
+  if (sourceRepository(root)) fail("this is the skill source repository; use npm run sync-assets and npm run release:check, not init/sync");
+  for (const relative of [".agents/skills/auto-coding-skill", ".agents/managed-install.json", "AGENTS.md", ...bootstrapDocs.map(([, target]) => target)]) {
+    if (!managedTarget(root, relative)) fail(`unsafe install path (symlink or invalid path): ${relative}`);
+  }
+  const snapshot = installSnapshot(root);
+  const expected = new Map(expectedEntries().map(entry => [entry.path, entry.sha256]));
+  const previous = readManifest(root);
+  const recorded = new Map();
+  for (const entry of Array.isArray(previous?.entries) ? previous.entries : []) {
+    if (!safeRelativePath(entry?.path) || !/^[a-f0-9]{64}$/.test(entry?.sha256)) continue;
+    recorded.set(entry.path, recorded.has(entry.path) ? null : entry.sha256);
+  }
+  const conflicts = [];
+  for (const entry of snapshot) {
+    if (!entry.sha256 || !(entry.path.startsWith(".agents/skills/auto-coding-skill/") || ["AGENTS.md", "docs/ENVIRONMENT.md"].includes(entry.path))) continue;
+    if (entry.sha256 === expected.get(entry.path) || entry.sha256 === recorded.get(entry.path)) continue;
+    // The existing legacy migration copies this complete document into a new PROJECT.md.
+    if (entry.path === "docs/ENVIRONMENT.md" && !isManaged(previous, entry.path) && !exists(path.join(root, "docs/PROJECT.md"))) continue;
+    conflicts.push({ path: entry.path, sha256: entry.sha256, reason: recorded.has(entry.path) ? "modified managed file" : "unowned file would be replaced" });
+  }
+  const current = new Map(snapshot.map(entry => [entry.path, entry.sha256]));
+  const changes = [...expected].filter(([relative, digest]) => current.get(relative) !== digest)
+    .map(([relative]) => ({ path: relative, action: current.get(relative) ? "refresh" : "install" }));
+  for (const entry of snapshot) if (entry.sha256 && entry.path.startsWith(".agents/skills/auto-coding-skill/") && !expected.has(entry.path)) changes.push({ path: entry.path, action: "retire" });
+  return { project: root, conflicts, changes, snapshot };
+}
+
+function assertUnchanged(plan) {
+  if (JSON.stringify(installSnapshot(plan.project)) !== JSON.stringify(plan.snapshot)) fail(`project changed during upgrade preparation; nothing further was refreshed: ${plan.project}`);
+}
+
+function backupConflicts(plans, directory) {
+  const requested = path.resolve(directory);
+  // Resolve even a not-yet-created suffix, so a symlinked parent cannot point into a project.
+  let ancestor = requested;
+  const suffix = [];
+  while (!exists(ancestor)) { suffix.unshift(path.basename(ancestor)); ancestor = path.dirname(ancestor); }
+  const resolved = path.join(fs.realpathSync(ancestor), ...suffix);
+  for (const plan of plans) {
+    const relative = path.relative(plan.project, resolved);
+    if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) fail("backup directory must be outside every target project");
+  }
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const backup = fs.mkdtempSync(path.join(resolved, "autocoding-managed-"));
+  fs.chmodSync(backup, 0o700);
+  const records = [];
+  for (const plan of plans) {
+    assertUnchanged(plan);
+    const key = `${path.basename(plan.project)}-${crypto.createHash("sha256").update(plan.project).digest("hex").slice(0, 12)}`;
+    for (const conflict of plan.conflicts) {
+      const target = path.join(backup, key, conflict.path);
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, fs.readFileSync(path.join(plan.project, conflict.path)), { flag: "wx", mode: 0o600 });
+      if (sha256(target) !== conflict.sha256) fail("managed file changed while backing up; no replacement was started");
+      records.push({ project: plan.project, ...conflict, backup_path: path.relative(backup, target) });
+    }
+  }
+  fs.writeFileSync(path.join(backup, "backup.json"), `${JSON.stringify({ version: pkg.version, files: records }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  return backup;
+}
+
+function installProjects(projects, args) {
+  if (args.replaceManaged && !args.backupDir) fail("--replace-managed requires --backup-dir outside the target projects; review and migrate project facts first");
+  if (args.backupDir && !args.replaceManaged) fail("--backup-dir requires --replace-managed");
+  const plans = [...new Set(projects.map(project => fs.realpathSync(path.resolve(project))))].map(installationPlan);
+  const conflicts = plans.some(plan => plan.conflicts.length > 0);
+  const preview = { version: pkg.version, dry_run: args.dryRun, can_apply: !conflicts || args.replaceManaged, results: plans.map(({ snapshot, ...plan }) => plan) };
+  if (args.dryRun || (conflicts && !args.replaceManaged)) {
+    toJson(preview, args.json);
+    if (conflicts && !args.replaceManaged) {
+      console.error("[autocoding] No files changed. Review the listed files, migrate useful facts to PROJECT.md/topic docs, then use --replace-managed --backup-dir <private-external-directory> if replacement is intended. No file contents or credentials are printed.");
+      process.exitCode = 1;
+    }
+    return;
+  }
+  const backup = conflicts ? backupConflicts(plans, args.backupDir) : null;
+  // Preflight the whole batch before the first installation, not one project at a time.
+  for (const plan of plans) assertUnchanged(plan);
+  const results = plans.map(plan => { assertUnchanged(plan); return { ...init(plan.project), backup }; });
+  toJson(args.command === "init" ? results[0] : { version: pkg.version, results }, args.json);
 }
 
 function readManifest(project) {
@@ -301,15 +408,15 @@ function status(project) {
 }
 
 function help() {
-  console.log(`auto-coding-skill ${pkg.version}\n\nCommands:\n  autocoding init [--dest PATH]\n  autocoding sync [--projects PATH[,PATH...]]\n  autocoding status [--projects PATH[,PATH...]] [--json]\n\nThese commands only install, preserve, and report documentation. They do not run or require Gates, reviews, tests, tasks, worktrees, or deployment checks.`);
+  console.log(`auto-coding-skill ${pkg.version}\n\nCommands:\n  autocoding init [--dest PATH] [--dry-run] [--json]\n  autocoding sync [--projects PATH[,PATH...]] [--dry-run] [--json]\n  autocoding status [--projects PATH[,PATH...]] [--json]\n\nChanged or unowned managed files block replacement. After reviewing and migrating project facts, use --replace-managed --backup-dir <private-external-directory> for a verified backup before explicit replacement. Dry-run never writes files.\n\nThese commands only install, preserve, and report documentation. They do not run project tests, Gates, worktrees, builds, or deployments. The installed guidance describes task-owned codex branches and worktrees; the installer does not create them.`);
 }
 
 const args = parseArgs(process.argv);
 if (args.command === "help") help();
-else if (args.command === "init") toJson(init(args.dest || process.cwd(), args), args.json);
+else if (args.command === "init") installProjects([args.dest || process.cwd()], args);
 else if (args.command === "sync") {
   const projects = args.projects.length ? args.projects : [process.cwd()];
-  toJson({ version: pkg.version, results: projects.map(project => init(project, args)) }, args.json);
+  installProjects(projects, args);
 } else if (args.command === "status") {
   const projects = args.projects.length ? args.projects : [process.cwd()];
   const results = projects.map(status);

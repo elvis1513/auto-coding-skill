@@ -6,7 +6,10 @@ small documentation layout. It is not a workflow engine.
 The guidance preserves task authorization, scales verification to risk, and
 defines completion by the user's requested outcome. It leaves model choice,
 reasoning effort, and execution strategy to the user and runtime; it ships no
-fixed agent profiles or mandatory task protocol.
+fixed agent profiles or Gate runtime. Repository changes use task-owned
+`codex/*` branches and independent worktrees, with verified integration into
+`dev`; read-only questions do not need a branch. Development stays parallel,
+while integration resolves conflicts against current `dev` without force pushes.
 
 ## Install
 
@@ -46,6 +49,7 @@ review, test, or commit.
 
 ```bash
 autocoding init
+autocoding init --dry-run --json
 autocoding sync --projects /path/project-a,/path/project-b
 autocoding status --projects . --json
 ```
@@ -60,6 +64,26 @@ installed skill files and recognizable legacy workflow files. `ok` is true only
 when both checks pass and no leftovers need review; otherwise status exits with
 code 1. This is a local comparison, not an npm registry update check or an
 engineering gate. Project-owned document contents are not inspected for drift.
+
+`init`/`sync` preflight every requested project before refreshing any of them.
+Modified or unowned files in the managed skill tree, `AGENTS.md`, or
+`docs/ENVIRONMENT.md` block replacement; their contents are not printed.
+`--dry-run --json` previews affected paths and conflicts without writing files.
+Review the differences and migrate useful project facts into `PROJECT.md` or
+topic documents first. If replacement is then intended, explicitly request it:
+
+```bash
+autocoding init --replace-managed --backup-dir /private/external/skill-backups
+```
+
+The backup directory must be outside all target projects, including through
+symlinks. Each replacement creates a new private backup directory (0700), copies
+the conflicting files with mode 0600, verifies their hashes, and records their
+source paths. It does not overwrite an earlier backup. A dry-run does not create
+backups. Review backups as potentially credential-bearing data; never commit them.
+The override does not merge project instructions automatically or authorize
+discarding them. Whole-batch preflight prevents known conflicts from producing a
+partial upgrade; it is not a filesystem transaction for failures such as disk loss.
 
 During upgrades, unchanged manifest-owned legacy files can be retired; the old
 `docs/ENGINEERING.md` policy is archived first. Modified legacy files outside the
@@ -78,6 +102,11 @@ overwrite its own development instructions. Here, `status` reports source
 discovery, packaged asset alignment, and legacy leftovers instead of expecting a
 project install manifest.
 
+Keep project constraints and validation entry points near the top of
+`PROJECT.md`; read them before writing files or operating environments, including
+when another skill suggests a default output path. Link to relevant existing
+topic docs for historical detail. Shared managed files are not project overrides.
+
 ```bash
 npm run sync-assets
 npm run release:check
@@ -88,3 +117,10 @@ intended models: a read-only diagnosis, a focused fix, an already-authorized
 delivery, and a blocked external job. Compare scope adherence, verification,
 completion evidence, and unnecessary questions or repeated work. These are
 evaluation scenarios, not required steps for every consuming project task.
+
+Include regressions for artifact paths, managed-file ownership, preservation
+during upgrades, concurrent worktrees with conflicting changes, and a completed
+application delivery followed by an unrelated documentation build. The last case
+must not add an unrequested CI wait or background monitor. For parallel work,
+exercise a rejected stale push, conflict reconciliation, verification of both
+changes, and non-force integration; do not merely test instruction wording.

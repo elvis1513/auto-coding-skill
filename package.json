@@ -1,6 +1,6 @@
 {
   "name": "@elvis1513/auto-coding-skill",
-  "version": "5.1.0",
+  "version": "5.2.0",
   "description": "Lightweight engineering guidance and a managed installer that preserves project-owned documentation.",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "cli/src",
     "cli/assets/skill",
     "cli/assets/managed-install.json",
+    "src/git-workflow/*.py",
     "README.md",
     "LICENSE"
   ],
@@ -21,7 +22,8 @@
     "test:src": "node -e \"const fs=require('fs'); for (const file of ['src/auto-coding-skill/SKILL.md','src/auto-coding-skill/data/templates/ENVIRONMENT.md','src/auto-coding-skill/data/templates/PROJECT.md','src/auto-coding-skill/data/templates/architecture/.gitkeep','src/auto-coding-skill/data/templates/product/.gitkeep','src/auto-coding-skill/data/templates/bridges/AGENTS.md']) if (!fs.existsSync(file)) throw new Error('missing '+file); console.log('source-doc-assets-ok')\"",
     "check:assets": "node cli/src/sync-assets.js --check",
     "sync-assets": "node cli/src/sync-assets.js",
-    "release:check": "npm run check:assets && npm run test:src && npm run test && npm run check:package"
+    "test:guard": "python3 -B src/git-workflow/test_guard.py -q",
+    "release:check": "npm run check:assets && npm run test:src && npm run test && npm run test:guard && npm run check:package"
   },
   "license": "MIT",
   "publishConfig": {

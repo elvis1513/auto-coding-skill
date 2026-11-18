@@ -30,8 +30,9 @@ const files = payload?.[0]?.files?.map(item => String(item.path || "")) || [];
 const forbidden = files.filter(file =>
   /(^|\/)__pycache__(\/|$)/.test(file) || /\.py[cod]$/i.test(file),
 );
-if (!files.includes("cli/assets/managed-install.json")) {
-  process.stderr.write("Managed install manifest is missing from the package\n");
+if (["cli/assets/managed-install.json", "cli/src/diagnostics.js", "src/git-workflow/guard.py",
+     "src/git-workflow/test_guard.py"].some(file => !files.includes(file))) {
+  process.stderr.write("A required manifest, diagnostic or optional Git guard asset is missing\n");
   process.exit(1);
 }
 if (forbidden.length > 0) {

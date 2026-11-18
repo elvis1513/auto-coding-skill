@@ -51,6 +51,37 @@ try {
   assert.ok(!present(a, `${skillPath}/scripts/ap.py`));
   assert.ok(!present(a, ".agents/agents"), "must not install fixed agent profiles");
   assert.deepEqual([status(a).integrity, status(a).current, status(a).version], [true, true, version]);
+  fs.unlinkSync(path.join(a, "docs/design/.gitkeep"));
+  fs.rmdirSync(path.join(a, "docs/design"));
+  run(["init"], a);
+  assert.ok(!present(a, "docs/design"), "upgrades must not recreate retired project-owned scaffolding");
+
+  // Doctor distinguishes informational project overlays from managed integrity.
+  // A primary checkout or a clone that never opted in is not a failed install.
+  const audit = project("diagnostics");
+  run(["init"], audit);
+  write(audit, ".agents/agents/custom.toml", 'model = "project-choice"\nmodel_reasoning_effort = "custom"\n');
+  const entry = "synthetic-sensitive-text";
+  write(audit, "docs/PROJECT.md", entry);
+  const auditBefore = read(audit, manifestPath);
+  const report = run(["doctor", "--projects", audit, "--json"]);
+  assert.ok(!report.includes(entry) && !report.includes("project-choice"));
+  const findings = JSON.parse(report).results[0];
+  assert.equal(findings.guard.status, "not-configured");
+  assert.deepEqual([findings.ok, findings.managed.current, findings.context.legacy_profiles[0].pins_model], [true, true, true]);
+  assert.equal(read(audit, manifestPath), auditBefore);
+  assert.equal(read(audit, "docs/PROJECT.md"), entry);
+  fs.appendFileSync(path.join(audit, "AGENTS.md"), "\nlocal rule\n");
+  const drift = JSON.parse(run(["doctor", "--projects", audit, "--json"], root, 1)).results[0];
+  assert.equal(drift.context.outside_managed_bridge, true);
+  assert.equal(drift.managed.integrity, false);
+  run(["guard-sync", "--dest", audit], root, 1);
+  assert.ok(!present(audit, "config/git-workflow"));
+  write(audit, "config/git-workflow/guard.py", "downstream changes\n");
+  write(audit, "config/git-workflow/test_guard.py", "downstream tests\n");
+  run(["guard-sync", "--dest", audit, "--dry-run"], root, 1);
+  run(["guard-sync", "--dest", audit], root, 1);
+  assert.equal(read(audit, "config/git-workflow/guard.py"), "downstream changes\n");
 
   // Project-owned content is byte-for-byte preserved, even under legacy headings.
   const projectText = "# Project\n\n## Migrated access configuration\n```yaml\naccess:\n  password: synthetic-value\n```\n\nProject-owned text.\n";

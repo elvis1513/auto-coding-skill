@@ -52,6 +52,7 @@ autocoding init
 autocoding init --dry-run --json
 autocoding sync --projects /path/project-a,/path/project-b
 autocoding status --projects . --json
+autocoding doctor --projects . --json
 ```
 
 These commands only install, preserve, and report documentation. They never run
@@ -64,6 +65,21 @@ installed skill files and recognizable legacy workflow files. `ok` is true only
 when both checks pass and no leftovers need review; otherwise status exits with
 code 1. This is a local comparison, not an npm registry update check or an
 engineering gate. Project-owned document contents are not inspected for drift.
+
+`doctor` separates managed integrity, project-owned context/legacy profiles,
+the selected worktree, and clone-local Git guard health. A primary checkout is
+normal for inspection, not a failed check. Profiles are reported by path and pin
+presence, not loaded, removed or printed. No project script is executed.
+
+For clones **already opted into** the optional Git guard, its single source and
+hermetic tests are in `src/git-workflow/` in this package. In a task-owned
+linked worktree use `autocoding guard-sync --dry-run` and then
+`autocoding guard-sync` to refresh a recognized source/test pair under
+`config/git-workflow/`. Unknown downstream changes are never overwritten.
+After verification, `python3 config/git-workflow/guard.py install` explicitly
+updates that clone's hooks and preserves its baseline, receipts and prior hook
+chain. New clones do not inherit local activation. Neither init/sync nor doctor
+installs a hook; no Jenkins, repository protection or publishing settings change.
 
 `init`/`sync` preflight every requested project before refreshing any of them.
 Modified or unowned files in the managed skill tree, `AGENTS.md`, or

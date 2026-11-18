@@ -1,61 +1,39 @@
 # Parallel repository development
 
-Use this reference for repository-changing work, not read-only diagnosis. The
-user may explicitly change the branch policy; do not infer an exception merely
-because an edit is small. This is isolation for concurrent conversations, not a
-task-ledger, fixed-review, or model-selection protocol.
+## Choose the task workspace
 
-## Own a branch and a worktree
+Check the current branch and `git worktree list`. Reuse the worktree that
+belongs to this task if it is linked and on its own `codex/<task>` branch. If
+the host supplied a new **task-owned, clean, detached** linked worktree, confirm
+its base and attach a unique task branch there; no second worktree is needed.
+If starting in the primary checkout, create a separate linked worktree from
+current `dev` (normally fetched `origin/dev`). If the base cannot be refreshed,
+say which revision was used. Never repurpose a dirty or unowned workspace.
+Run edits and tests in the selected worktree. Devices, databases, ports and
+deployments are still shared; worktree isolation does not grant access to them.
 
-- Inspect the repository instructions, status, remotes, and existing worktrees.
-  Fetch the integration branch when available; start a unique `codex/<task>`
-  branch from current `dev`. Report an unavailable remote rather than pretending
-  an old base is current.
-- Give the task an independent worktree. A different branch in the same directory
-  does not isolate files. Prefer the host's managed worktree tools when available;
-  otherwise use the project's approved worktree location. Keep temporary output
-  under that worktree's approved `.local/<task>/` location.
-- Reuse the same task-owned branch/worktree for its follow-ups. Do not adopt,
-  reset, stash, switch, or remove another conversation's workspace. Existing
-  uncommitted work is not automatically part of the new request.
-- Run edits, builds, formatters, and tests against the task worktree explicitly.
-  Do not apply a patch to the shared checkout accidentally. Shared output paths,
-  databases, devices, and deployments remain shared even with separate worktrees;
-  respect their own authorization and coordination boundaries.
+## Integrate and finish
 
-## Integrate into dev
+Reconcile current `dev` in the task branch. Resolve textual and behavioral
+conflicts there, preserve both changes and recheck the affected behavior.
+Ask only if product intent cannot be reconciled from the evidence. Serialize
+final integration using the project's existing queue or a non-forced fast-forward.
+If `dev` moves, reconcile and verify again; do not overwrite it.
 
-- Commit only the task's verified changes. Fetch current `dev` again before
-  integration. Merge it into the task branch, or rebase only task-owned history
-  when doing so will not rewrite another participant's work.
-- Resolve both textual and semantic conflicts in the task worktree. Read the
-  surrounding code, contracts, and tests; preserve both tasks' valid behavior.
-  Do not use blanket `ours`/`theirs`, reset, or force pushes as conflict resolution.
-  Re-run the checks affected by the combination, not merely the old task checks.
-- Resolve implementation conflicts directly when evidence is sufficient. If
-  product requirements genuinely contradict and the intended result is unknown,
-  preserve both versions and ask for that decision.
-- Serialize the final integration attempt. Where available, use the repository's
-  existing merge queue or integration lock. A non-force Git push is the final
-  concurrency guard, not proof that a stale candidate is safe to combine.
-- If no PR/merge queue is required and pushing is authorized, a verified task
-  branch containing the latest remote `dev` may be fast-forwarded to remote
-  `dev` from its own worktree (`git push origin HEAD:refs/heads/dev`). This avoids
-  editing or switching the shared checkout. If rejected because `dev` moved,
-  fetch, reconcile, verify the changed combination, and retry without force.
-- Update a local `dev` checkout only when it is clean and not in use by another
-  task; otherwise leave it untouched and report that remote integration succeeded
-  while the shared checkout still needs a safe fast-forward. Never discard local
-  changes to synchronize it.
+For **local-only** delivery, fast-forward the local `dev` checkout only if
+clean and unused. For authorized remote delivery without a required MR/queue,
+`git push origin HEAD:refs/heads/dev` from the task worktree avoids switching
+the shared checkout. Respect existing hooks and pipeline triggers. If a shared
+checkout is busy, leave it intact and report which ref contains the result.
 
-## Finish without losing work
+Retire only this task's clean worktree/branch, after its commits are integrated,
+needed artifacts preserved, and no chat still needs it. Never bulk-delete task branches.
 
-Verify that the intended integration target contains the task commit. Distinguish
-branch completion, dev integration, push, CI, deployment, and user/device
-acceptance. Follow only the completion boundaries the user actually requested;
-do not add unrelated CI waits or automatically start monitoring.
+## Clones with the optional Git guard
 
-Remove/archive a task worktree or delete its branch only after its commits are
-integrated, needed artifacts are preserved, it is clean, and no active task uses
-it. Prefer recoverable worktree archival. Never bulk-delete `codex/*`: another
-conversation may still be developing there.
+`python3 config/git-workflow/guard.py status` checks the local hook chain.
+Explicit `install` on an opted-in clone preserves existing hooks and task
+receipts across linked worktrees; it does not install on CI or prevent editor
+writes. Authorized `uninstall` restores the previous hook setting and retains
+recovery data. To test the guard itself, run `python3 -B config/git-workflow/test_guard.py`
+in an isolated development workspace, not as an application delivery check.

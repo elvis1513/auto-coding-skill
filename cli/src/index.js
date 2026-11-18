@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { diagnostics } from "./diagnostics.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const assetsRoot = path.join(packageRoot, "cli", "assets");
@@ -276,6 +277,10 @@ function init(project) {
   for (const relative of [".agents/skills/auto-coding-skill", ".agents/managed-install.json", "AGENTS.md", ...bootstrapDocs.map(([, target]) => target)]) {
     if (!managedTarget(root, relative)) fail(`unsafe install path (symlink or invalid path): ${relative}`);
   }
+  // Topic scaffolding is bootstrap-only. A project may deliberately remove a
+  // placeholder or an entire empty topic; upgrades must honor that choice.
+  const established = Array.isArray(readManifest(root)?.project_documents)
+    && exists(path.join(root, "docs/PROJECT.md"));
   const { retired, retained } = retireExactLegacyFiles(root);
   const installedSkill = path.join(root, ".agents", "skills", "auto-coding-skill");
   fs.rmSync(installedSkill, { recursive: true, force: true });
@@ -288,6 +293,7 @@ function init(project) {
     copyFile(source, path.join(root, targetRelative));
   }
   for (const [assetRelative, targetRelative] of projectDocs) {
+    if (established && targetRelative.endsWith("/.gitkeep")) continue;
     const source = path.join(assetSkill, "data", "templates", assetRelative);
     const target = path.join(root, targetRelative);
     if (!exists(target)) {
@@ -399,27 +405,45 @@ function status(project) {
     ? listFiles(skill).map(file => `.agents/skills/auto-coding-skill/${file}`).filter(file => !expectedPaths.has(file)) : [];
   currentErrors.push(...extra.map(file => `unexpected installed skill file: ${file}`));
   const legacy = legacyFiles(root, manifest);
+  const assetsCurrent = currentErrors.length === 0;
   currentErrors.push(...legacy.map(file => `legacy workflow file requires review: ${file}`));
   const errors = [...integrityErrors, ...currentErrors];
   const documents = Object.fromEntries(bootstrapDocs.map(([, target]) => [target, exists(path.join(root, target))]));
   return { project: root, version: manifest?.skill_version || "", expected_version: pkg.version,
-    integrity: integrityErrors.length === 0, current: currentErrors.length === 0, ok: errors.length === 0,
+    integrity: integrityErrors.length === 0, assets_current: assetsCurrent, current: currentErrors.length === 0, ok: errors.length === 0,
     errors, legacy_files: legacy, unexpected_files: extra, documents };
 }
 
 function help() {
-  console.log(`auto-coding-skill ${pkg.version}\n\nCommands:\n  autocoding init [--dest PATH] [--dry-run] [--json]\n  autocoding sync [--projects PATH[,PATH...]] [--dry-run] [--json]\n  autocoding status [--projects PATH[,PATH...]] [--json]\n\nChanged or unowned managed files block replacement. After reviewing and migrating project facts, use --replace-managed --backup-dir <private-external-directory> for a verified backup before explicit replacement. Dry-run never writes files.\n\nThese commands only install, preserve, and report documentation. They do not run project tests, Gates, worktrees, builds, or deployments. The installed guidance describes task-owned codex branches and worktrees; the installer does not create them.`);
+  console.log(`auto-coding-skill ${pkg.version}
+
+  autocoding init [--dest PATH] [--dry-run] [--json]
+  autocoding sync [--projects PATH[,PATH...]] [--dry-run] [--json]
+  autocoding status [--projects PATH[,PATH...]] [--json]
+  autocoding doctor [--projects PATH[,PATH...]] [--json]
+  autocoding guard-sync [--dest PATH] [--dry-run] [--json]
+
+Changed or unowned managed files block replacement. Migrate project facts first,
+then use --replace-managed --backup-dir <private-external-directory> if intended.
+Doctor is read-only. Guard-sync only refreshes recognized Git guard source pairs;
+it never opts a clone in, changes hooks, starts CI or deploys.`);
 }
 
 const args = parseArgs(process.argv);
+const local = diagnostics({ packageRoot, managedTarget, sha256 });
 if (args.command === "help") help();
 else if (args.command === "init") installProjects([args.dest || process.cwd()], args);
 else if (args.command === "sync") {
   const projects = args.projects.length ? args.projects : [process.cwd()];
   installProjects(projects, args);
-} else if (args.command === "status") {
-  const projects = args.projects.length ? args.projects : [process.cwd()];
-  const results = projects.map(status);
+} else if (args.command === "status" || args.command === "doctor") {
+  const projects = args.projects.length ? args.projects : [args.dest || process.cwd()];
+  const results = projects.map(p => args.command === "doctor" ? local.doctor(status(p)) : status(p));
   toJson({ version: pkg.version, results }, args.json);
   if (results.some(result => !result.ok)) process.exitCode = 1;
+} else if (args.command === "guard-sync") {
+  if (args.projects.length || args.replaceManaged || args.backupDir) fail("guard-sync accepts --dest PATH, --dry-run and --json only");
+  const result = local.guardSync(fs.realpathSync(args.dest || process.cwd()), args.dryRun);
+  toJson(result, args.json);
+  if (!result.ok) process.exitCode = 1;
 } else fail(`unknown command: ${args.command}`);
